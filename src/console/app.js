@@ -1069,6 +1069,45 @@ export function createApp({
     }
   }
 
+  // 转发占位符判定（入站展开与"被引用时展开"共用一套口径，别各写一份标记清单）。
+  // 注意顺序：展开后的正文是 `[合并转发 共N条]…`，它也以 `[合并转发` 开头 ——
+  // 先认"已展开"再认占位符，否则已经展开过的会被当成占位符反复去请求。
+  const FORWARD_EXPANDED_PREFIX = '[合并转发 共';
+  function isExpandedForwardText(text) {
+    return String(text || '').startsWith(FORWARD_EXPANDED_PREFIX);
+  }
+  function looksLikeForwardText(text) {
+    const value = String(text || '');
+    return value.includes('[合并转发') || value.includes('[转发消息') || value.includes('[卡片聊天记录');
+  }
+
+  // 展开**存档里**某条转发卡片并就地升级它（被 @ 引用时按需调用）。
+  // 与 read_forward 工具同一条路：updateByMid 写回正文 + 追加图片，所以
+  // 一次展开永久受益（模型、存档页、金句墙都读到展开后的文本）。
+  // 取不到就只记一行日志：占位符留着，模型仍可用 read_forward 自己重试。
+  async function expandStoredForward(chatKey, mid) {
+    if (mid == null) return;
+    const entry = store.findByMid(chatKey, mid);
+    // 不在存档里（补课没覆盖到／已过保留期）：没有可升级的行，交给模型用工具现取
+    if (!entry) return;
+    if (isExpandedForwardText(entry.text)) return;        // 之前展开过 → 不再请求
+    if (!looksLikeForwardText(entry.text)) return;        // 引用的是普通消息 → 不是转发，别白跑一次
+    try {
+      const nodes = await readForwardMessages(onebot, entry.mid);
+      const ex = await expandForwardNodes(nodes, {
+        fetchNested: (rid) => readForwardNodesById(onebot, rid)
+      });
+      if (!ex?.text) {
+        log(`[ingest] 被引用的转发取回为空（保留占位符）: #${entry.mid}`);
+        return;
+      }
+      store.updateByMid(chatKey, entry.mid, { text: ex.text, appendMedia: ex.media || [] });
+      log(`[ingest] 被引用的转发已展开并写回存档: #${entry.mid}（${nodes?.length ?? 0} 条）`);
+    } catch (e) {
+      log(`[ingest] 被引用的转发展开失败（保留占位符）: ${e?.message ?? e}`);
+    }
+  }
+
   async function ingestMessage(kind, id, event, arrivedInactive = false) {
     const cfgNow = getConfig();
     if (!allowed(kind, id, cfgNow)) return; // 白名单外的聊天完全不记录
@@ -1128,9 +1167,17 @@ export function createApp({
     // 卡片（json 段里的 multimsg）也走同一条路：先从卡片里取资源 id，取不到就只剩摘要
     //（那是协议端给不给的问题，不是深度问题）。
     const forwardResId = Array.isArray(segments) ? segments.map(forwardResIdFromSegment).find(Boolean) : null;
-    const looksForward = Boolean(forwardResId)
-      || text.includes('[合并转发') || text.includes('[转发消息') || text.includes('[卡片聊天记录');
-    if (segments && looksForward && event.message_id != null) {
+    const looksForward = Boolean(forwardResId) || looksLikeForwardText(text);
+    // 「被点名」= 群里 @ 了机器人，或私聊（私聊每条本来都是在跟它说话）。
+    // forward.expandOnMention 的两条路径共用它：卡片是这条消息本身、或是它引用的那条。
+    const addressed = mentionsSelf || kind === 'private';
+    const expandOnMention = cfgNow.forward?.expandOnMention !== false;
+    // 入站一律展开可关（forward.autoExpand，默认关；理由见 config-legacy.js 的 forward 段）：
+    // 关掉时走的就是上面那条"展开失败"的既有路径 —— 占位符留在存档里，模型按需用
+    // read_forward 展开，而不是把每张卡片的全文塞进之后每一次唤醒。
+    // 默认关之下还会就地展开的只剩一种：有人 @ 着把卡片发过来（expandOnMention）。
+    const expandThisMessage = cfgNow.forward?.autoExpand === true || (addressed && expandOnMention);
+    if (segments && looksForward && event.message_id != null && expandThisMessage) {
       const isCard = !text.includes('[合并转发') && !text.includes('[转发消息');
       try {
         const nodes = await readForwardMessages(onebot, event.message_id, segments);
@@ -1147,6 +1194,16 @@ export function createApp({
         if (isCard) log(`[ingest] 聊天记录卡片展开失败（resid ${forwardResId ? '有' : '无'}）: ${e?.message ?? e}`);
         else log(`[ingest] 展开合并转发失败（保留占位符）: ${e?.message ?? e}`);
       }
+    }
+
+    // @ + 引用一张转发卡片 → 展开**被引用的那条**（forward.expandOnMention）。
+    // 场景：卡片早就刷过去了（入站没展开，存档里还是占位符），现在有人 @ 机器人
+    // 引用它问"这聊的啥"。只有这时才值得花一次请求 —— 量级是"每次有人问一张"，
+    // 不是"群里每张"。升级的是被引用那条存档行，它进【过去状态】时模型直接看到全文。
+    // 故意**不**改当前这条的 reply.text 快照：引用块已经按旧文案写进正文了，
+    // 换掉快照会让 quotePrefixFor 的前缀比对失配、给这行再补一个 [引用…]（见 util.js 的注释）。
+    if (reply && addressed && expandOnMention) {
+      await expandStoredForward(chatKey, reply.messageId);
     }
 
     if (!text && !media.length) return;

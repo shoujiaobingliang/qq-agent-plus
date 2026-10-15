@@ -894,6 +894,13 @@ function renderOnebotSection(c) {
         <div class="hint">断线/重启后补回的消息，超过这个时长的只入库不回复（避免回来就刷屏回一小时前的话）；
         填 0 = 一律只补记录。默认 30 分钟。</div></div>
     </div>
+    <div class="settings-divider"></div>
+    <h3>合并转发自动展开</h3>
+    <div class="hint" style="margin-bottom:10px">控制转发聊天记录卡片的入站自动展开行为。默认都关，占位符留在存档里，模型按需用工具自己展开。</div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-forward-auto" ${c.forward?.autoExpand === true ? 'checked' : ''} />
+      <label for="cfg-forward-auto">一律自动展开（费用警告：单卡 5700 字，接下来每次唤醒都会重新计费；群活跃时约占全天 10-20% 开销）</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-forward-mention" ${c.forward?.expandOnMention !== false ? 'checked' : ''} />
+      <label for="cfg-forward-mention">@ + 卡片 / @ + 引用卡片时展开被点名的那条（默认开；按需付费，量级是"有人问一张"而不是"群里每张"）</label></div>
     <div id="onebot-status-line">${onebotStatusLineHtml()}</div>
     <div class="hint">改完 OneBot 地址、令牌或心跳策略后，执行 <code>manage.sh restart</code> 生效（连接只在启动时建立一次，改完不重启还是旧配置）。</div>
 
