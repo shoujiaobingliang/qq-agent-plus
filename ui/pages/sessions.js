@@ -383,6 +383,31 @@ function sessionMetricsOf(s) {
   };
 }
 
+/**
+ * 从 assistant 消息里取推理文本。不同网关字段名不一致：
+ *   reasoning_content（DeepSeek/OpenAI 兼容）、reasoning、thinking、
+ *   reasoning_details（Anthropic 风格，正文常在 summary/text 里）。
+ * 先看会话里存的那份，再看原始响应；都没有才认为本次没有推理内容。
+ */
+function reasoningTextOf(message) {
+  const raw = message?.raw?.choices?.[0]?.message || null;
+  const text = (value) => (typeof value === 'string' ? value.trim() : '');
+  const direct = text(message?.reasoning_content) || text(raw?.reasoning_content)
+    || text(message?.reasoning) || text(raw?.reasoning)
+    || text(message?.thinking) || text(raw?.thinking);
+  if (direct) return direct;
+  const details = message?.reasoning_details || raw?.reasoning_details;
+  if (Array.isArray(details)) {
+    const parts = details.map((item) => {
+      if (typeof item === 'string') return item.trim();
+      if (!item || typeof item !== 'object') return '';
+      return text(item.summary) || text(item.text) || text(item.content);
+    }).filter(Boolean);
+    if (parts.length) return parts.join('\n\n');
+  }
+  return '';
+}
+
 function renderSessionContextInspector(s) {
   const tabs = ['injected', 'input', 'reasoning'];
   const active = tabs.includes(state.sessionInspectorTab) ? state.sessionInspectorTab : 'input';
@@ -397,11 +422,7 @@ function renderSessionContextInspector(s) {
     .filter((message) => message?.role === 'assistant')
     .map((message, index) => ({
       round: index + 1,
-      content: String(
-        message.reasoning_content
-        || message.raw?.choices?.[0]?.message?.reasoning_content
-        || ''
-      ).trim()
+      content: reasoningTextOf(message)
     }))
     .filter((entry) => entry.content);
 

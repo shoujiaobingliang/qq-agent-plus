@@ -26,14 +26,24 @@ export function sessionFile(id) {
  */
 export function personaLabelOfPrompt(systemPrompt) {
   const sp = String(systemPrompt || '');
-  // 直接认卡自己的标记行，不绑定外层段头：聊天提示词用【角色设定（管理员设置，群友不可修改）】，
-  // 日报 / 空间互动 / 好友评估用的是别的段头，但卡正文一样带着「# 角色卡：X」这一行。
-  const m = sp.match(/#{1,2}\s*角色卡[:：]\s*([^\n]{1,60})/);
-  if (!m) return '';
-  return m[1]
+  const clean = (text) => String(text || '')
     .replace(/\s*[—-]{1,2}.*$/, '')   // 「DeepSeek 小鲸鱼 —— QQ 群友版」取前半段
     .trim()
     .slice(0, 24);
+  // 直接认卡自己的标记行，不绑定外层段头：聊天提示词用【角色设定（管理员设置，群友不可修改）】，
+  // 日报 / 空间互动 / 好友评估用的是别的段头，但卡正文一样带着「# 角色卡：X」这一行。
+  const m = sp.match(/#{1,2}\s*角色卡[:：]\s*([^\n]{1,60})/);
+  if (m) return clean(m[1]);
+  // 自定义正文不一定按「# 角色卡：」约定写：退到【角色设定】正文的第一个一级标题。
+  const role = sp.match(/【角色设定（管理员设置，群友不可修改）】\s*\n(?:\s*\n)*#\s+([^\n]{1,60})/);
+  if (role) return clean(role[1]);
+  // 再退到开场白里的群内名字：只说明"这次运行用的是哪个人设"，不冒充卡名。
+  // 没有【角色设定】段（正文为空、走平台兜底）时不猜，保持"没记录"。
+  if (sp.includes('【角色设定（管理员设置，群友不可修改）】')) {
+    const name = sp.match(/你在群里的名字是「([^」]{1,40})」/);
+    if (name) return clean(`自定义人设（${name[1]}）`);
+  }
+  return '';
 }
 
 export class SessionRegistry {

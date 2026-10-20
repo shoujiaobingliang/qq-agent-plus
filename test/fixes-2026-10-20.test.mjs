@@ -42,3 +42,13 @@ test('存档页有「清空本会话存档」入口：只清指定会话的消�
   assert.ok(chat.includes("`/api/chats/${key.replace(':', '_')}/messages`"),
     '按钮要调用按会话清空接口');
 });
+
+test('会话推理页兼容不同网关的推理字段（不只是 reasoning_content）', () => {
+  // 2026-10-20 实测：部分网关把推理放在 reasoning / reasoning_details 里，
+  // 页面只认 reasoning_content 时会显示"没有"或只剩一小段。
+  const sessions = src('ui/pages/sessions.js');
+  for (const field of ['reasoning_content', 'reasoning', 'reasoning_details', 'thinking']) {
+    assert.ok(sessions.includes(field), `缺少 ${field} 的读取`);
+  }
+  assert.ok(sessions.includes('function reasoningTextOf'), '取值应收敛到一个函数里');
+});

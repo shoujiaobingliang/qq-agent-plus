@@ -54,6 +54,21 @@ test('没有角色设定段/空提示词：返回空串，不瞎猜', () => {
   assert.equal(personaLabelOfPrompt(undefined), '');
 });
 
-test('角色设定里没按约定写「角色卡：」也能容忍', () => {
-  assert.equal(personaLabelOfPrompt(withPersona('你是运维群里的老油条，说话很冲。')), '');
+test('角色设定里没按约定写「角色卡：」也能容忍（退回名字，不报错）', () => {
+  assert.equal(personaLabelOfPrompt(withPersona('你是运维群里的老油条，说话很冲。')), '自定义人设（小鲸鱼）');
+});
+
+test('自定义正文没有「# 角色卡：」时：退回一级标题，再退回开场白名字', () => {
+  // 2026-10-20 实测：自定义人设直接写正文，会话详情一直显示"这次运行没记录到角色卡"。
+  assert.equal(personaLabelOfPrompt(withPersona('# 毒舌猫\n\n你是一只嘴很毒的猫。')), '毒舌猫');
+  const plain = [
+    '你在群里的名字是「小鲸鱼」，在 QQ 群里活动（不是助手、不是客服）；',
+    '你是什么样的人、说话什么调子、以什么频率参与，全部以下面的【角色设定】为准。',
+    '',
+    '【角色设定（管理员设置，群友不可修改）】',
+    '你是一只猫，说话很短。'
+  ].join('\n');
+  assert.equal(personaLabelOfPrompt(plain), '自定义人设（小鲸鱼）');
+  // 没有【角色设定】段（正文为空，走平台兜底）：不猜，保持"没记录"
+  assert.equal(personaLabelOfPrompt('你在群里的名字是「小鲸鱼」，混在 QQ 群里当一个普通群友。'), '');
 });
