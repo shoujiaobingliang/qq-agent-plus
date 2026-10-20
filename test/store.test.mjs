@@ -465,4 +465,24 @@ describe('ChatStore', () => {
     assert.equal(store.hasLeasedRun('group:1'), false);
     assert.equal(store.hasLeasedRun('group:2'), false, '只作用于指定会话');
   });
+
+  it('clearChat 只清指定会话的消息与线程，保留会话行和其它会话', (t) => {
+    // 2026-10-20：换人设后按会话清存档，用于把旧角色的发言从【过去状态】里彻底拿掉。
+    const { store } = fixture(t);
+    append(store, 1);
+    store.appendIncoming('group:2', { mid: 2, text: '别的群', senderId: '43', senderName: 'other' });
+    store.upsertConversationThread('group:1', { topic: '旧话题' });
+    assert.ok(store.getConversationThread('group:1'));
+
+    const cleared = store.clearChat('group:1');
+    assert.equal(cleared.messages, 1);
+    assert.equal(cleared.threads, 1);
+    assert.deepEqual(store.recent('group:1', { limit: 10 }), []);
+    assert.equal(store.unreadCount('group:1'), 0);
+    assert.equal(store.getConversationThread('group:1'), null, '线程与 transcript 一起清掉');
+    assert.ok(store.listChats().includes('group:1'), '会话仍留在存档列表里');
+    assert.equal(store.getChatMeta('group:1').total, 0);
+    assert.deepEqual(store.recent('group:2', { limit: 10 }).map((m) => m.mid), ['2'],
+      '其它会话不受影响');
+  });
 });

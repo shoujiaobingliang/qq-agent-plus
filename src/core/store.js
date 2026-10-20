@@ -821,6 +821,27 @@ export class ChatStore {
     });
   }
 
+  /**
+   * 清空一个会话的存档与运行态：消息、线程 transcript、检查点、运行/出站台账。
+   *
+   * 保留 `chats` 行（会话仍在存档列表里，后续消息照常入库），
+   * **不动**长期印象、备注、配置和其它会话。控制台「清空本会话存档」用它。
+   * 调用方负责先确认该会话没有正在运行的租约（见 hasLeasedRun）。
+   */
+  clearChat(chatKey) {
+    return this.#transaction(() => {
+      const del = (sql) => this.db.prepare(sql).run(chatKey).changes;
+      const threadTurns = del('DELETE FROM thread_turns WHERE chat_key=?');
+      const threadCheckpoints = del('DELETE FROM thread_checkpoints WHERE chat_key=?');
+      const threads = del('DELETE FROM conversation_threads WHERE chat_key=?');
+      const outbox = del('DELETE FROM outbox WHERE chat_key=?');
+      const runs = del('DELETE FROM runs WHERE chat_key=?');
+      const messages = del('DELETE FROM messages WHERE chat_key=?');
+      this.db.prepare('UPDATE chats SET next_id=1 WHERE chat_key=?').run(chatKey);
+      return { messages, threads, threadTurns, threadCheckpoints, outbox, runs };
+    });
+  }
+
   appendThreadTurns(chatKey, threadId, runId, messages = []) {
     if (!Array.isArray(messages) || !messages.length) return { added: 0, chars: 0 };
     return this.#transaction(() => {

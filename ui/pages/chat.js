@@ -601,6 +601,7 @@ function renderChatMessages() {
       <button class="btn btn-small" id="chat-retry-btn">重试失败批次</button>
       <button class="btn btn-small" id="chat-resolve-btn">核对未知写入</button>
       <button class="btn btn-small" id="chat-thread-close-btn" ${meta.thread ? '' : 'disabled'}>结束对话线程</button>
+      <button class="btn btn-small btn-danger" id="chat-clear-btn">清空本会话存档</button>
       <input type="text" id="test-send-text" placeholder="手动发一条测试消息" style="flex:1" />
       <button class="btn btn-small" id="chat-testsend-btn">发送</button>
     </div>
@@ -671,6 +672,34 @@ function renderChatMessages() {
       await loadChats();
     } catch (error) {
       alert(`结束线程失败：${error.message}`);
+    }
+  });
+  $('#chat-clear-btn')?.addEventListener('click', async () => {
+    const button = document.getElementById('chat-clear-btn');
+    const result = document.getElementById('chat-wake-result');
+    if (!await askForConfirmation(
+      `清空「${formatChatTitle(key, chatNameOf(key))}」的存档？\n\n`
+      + '· 删除这个会话的聊天消息、对话线程与检查点\n'
+      + '· 同时清除该会话的交接\n'
+      + '· 不影响其它会话、群友长期印象、备注与配置\n'
+      + '· 删除后不可恢复（建议先备份 data/messages.sqlite）'
+    )) return;
+    button.disabled = true;
+    if (result) result.textContent = '正在清空…';
+    try {
+      const cleared = await api(`/api/chats/${key.replace(':', '_')}/messages`, {
+        method: 'DELETE', body: JSON.stringify({ confirm: true })
+      });
+      if (result) {
+        result.textContent = `已清空：消息 ${cleared.messages || 0} 条、线程 ${cleared.threads || 0} 个，交接已清除`;
+      }
+      await loadChats();
+      await loadChatMessages(key);
+    } catch (error) {
+      if (result) result.textContent = `清空失败：${error.message}`;
+      else alert(`清空失败：${error.message}`);
+    } finally {
+      button.disabled = false;
     }
   });
   $('#chat-testsend-btn').addEventListener('click', async () => {

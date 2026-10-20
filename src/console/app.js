@@ -2229,6 +2229,25 @@ export function createApp({
     emit('chat-update', chatKey);
     return json(res, 200, { ok: true, closed });
   });
+  router.add('DELETE', /^\/api\/chats\/(group|private)_(\d+)\/messages$/, async (req, res, params) => {
+    // 按会话清空存档：只影响这一个群/私聊。用于换人设后把旧角色的发言从上下文里彻底拿掉
+    //（【过去状态】读的就是 messages 表；生命周期 transcript 在 thread 表里）。
+    // 长期印象/备注/配置/其它会话都不动；群友印象仍在「记忆」页单独管理。
+    const chatKey = `${params[1]}:${params[2]}`;
+    const body = await readBody(req).catch(() => ({}));
+    if (body?.confirm !== true) {
+      return json(res, 409, { ok: false, error: '清空会话存档是破坏性操作：请带 confirm=true 再调用' });
+    }
+    if (store.hasLeasedRun(chatKey)) {
+      return json(res, 409, { ok: false, error: '该会话有正在运行的处理，等它结束后再清空' });
+    }
+    const cleared = store.clearChat(chatKey);
+    try { memory.clearHandoff(chatKey); } catch { /* 交接删失败不阻断存档清理 */ }
+    emit('chat-update', chatKey);
+    emit('memory-update', { chatKey, phase: 'handoff-clear' });
+    log(`[chats] 已清空 ${chatKey} 的存档：消息 ${cleared.messages} 条、线程 ${cleared.threads} 个、检查点 ${cleared.threadCheckpoints} 个`);
+    return json(res, 200, { ok: true, ...cleared });
+  });
   router.add('POST', /^\/api\/chats\/(group|private)_(\d+)\/test-send$/, async (req, res, params) => {
     const body = await readBody(req);
     const text = String(body.text ?? '').trim();

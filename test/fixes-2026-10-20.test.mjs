@@ -30,3 +30,15 @@ test('插件页要说明当前列表来自内置官方索引快照（远端全�
   assert.ok(plugins.includes('index?.bundled'), '页头/页脚要识别 bundled 标记');
   assert.ok(plugins.includes('内置官方索引'), '要让人看得出这是离线快照，不是远端最新索引');
 });
+
+test('存档页有「清空本会话存档」入口：只清指定会话的消息/线程/交接', () => {
+  const app = src('src/console/app.js');
+  assert.ok(app.includes('store.clearChat(chatKey)'), '服务端要按会话清存档');
+  assert.ok(app.includes('memory.clearHandoff(chatKey)'), '清存档时一并清该会话交接');
+  assert.ok(app.includes("'该会话有正在运行的处理，等它结束后再清空'"),
+    '有在途运行时要拒绝，避免清完又被写回');
+  const chat = src('ui/pages/chat.js');
+  assert.ok(chat.includes('id="chat-clear-btn"'), '存档页要有清空按钮');
+  assert.ok(chat.includes("`/api/chats/${key.replace(':', '_')}/messages`"),
+    '按钮要调用按会话清空接口');
+});

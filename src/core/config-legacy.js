@@ -1528,11 +1528,31 @@ function deepMerge(base, override) {
   return out;
 }
 
+/**
+ * 读盘时的行为档位兼容：跨分支/老配置可能带着本分支不认识的值。
+ *
+ * 真实故障（2026-10-20）：从作者分支切回自己的分支后，config.json 里留着新分支的档位名；
+ * loadConfig 能读出来，但下一次 updateConfig（控制台保存、configure-linux）会直接抛
+ * "Invalid persona behavior profile"，整个部署脚本卡死。
+ * 这里按 fail-closed 回落到 legacy 并打一行警告；**只在读盘时修**，
+ * updateConfig 收到显式非法值仍由 normalizeBehaviorProfile 严格拒绝（输入校验不放松）。
+ */
+function repairLoadedPersonaProfile(persona) {
+  if (!isPlainObject(persona)) return;
+  if (persona.behaviorProfile === 'legacy' || persona.behaviorProfile === 'grounded') return;
+  const raw = persona.behaviorProfile;
+  persona.behaviorProfile = 'legacy';
+  if (raw !== undefined && raw !== null && raw !== '') {
+    console.warn(`[config] 无法识别的 persona.behaviorProfile（${JSON.stringify(raw)}），已回落到 legacy`);
+  }
+}
+
 export function loadConfig() {
   try {
     let text = fs.readFileSync(CONFIG_FILE, 'utf8');
     if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
     const parsed = migrateConfig(JSON.parse(text));
+    repairLoadedPersonaProfile(parsed?.persona);
     const merged = deepMerge(DEFAULT_CONFIG, parsed);
     // ── provider 迁移（2026-09-26）──
     // 默认 provider 从 local 改成 openai 之后，**没显式存过 provider** 的老配置语义会变：

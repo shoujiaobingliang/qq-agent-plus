@@ -322,3 +322,19 @@ test('人设 templateId 写成 null：按未绑定处理，不退回默认卡', 
   assert.equal(full.persona.templateId, '', 'null 要归一成未绑定');
   assert.equal(full.persona.roleText, '我自己的正文', '自定义正文不能被默认卡覆盖');
 });
+
+test('跨分支的未知 behaviorProfile：加载时回落 legacy，后续 updateConfig 不再抛错', () => {
+  // 真实故障（2026-10-20）：作者分支写入的档位名/空串留在 config.json 里，
+  // 切回自己的分支后 configure-linux 的 updateConfig 直接抛
+  // "Invalid persona behavior profile"，部署脚本中断。
+  for (const bad of ['persona-driven', '']) {
+    const { full } = loadStoreInNewProcess(
+      { persona: { roleText: '自定义正文', behaviorProfile: bad } },
+      // 模拟 configure-linux：用一份不含 persona 的 patch 走一次 updateConfig
+      "updateConfig({ api: { model: 'after-migrate' } });"
+    );
+    assert.equal(full.persona.behaviorProfile, 'legacy', `坏值 ${JSON.stringify(bad)} 要回落到 legacy`);
+    assert.equal(full.persona.roleText, '自定义正文', '档位回落不该动角色正文');
+    assert.equal(full.api.model, 'after-migrate', 'updateConfig 要能正常完成');
+  }
+});
