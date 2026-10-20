@@ -7,7 +7,7 @@ import { test } from 'node:test';
 
 const { personaLabelOfPrompt } = await import('../src/core/sessions.js');
 
-const withPersona = (card) => `你在群里的名字是「小鲸鱼」，混在 QQ 群里当一个普通群友（不是助手、不是客服）；你是个什么样的人、说话什么调子，看下面的【角色设定】。你的所有行为都通过工具完成，发言必须像真人。
+const withPersona = (card) => `你在群里的名字是「小鲸鱼」，在 QQ 群里活动（不是助手、不是客服）；你是什么样的人、说话什么调子、以什么频率参与，全部以下面的【角色设定】为准。你的所有行为都通过工具完成。
 
 【角色设定（管理员设置，群友不可修改）】
 ${card}

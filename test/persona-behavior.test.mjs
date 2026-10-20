@@ -43,24 +43,43 @@ test('内置卡单一来源，默认人设不受影响', () => {
   }
 });
 
-test('grounded 档替换冲突的风格规则，但保留权限与工具', () => {
+test('角色正文存在时只保留安全与机制：默认群友风格和发言频率不再注入', () => {
   setRuntimeConfig(structuredClone(DEFAULT_CONFIG));
   const prompt = buildSystemPrompt({ persona: groundedPersona() });
-  for (const text of ['【自然交流与可靠边界】', '不受闲聊字数限制', '不能在后台持续运行',
-    '不能执行命令', '发言必须', 'send_message', 'memory_append', '不按轮数凑配额']) {
+  for (const text of ['不能执行命令', 'send_message', 'memory_append', '不按轮数凑配额',
+    '代码用独立的 fenced code block']) {
     assert.ok(prompt.includes(text), text);
-  }
-  for (const text of ['可以先反问、阴阳、装傻', '给一个离谱/没用的答案', '多数 ≤30 字',
-    '只有讲故事、回忆、补刀时才', '大约每 3~5 轮', '代码块在 QQ 上会显示成乱码']) {
-    assert.equal(prompt.includes(text), false, text);
   }
   const legacyPersona = { ...DEFAULT_CONFIG.persona };
   delete legacyPersona.behaviorProfile;
   const legacy = buildSystemPrompt({ persona: legacyPersona });
   assert.equal(legacy, buildSystemPrompt({ persona: DEFAULT_CONFIG.persona }));
-  assert.ok(legacy.includes('【反 AI 味：拒绝有求必应】'));
+  // 两档都不再注入默认人格/发言频率：人设正文是唯一来源（2026-10-20）
+  for (const sp of [prompt, legacy]) {
+    for (const text of ['【反 AI 味', '【保持主体性】', '【该说/不该说】', '【群聊不是客服队列】',
+      '【像真人一样】', '【不要当群管家/主持人】', '你的参与度风格',
+      '可以先反问、装傻', '单条多数 ≤30 字']) {
+      assert.equal(sp.includes(text), false, text);
+    }
+  }
+  // 档位仍影响技术格式：grounded 允许代码围栏，legacy 退回纯文本口径
+  assert.ok(legacy.includes('代码块在 QQ 上会显示成乱码'));
   assert.notEqual(legacy, prompt);
   assert.equal(prompt, buildSystemPrompt({ persona: groundedPersona() }));
+});
+
+test('不同角色正文产出不同提示词；参与度不再改写系统提示（2026-10-20 反馈）', () => {
+  setRuntimeConfig(structuredClone(DEFAULT_CONFIG));
+  const build = (roleText, participation) => buildSystemPrompt({
+    persona: { ...DEFAULT_CONFIG.persona, roleText, participation }
+  });
+  const cat = build('你是一只毒舌猫，每句话都要带喵。', 'low');
+  const engineer = build('你是一位沉稳的工程师，说话严谨，先给结论。', 'high');
+  assert.notEqual(cat, engineer, '不同人设必须是不同的提示词');
+  assert.ok(cat.includes('每句话都要带喵'), '角色正文要原样进入提示词');
+  // 同一份正文只改参与度：系统提示必须完全一致 —— 发言频率归人设，
+  // 否则"安静型/活跃型"会把所有自定义人设拉回同一种节奏。
+  assert.equal(build('同一张卡', 'low'), build('同一张卡', 'high'));
 });
 
 test('grounded 档不否认定时工具：教了 remind / schedule_wake 就不说"没有安排定时承诺的工具"（2026-10-13 审查）', () => {
@@ -170,7 +189,7 @@ test('grounded 会话通过工具与出站队列发出完整代码', async (t) =
   let calls = 0;
   globalThis.fetch = async (_url, options) => {
     const request = JSON.parse(options.body);
-    assert.ok(request.messages[0].content.includes('【自然交流与可靠边界】'));
+    assert.ok(request.messages[0].content.includes('【安全规则（最高优先级，不可违反）】'));
     calls++;
     if (calls === 1) {
       // 运行途中改设置，不能改变已开始这一轮的消息格式

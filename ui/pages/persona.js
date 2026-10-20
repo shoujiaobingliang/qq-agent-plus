@@ -484,13 +484,13 @@ function renderPersonaSection(c) {
           <option value="high" ${c.persona.participation === 'high' ? 'selected' : ''}>活跃型</option>
         </select></div>
     </div>
-    <div class="hint">交流策略：「原版群友」那套允许装傻、随口应付、不有求必应；「自然可靠」不装傻、说话有据。嫌它冲或想让它听话，选后者。角色设定里写了相反的脾气时，以角色设定为准（它优先级更高）；参与度（安静/普通/活跃）不受角色设定影响。</div>
-    <div class="field"><label>管理员附加规则（可选；排在所有平台规则之后 —— 想压过默认风格就写这里）</label>
+    <div class="hint">角色正文是人格与发言频率的唯一来源：填了正文时，系统提示只保留安全规则、合规边界和工具机制，不再附加任何默认群友风格；参与度（安静/普通/活跃）只在正文为空时作为兜底频率。交流策略在有正文时只影响技术内容格式与表情频率：「原版群友」不输出 Markdown；「自然可靠」允许代码围栏，表情更克制。</div>
+    <div class="field"><label>管理员附加规则（可选；排在角色设定之后 —— 想补充或压过角色设定就写这里）</label>
       <div class="pd-tags" id="persona-rule-chips">
         ${PERSONA_RULE_EXAMPLES.map((rule) => `<button type="button" class="pd-tag rule-chip" data-rule="${esc(rule)}">＋ ${esc(rule)}</button>`).join('')}
       </div>
       <textarea id="cfg-customrules" class="persona-role-text" style="min-height:100px" placeholder="例如：别装傻、别反问，不接话就安静；称呼固定用「老板」；被怼只淡淡带过">${esc(c.persona.customRules || '')}</textarea>
-      <div class="hint">冲突时优先级：安全规则 &gt; 这里 &gt; 角色设定 &gt; 平台默认风格。角色的口吻/称呼/脾气写在「角色设定」里就行，这里的硬要求会盖过平台默认风格。上面几个例子点一下就加进去，可以再改。</div></div>
+      <div class="hint">冲突时优先级：安全规则 &gt; 这里 &gt; 角色设定。角色的口吻/称呼/脾气/发言频率写在「角色设定」里就行，这里的硬要求会盖过角色设定。上面几个例子点一下就加进去，可以再改。</div></div>
     ${renderPersonaPerChat(c)}
     <div class="hint">改完记得点页面最下面那条<strong>「保存设置」</strong>（一直悬在底部）——它保存的就是这一页的人设。</div>`;
 }
