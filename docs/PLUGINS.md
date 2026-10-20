@@ -24,6 +24,11 @@
 索引是一份 JSON，**住在独立仓库里**：`https://github.com/sakurawwwxh/qq-agent-plugins`
 （控制台默认的 `plugins.indexUrl` 就指向它；包挂那个仓库的 Release，仓库内也提交一份供 CDN 走）。可加多条见下：
 
+远端索引全部拉取失败、且没有上次成功结果时，控制台会回落到**随程序发布的官方索引快照**
+`plugins/bundled-index.json`（七个官方插件，版本与 sha256 对齐 `plugins/official-packages.json`）。
+快照只在首次启动/网络完全不可用时兜底，页面会标明「内置官方索引 · 离线快照」；安装时仍按索引里的
+sha256 校验，但快照可能不是最新版本。远端能拉到时永远优先用远端。
+
 ```json
 {
   "plugins": [

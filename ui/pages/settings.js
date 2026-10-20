@@ -803,8 +803,8 @@ function renderMessageTypesSection(c) {
       等内容被按需读取时才补上。）</div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-expand-forward" ${mt.expandForward !== false ? 'checked' : ''} />
       <label for="cfg-expand-forward">自动展开合并转发 / 聊天记录卡片</label></div>
-    <div class="hint" style="margin-left:26px">关掉后正文只留一行占位符，模型需要时自己调 read_forward 展开；
-      <b>被 @ 的那条仍会自动展开</b>。一条 20 条的记录展开后是几千字符，还会跟着进存档和之后每一轮的上下文。</div>
+    <div class="hint" style="margin-left:26px">关掉后正文只留一行占位符，<b>任何一条都不自动展开（包括被 @ 的那条）</b>；模型需要时自己调 read_forward 展开。
+      一条 20 条的记录展开后是几千字符，还会跟着进存档和之后每一轮的上下文。</div>
     <div class="checkbox-row" style="margin-top:8px"><input type="checkbox" id="cfg-mt-images" ${mt.images !== false ? 'checked' : ''} />
       <label for="cfg-mt-images">查看消息里的图片与表情包</label></div>
     <div class="hint" style="margin-left:26px">关掉后看图工具（get_message_images）从工具表摘掉，提示词改成"看不到图片内容"；
@@ -1192,10 +1192,17 @@ function openModelDeleteModal() {
         const model = el.dataset.model;
         if (!await askForConfirmation(`确定从「${p.displayName || p.id}」删除模型 ${model}？`)) return;
         try {
-          await api('/api/providers/models', {
+          const result = await api('/api/providers/models', {
             method: 'DELETE',
             body: JSON.stringify({ providerId: p.id, modelId: model })
           });
+          // 弹窗打开时拿的是 state.providers 的快照；loadSettings() 会换掉 state.providers，
+          // 但这个弹窗仍握着旧数组 —— 不就地更新的话，删除成功后列表里那条模型还在
+          //（2026-10-20 实测反馈："删除 api 配置时没有刷新列表"）。
+          const updated = result?.provider;
+          const index = providers.findIndex((x) => x.id === p.id);
+          if (index >= 0 && updated) providers[index] = { ...providers[index], ...updated };
+          renderLeft();
           renderRight();
           loadSettings();
         } catch (err) {

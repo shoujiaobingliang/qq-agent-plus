@@ -132,14 +132,25 @@ test('master-off sends the same model payload as an absent time-control config',
   assert.equal(bodies[0], bodies[1]);
 });
 
-test('global non-active hours block model tests, vision probes and token-based search', async (t) => {
+test('global non-active hours do not block admin connectivity tests; model/vision/search still blocked', async (t) => {
   const { calls } = fixture(t);
-  await assert.rejects(testModelChat({ baseUrl: 'https://model.invalid', model: 'mock' }), { code: 'TIME_CONTROL_INACTIVE' });
+  // 管理员在控制台主动点的「测试连通性」是诊断动作：非活跃时段也要能验证 Key/地址
+  //（2026-10-20 反馈：测试连接被时间控制拦下）。它不该被时间门控拒绝。
+  const probe = await testModelChat({ baseUrl: 'https://model.invalid', model: 'mock' });
+  assert.equal(probe.ok, true, '连通性测试应真的发出请求');
+  assert.equal(calls(), 1);
+  // 控制台「测试连通性」（/api/test/api 走 chatCompletion）同样不受时间控制
+  const diag = await chatCompletion({
+    messages: [{ role: 'user', content: 'ping' }],
+    ignoreTimeControl: true
+  });
+  assert.equal(diag.message.content, 'Done');
+  assert.equal(calls(), 2);
   await assert.rejects(detectModelVision({ baseUrl: 'https://model.invalid', model: 'mock' }), { code: 'TIME_CONTROL_INACTIVE' });
   await assert.rejects(deepSeekSearch('must not search'), { code: 'TIME_CONTROL_INACTIVE' });
   await assert.rejects(customSearch('must not search'), { code: 'TIME_CONTROL_INACTIVE' });
   await assert.rejects(chatCompletionWithRetry({ messages: [] }), { code: 'TIME_CONTROL_INACTIVE' });
-  assert.equal(calls(), 0);
+  assert.equal(calls(), 2, '被时间门控挡下的调用不该发出请求');
 });
 
 test('daily summary excludes inactive source conversations even when globally active', async (t) => {

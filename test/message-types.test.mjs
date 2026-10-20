@@ -146,10 +146,11 @@ test('提示词：表情包总开关关闭时不再教 send_sticker / list_stick
   }
 });
 
-test('入站：自动展开受开关控制，被 @ 时强制展开（锚点：这段在 console 的事件处理里，单测拿不到）', () => {
+test('入站：自动展开受开关硬控制，被 @ 也不再强制展开（2026-10-20 实测反馈）', () => {
   const app = src('src/console/app.js');
-  assert.ok(app.includes('const autoExpand = cfgNow.messageTypes?.expandForward !== false || mentionsSelf;'),
-    '入站判定要同时看配置与"是否被 @"');
+  assert.ok(app.includes('const autoExpand = cfgNow.messageTypes?.expandForward !== false;'),
+    '关掉设置后一条都不该自动展开（包括被 @ 的那条）');
+  assert.ok(!/autoExpand = [^;]*mentionsSelf/.test(app), '不能再让 mentionsSelf 绕过开关');
   assert.ok(app.includes('if (segments && looksForward && event.message_id != null && autoExpand) {'),
     '判定要真的用在展开入口上');
   assert.ok(/合并转发未自动展开（「消息类型」页关着）/.test(app),

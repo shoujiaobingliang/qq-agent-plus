@@ -798,6 +798,9 @@ function indexChipHtml(index) {
   if (index?.loading) return '索引：读取中…';
   if (index?.failed) return `索引：读取失败（显示上次的 ${Array.isArray(index.plugins) ? index.plugins.length : 0} 条）`;
   const sources = Array.isArray(index?.sources) ? index.sources : [];
+  if (index?.bundled) {
+    return `索引：内置官方索引 · ${Array.isArray(index.plugins) ? index.plugins.length : 0} 条（离线快照）`;
+  }
   if (index?.stale) {
     return `索引：上次的 ${Array.isArray(index.plugins) ? index.plugins.length : 0} 条（这次没拉到）`;
   }
@@ -814,6 +817,10 @@ function indexFootHtml(index) {
     return `索引这次拉取失败（${esc(index.error || '网络原因')}），下面是上次读到的 ${Array.isArray(index.plugins) ? index.plugins.length : 0} 条；装之前仍按索引里的 sha256 校验。`;
   }
   const sources = Array.isArray(index?.sources) ? index.sources : [];
+  if (index?.bundled) {
+    return `远端索引这次全部拉取失败，当前显示的是<b>随程序发布的官方索引快照</b>（可能不是最新版本）；`
+      + `安装时仍按索引里的 sha256 校验。配置好网络后刷新即可换回远端索引。`;
+  }
   if (!sources.length) {
     return '没有配置索引来源（<code>plugins.indexUrls</code> / <code>plugins.indexUrl</code> 都是空的），'
       + '所以这里没有可一键安装的列表。「手动安装」仍然可用。';

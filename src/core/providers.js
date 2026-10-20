@@ -1,6 +1,5 @@
 // 多提供商模型目录：统一使用 OpenAI 兼容接口，由控制台维护。
 import { getConfig, updateConfig } from './config.js';
-import { assertTimeAllowed, watchTimeWindow } from './time-gate.js';
 import { readJsonBounded } from './http-body.js';
 import { modelServiceOfBaseUrl, modelServiceById, resolveThinkingPatch, normalizeThinkingIntent, effectiveThinkingRaw, hostOf } from './provider-presets.js';
 
@@ -132,15 +131,17 @@ export async function fetchModelsFrom(baseUrl, apiKey, timeoutMs = 15000) {
   return list.map((m) => String(m.id ?? m.model ?? m)).filter(Boolean);
 }
 
-/** 用用户提供的 baseUrl + apiKey + modelId 发送一次最小 chat 测试请求。 */
-export async function testModelChat({ baseUrl, apiKey, model }) {  assertTimeAllowed('');
+/** 用用户提供的 baseUrl + apiKey + modelId 发送一次最小 chat 测试请求。
+ *  ⚠️ 这是管理员在控制台主动点的一次诊断请求，**不受「时间控制」限制**：
+ *  非活跃时段也应该能验证 Key/地址是否可用，否则用户只能等到活跃窗口才能排错。
+ *  （2026-10-20 反馈：测试连通性被时间限制拦下。） */
+export async function testModelChat({ baseUrl, apiKey, model }) {
   const base = normalizeBaseUrl(baseUrl);
   if (!base) throw new Error('请先填写 Base URL');
   if (!String(model || '').trim()) throw new Error('请先填写模型 ID');
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('超时')), 20000);
-  const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error), '');
   try {
     controller.signal.throwIfAborted();
     const res = await fetch(`${base}/chat/completions`, {
@@ -173,7 +174,6 @@ export async function testModelChat({ baseUrl, apiKey, model }) {  assertTimeAll
     const msg = String(error?.cause?.message ?? error?.message ?? error);
     return { ok: false, latencyMs, note: msg === '超时' ? '连接超时' : `网络错误：${msg}` };
   } finally {
-    releaseTimeGuard();
     clearTimeout(timer);
   }
 }
@@ -186,7 +186,6 @@ export async function testModelChat({ baseUrl, apiKey, model }) {  assertTimeAll
  * 结果落盘到 provider.thinkingProbe，控制台据此显示「已实测」标记。
  */
 export async function probeThinking({ providerId = '', baseUrl = '', apiKey = '', model = '', thinking = undefined, extraBody = undefined } = {}) {
-  assertTimeAllowed('');
   const cfg = getConfig();
   let p = currentProviders().find((x) => x.id === providerId) || null;
   // 地址回退链带上顶层 api.*：大量部署（包括本机实测的这台）不建 provider 记录，
@@ -233,7 +232,6 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('超时')), 25000);
-  const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error), '');
   try {
     controller.signal.throwIfAborted();
     const res = await fetch(`${base}/chat/completions`, {
@@ -294,7 +292,6 @@ export async function probeThinking({ providerId = '', baseUrl = '', apiKey = ''
     saveProbe(p, result, base);
     return result;
   } finally {
-    releaseTimeGuard();
     clearTimeout(timer);
   }
 }

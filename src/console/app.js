@@ -61,7 +61,7 @@ import {
 import { safeFetch, safeFetchBinary } from '../llm/safe-fetch.js';
 import { DEFAULT_CONFIG } from '../core/config.js';
 import { uiBuildStamp } from './ui-build.js';
-import { installPlugin, uninstallPlugin, fetchPluginIndexes, sha256Of, MAX_PLUGIN_ARCHIVE_BYTES, rollbackPlugin, createIndexRevokedCache, indexResultForDisplay } from '../plugins/install.js';
+import { installPlugin, uninstallPlugin, fetchPluginIndexes, sha256Of, MAX_PLUGIN_ARCHIVE_BYTES, rollbackPlugin, createIndexRevokedCache, indexResultForDisplay, bundledPluginIndex } from '../plugins/install.js';
 import { DEFAULT_MIRROR_PREFIXES, fetchBinaryWithMirrors } from '../plugins/mirrors.js';
 // 平台能力门控的元数据（键→标签/工具/默认取向/配额默认）：控制台不手抄第二份，防漂移
 import {
@@ -1156,9 +1156,10 @@ export function createApp({
     const looksForward = Boolean(forwardResId)
       || text.includes('[合并转发') || text.includes('[转发消息') || text.includes('[卡片聊天记录');
     // 「消息类型」页可以关掉自动展开（一条 20 条的记录展开后是几千字符，还要跟着进存档与
-    // 后续每一轮的上下文）。**被 @ 的那条仍然展开** —— 用户点名要看的东西不该再多花一轮
-    // 工具调用；关掉后正文留占位符，模型需要时自己调 read_forward。
-    const autoExpand = cfgNow.messageTypes?.expandForward !== false || mentionsSelf;
+    // 后续每一轮的上下文）。关掉后**一条都不展开**（包括被 @ 的那条）—— 设置是硬开关，
+    // 模型需要时自己调 read_forward。
+    // 2026-10-20 实测反馈：关掉后 @ 消息仍被展开，等于设置没生效。
+    const autoExpand = cfgNow.messageTypes?.expandForward !== false;
     if (segments && looksForward && event.message_id != null && autoExpand) {
       const isCard = !text.includes('[合并转发') && !text.includes('[转发消息');
       try {
@@ -2568,7 +2569,16 @@ export function createApp({
     });
     // 拉不到就用上次成功读到的（见 indexResultForDisplay）：索引挂在第三方托管上，偶发超时是常态，
     // 而"这次没拉到"不该让市场变成空的。
-    const result = indexResultForDisplay(fresh, lastGoodPluginIndex);
+    let result = indexResultForDisplay(fresh, lastGoodPluginIndex);
+    // 首次启动就全部拉不到、也没有上次成功结果时，用随程序发布的官方索引快照兜底
+    //（远端能拉到就永远不用它；快照条目的包仍按 sha256 校验）。
+    if (result === fresh && !(fresh.sources || []).some((item) => item.ok)) {
+      const bundled = bundledPluginIndex({ hostVersion: PKG.version });
+      if (bundled) {
+        result = bundled;
+        log(`[plugins] 远端索引全部失败，已使用内置官方索引快照（${bundled.plugins.length} 条）`);
+      }
+    }
     if (Array.isArray(result.plugins) && result.plugins.length && !result.stale) {
       lastGoodPluginIndex = { at: Date.now(), result };
     }
@@ -3651,7 +3661,9 @@ export function createApp({
       const r = await chatCompletion({
         messages: [{ role: 'user', content: '请只回复两个字符：pong' }],
         tools: null,
-        temperature: 0
+        temperature: 0,
+        // 管理员主动点的诊断请求：非活跃时段也要能验证 Key/地址
+        ignoreTimeControl: true
       });
       const reply = typeof r.message.content === 'string' ? r.message.content.slice(0, 100) : '';
       return json(res, 200, { ok: true, model: r.model, reply, latencyMs: Date.now() - startedAt });

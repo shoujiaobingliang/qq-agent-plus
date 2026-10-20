@@ -19,7 +19,7 @@ process.on('exit', () => { try { fs.rmSync(dataDir, { recursive: true, force: tr
 const {
   normalizePluginIndexEntry, normalizePluginIndex, fetchPluginIndex, fetchPluginIndexes,
   installPlugin, uninstallPlugin, writePluginInstallInfo, readPluginInstallInfo,
-  sha256Of, PLUGIN_INDEX_URL_FIELDS, createIndexRevokedCache, indexResultForDisplay
+  sha256Of, PLUGIN_INDEX_URL_FIELDS, createIndexRevokedCache, indexResultForDisplay, bundledPluginIndex
 } = await import('../src/plugins/install.js');
 const { PLUGIN_API_VERSION } = await import('../src/plugins/manifest.js');
 const { packPluginDir } = await import('../src/plugins/pack.js');
@@ -245,6 +245,31 @@ test('官方索引已搬到独立仓库：主仓库只留指路牌（避免有�
   assert.deepEqual(stub.plugins, [], '主仓库里不该再留一份可发布的索引副本');
   assert.match(stub.note, /qq-agent-plugins/, '要写清官方索引现在在哪');
   assert.equal(fs.existsSync(path.join(repo, 'plugins', 'packages')), false, '包也搬走了（仓库内那份在索引仓库里）');
+});
+
+test('内置官方索引快照：与 official-packages 的版本/sha 对齐，远端全挂时能兜底', () => {
+  // 2026-10-20 反馈：插件索引经常拉不动，市场变成空的。随程序发布的快照只在
+  // "全部来源失败且没有上次成功结果"时使用；它仍带着 sha256，安装时照旧校验。
+  const bundled = bundledPluginIndex({ hostVersion: version });
+  assert.ok(bundled, '应能读到 plugins/bundled-index.json');
+  assert.equal(bundled.bundled, true);
+  assert.ok(bundled.plugins.length >= 5);
+  const expected = JSON.parse(fs.readFileSync(path.join(repo, 'plugins', 'official-packages.json'), 'utf8'));
+  assert.deepEqual(
+    bundled.plugins.map((p) => p.id).sort(),
+    Object.keys(expected.packages).sort(),
+    '快照条目要与官方包锚一一对应'
+  );
+  for (const item of bundled.plugins) {
+    assert.equal(item.version, expected.packages[item.id].version, `${item.id} 版本与锚不一致`);
+    assert.equal(item.sha256, expected.packages[item.id].sha256, `${item.id} sha256 与锚不一致`);
+    assert.match(item.url, /^https:\/\/github\.com\/sakurawwwxh\/qq-agent-plugins\/releases\/download\//,
+      `${item.id} 的下载地址要指向官方 Release`);
+    assert.equal(item.compatible, true, `${item.id} 应能在当前 apiVersion 下安装`);
+  }
+  // 快照的来源报告要能让页面显示"内置官方索引"，而不是伪装成远端来源
+  assert.equal(bundled.sources[0].name, '内置官方索引');
+  assert.equal(bundled.sources[0].ok, true);
 });
 
 test('官方插件：现打源码的 sha256 必须等于期望值（改了源码忘了重打包就红）', () => {

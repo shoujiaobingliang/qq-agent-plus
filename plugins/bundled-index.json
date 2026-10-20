@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "note": "随程序发布的官方插件索引快照：远端索引全部拉取失败、且没有上次成功结果时使用。条目与 examples/plugins/<id>/plugin.json、plugins/official-packages.json 对齐；版本号与 sha256 变了要重新生成（test/plugin-index.test.mjs 会检查）。下载地址指向官方索引仓库的 Release。",
+  "plugins": [
+    {
+      "id": "exchange-rate",
+      "name": "汇率",
+      "version": "1.0.0",
+      "description": "按最新公布的汇率换算两种货币（例如 100 美元是多少人民币），走 Frankfurter / open.er-api 公开接口，不需要 Key",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http", "config"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/exchange-rate-1.0.0.tar.gz",
+      "sha256": "fe487376a7d07b97416ff717b3fb5b31400d6fafc1a6cd31c7cb2fde0fc7026b"
+    },
+    {
+      "id": "gh-activity",
+      "name": "GitHub 仓库动态",
+      "version": "1.0.0",
+      "description": "查一个 GitHub 仓库最近怎么样：star/issue 数、最近几次提交、最新 issue 标题、最后推送时间（公开 API，不需要 Key）",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http", "config"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/gh-activity-1.0.0.tar.gz",
+      "sha256": "cb367361368dcfc114364736030e8a61c36aa30e07247a050fbaed8eda1689d8"
+    },
+    {
+      "id": "hot-topics",
+      "name": "热点",
+      "version": "1.0.0",
+      "description": "抓 V2EX 或 Hacker News 的热帖榜，整理成标题+链接+热度几行，两个源都不需要 Key",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http", "config"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/hot-topics-1.0.0.tar.gz",
+      "sha256": "e82e89c232a1913f28e4a167bbc32d481a5b8bf6f5f3b98e594805f04abeb301"
+    },
+    {
+      "id": "ip-info",
+      "name": "IP 查询",
+      "version": "1.0.0",
+      "description": "查一个 IP 或域名归属地：国家、省市、运营商、ASN 与反向解析，走 ip-api 免费接口，不需要 Key",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http", "config"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/ip-info-1.0.0.tar.gz",
+      "sha256": "2bfd82d3675700688c1b197b90f2b87b300fa97856d24047cea01425ecaa0ffe"
+    },
+    {
+      "id": "rss",
+      "name": "RSS 订阅",
+      "version": "1.0.0",
+      "description": "抓一个 RSS/Atom 订阅源的最新几篇，整理成标题+链接+时间（订阅地址你给，插件不自带源）",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/rss-1.0.0.tar.gz",
+      "sha256": "3bc768a4305b7f1176977243f21dffe47711454960a6b7c030346810d15c21da"
+    },
+    {
+      "id": "translate",
+      "name": "翻译",
+      "version": "1.0.0",
+      "description": "把一句话或一小段文本翻成另一种语言（中/英/日/韩互译），走 MyMemory 公开接口，不需要 Key",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http", "config"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/translate-1.0.0.tar.gz",
+      "sha256": "dd26e12b1f41b9ca860804568d77e50e1ed5c9832d537461b4d35d361864a659"
+    },
+    {
+      "id": "weather",
+      "name": "天气",
+      "version": "1.0.0",
+      "description": "查一个城市现在的天气与未来三天（最高/最低温、降水概率、天气现象），走 Open-Meteo 公开接口，不需要 Key",
+      "apiVersion": 1,
+      "capabilities": ["tools", "http", "config"],
+      "tags": ["官方", "工具"],
+      "downloadUrl": "https://github.com/sakurawwwxh/qq-agent-plugins/releases/download/v1.0.0/weather-1.0.0.tar.gz",
+      "sha256": "08fd0e0341cbd5cc3988fda9ae0484746541d8fee81ea0affa0f98c2f66daf9c"
+    }
+  ]
+}

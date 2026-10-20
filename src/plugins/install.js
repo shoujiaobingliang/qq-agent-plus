@@ -527,6 +527,49 @@ export function indexResultForDisplay(fresh, lastGood) {
 }
 
 /**
+ * 随程序发布的官方索引快照（`plugins/bundled-index.json`）。
+ *
+ * 为什么需要：索引默认挂在 GitHub raw 上，国内网络下经常整条拉不动；10 分钟缓存与
+ * "上次成功结果"都救不了**首次启动就拉不到**的实例 —— 用户看到的是一张空市场。
+ * 这份快照是程序自己发布的（与包内源码的 sha256 对齐），不是第三方镜像，因此可以
+ * 作为信任根使用；远端索引能拉到时永远优先用远端，快照只在"全部来源失败且没有上次
+ * 成功结果"时兜底。条目不新时最多是"看到旧版本"，不会装到未经验证的包（sha256 仍校验）。
+ *
+ * 返回形状与 fetchPluginIndexes 一致；读不到文件/形状不对时返回 null（调用方按失败处理）。
+ */
+let bundledIndexDoc;
+export function bundledPluginIndex({ hostVersion = '', apiVersion = PLUGIN_API_VERSION } = {}) {
+  if (bundledIndexDoc === undefined) {
+    try {
+      bundledIndexDoc = JSON.parse(fs.readFileSync(
+        new URL('../../plugins/bundled-index.json', import.meta.url), 'utf8'
+      ));
+    } catch {
+      bundledIndexDoc = null;
+    }
+  }
+  if (!bundledIndexDoc) return null;
+  const { entries, skipped } = normalizePluginIndex(bundledIndexDoc, {
+    apiVersion, hostVersion, source: '内置官方索引'
+  });
+  if (!entries.length) return null;
+  return {
+    plugins: entries,
+    skipped: skipped.map((item) => ({ ...item, source: '内置官方索引' })),
+    sources: [{
+      url: 'bundled:official',
+      name: '内置官方索引',
+      ok: true,
+      count: entries.length,
+      duplicate: 0,
+      skipped: skipped.length,
+      error: ''
+    }],
+    bundled: true
+  };
+}
+
+/**
  * 索引侧"集中撤回名单"的缓存：把索引结果翻成注册表要的规则（`id@版本` 或 `id`）。
  *
  * 两条 fail-closed 纪律：

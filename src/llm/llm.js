@@ -359,9 +359,12 @@ export async function chatCompletion({
   overrides = null,
   cacheKey = '',
   maxTokens = null,
-  purpose = ''
+  purpose = '',
+  // 管理员在控制台主动发起的诊断请求（测试连通性）用：不受「时间控制」限制。
+  // 聊天主路径永远不传，时间窗口照旧生效。
+  ignoreTimeControl = false
 }) {
-  assertTimeAllowed();
+  if (!ignoreTimeControl) assertTimeAllowed();
   const api = overrides || effectiveApi();
   // 聊天这类"随口回一句"的任务关掉思考：省一半输出 token、少 1~3 秒；
   // 判断/写作类（表情包要不要收、说说、空间互动、身份评估）不传 purpose，继续思考。
@@ -444,11 +447,13 @@ export async function chatCompletion({
     if (signal.aborted) controller.abort(signal.reason ?? new Error('aborted'));
     else signal.addEventListener('abort', abort, { once: true });
   }
-  const releaseTimeGuard = watchTimeWindow((error) => controller.abort(error));
+  const releaseTimeGuard = ignoreTimeControl
+    ? () => {}
+    : watchTimeWindow((error) => controller.abort(error));
 
   try {
     controller.signal.throwIfAborted();
-    assertTimeAllowed();
+    if (!ignoreTimeControl) assertTimeAllowed();
     const send = (payload) => fetch(joinUrl(api.baseUrl, '/chat/completions'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authHeaders(api.apiKey, api.baseUrl, api.model) },
