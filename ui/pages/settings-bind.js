@@ -1028,6 +1028,11 @@ function bindSettingsListsAndGroups(c) {
     const uw = $('#tier-unified-wrap'); if (uw) uw.style.display = on ? '' : 'none';
     const pw = $('#tier-pergroup-wrap'); if (pw) pw.style.display = on ? 'none' : '';
   });
+  const triggerModeSel = $('#cfg-trigger-mode');
+  if (triggerModeSel) triggerModeSel.addEventListener('change', () => {
+    const box = $('#trigger-attention-fields');
+    if (box) box.style.display = triggerModeSel.value === 'hybrid' ? '' : 'none';
+  });
 
   // ── 分群档位：下拉选群 + 每群一条滑条 ──
   // ⚠️ 唯一真相是隐藏 input 里的 JSON（tier-group-json），滑条每次 input 都即时写回 ——

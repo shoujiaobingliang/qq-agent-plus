@@ -335,6 +335,22 @@ export const DEFAULT_CONFIG = {
     followUpEnabled: true,      // 发言后没人接话，过十来分钟补一句
     selfWakeEnabled: true       // 模型用 schedule_wake 给自己安排稍后的主动发言
   },
+  // 触发方式：probability = 现有概率；hybrid = 必回项直接回，普通群聊先走
+  // 注意力判定（小模型决定 ignore/peek/reply），失败回落到概率。
+  trigger: {
+    mode: 'probability',
+    attention: {
+      provider: '',                 // 空 = 跟随聊天模型；也可用 providers 里的专用小模型
+      model: '',
+      contextMessages: 20,          // 收件箱里先给多少条最近消息
+      maxInputChars: 4000,          // 判定输入总字符上限
+      timeoutMs: 2500,
+      maxCallsPerDay: 300,
+      minConfidence: 0.55,
+      fallbackToProbability: true,
+      defaultContextCount: 40      // reply 没给 readCount 时主回复读多少条
+    }
+  },
   // 自主节奏（可选）：消息不再即时触发，改由模型按自己安排的节奏醒来统一处理。
   // 默认关闭；开启后建议先在小范围（scope）试，确认能接受"延迟接话"的节奏。
   pacing: {
@@ -1095,12 +1111,50 @@ export function normalizePersonaPerChat(raw) {
   return out;
 }
 
+export const TRIGGER_MODES = Object.freeze(['probability', 'hybrid']);
+
+/** 触发/注意力配置归一化：读盘容错、写入前夹取。 */
+export function normalizeTriggerConfig(raw) {
+  const base = DEFAULT_CONFIG.trigger;
+  const src = isPlainObject(raw) ? raw : {};
+  const att = isPlainObject(src.attention) ? src.attention : {};
+  const num = (value, fallback, min, max) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  };
+  const float = (value, fallback, min, max) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  };
+  const mode = TRIGGER_MODES.includes(String(src.mode || '').trim())
+    ? String(src.mode).trim()
+    : base.mode;
+  return {
+    mode,
+    attention: {
+      provider: String(att.provider ?? base.attention.provider).trim().slice(0, 80),
+      model: String(att.model ?? base.attention.model).trim().slice(0, 120),
+      contextMessages: num(att.contextMessages, base.attention.contextMessages, 5, 60),
+      maxInputChars: num(att.maxInputChars, base.attention.maxInputChars, 500, 20000),
+      timeoutMs: num(att.timeoutMs, base.attention.timeoutMs, 500, 10000),
+      maxCallsPerDay: num(att.maxCallsPerDay, base.attention.maxCallsPerDay, 0, 5000),
+      minConfidence: float(att.minConfidence, base.attention.minConfidence, 0, 1),
+      fallbackToProbability: att.fallbackToProbability !== false,
+      defaultContextCount: num(att.defaultContextCount, base.attention.defaultContextCount, 1, 300)
+    }
+  };
+}
+
 function migrateConfig(parsed) {
   // 顶层必须是对象：手改坏的 config.json 可能是 null / 5 / "x" / true（都是合法 JSON）。
   // 放它过去，下面 out.persona = … 那一步就会抛（Cannot create property 'persona' on number '5'），
   // 被 loadConfig 的 catch 吞掉后静默退回默认值、还会被持久化 —— 用户配置整份没了。
   if (!isPlainObject(parsed)) parsed = {};
   const out = structuredClone(parsed);
+  // 触发/注意力：老配置缺省 probability；坏形状按默认值收敛。
+  out.trigger = normalizeTriggerConfig(out.trigger);
   // 人设段必须是对象：手改坏的 config.json 里可能是 "persona": "小鲸鱼" 这类标量或数组，
   // 放它过去会在保存时炸（Cannot create property 'behaviorProfile' on string），
   // 而控制台保存与 scripts/configure-linux.mjs 都要走这条路径 —— 恢复成默认人设对象。
@@ -1690,6 +1744,11 @@ export function updateConfig(patch) {
   // 不该把整次保存带崩（2026-10-04 复审 P2）。
   for (const sec of ['api', 'conversation', 'dailyMoments', 'qzoneInteractions']) {
     if (sec in safePatch && !isPlainObject(safePatch[sec])) delete safePatch[sec];
+  }
+  if ('trigger' in safePatch && !isPlainObject(safePatch.trigger)) delete safePatch.trigger;
+  if (safePatch.trigger?.mode !== undefined
+    && !TRIGGER_MODES.includes(String(safePatch.trigger.mode).trim())) {
+    throw new Error('Invalid trigger mode');
   }
   const next = migrateConfig(deepMerge(getConfig(), safePatch));
   // 目录优先：当前选中的 provider 在 providerKeys 里有 Key 时，顶层 api.apiKey（手动模式遗留字段）

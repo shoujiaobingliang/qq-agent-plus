@@ -112,7 +112,9 @@ function proactiveWindowState(raw, now) {
 import { safeSlice } from './util.js';
 import { canRun, chatAllowed } from './access.js';
 import { assertTimeAllowed, isTimeActive, TimeControlError, timeUntilActive, watchTimeWindow, withTimeScope } from './time-gate.js';
-import { vendorOfConfig, vendorOfBaseUrl } from '../pricing/model-prices.js';
+import {
+  buildAttentionMessages, parseAttentionDecision, attentionShouldReply, attentionContextCount
+} from './attention.js';import { vendorOfConfig, vendorOfBaseUrl } from '../pricing/model-prices.js';
 import { budgetStatus } from './budget.js';
 import { readOwnerUin } from './notify-owner.js';
 import { buildReminderNote, reminderNoteCost } from './reminders.js';
@@ -457,6 +459,10 @@ export class Orchestrator {
     // 概率档下"要不要回"是随机的，预判（建等待会话）与实跑（真跑）必须用同一次，
     // 否则界面会自相矛盾（2026-09-22 审查发现）。
     this.pendingRolls = new Map();
+    // 注意力判定：按批次缓存结果，避免重试/重复唤醒重复计费；按日计数防风暴。
+    this.attentionCache = new Map();
+    this.attentionDayKey = '';
+    this.attentionCallsToday = 0;
     this.paused = getConfig().runtime?.paused === true;
     this.pauseReason = null;
     this.proactiveTimer = null;
@@ -731,6 +737,35 @@ export class Orchestrator {
         reason: '失败批次重试',
         shouldRespond: true,
         conversationMode: conversation.mode
+      };
+    }
+    // 引用机器人是明确点名：legacy 模式不交给注意力层，直接必回。
+    // threaded/lifecycle 有自己的续接判定（reason 也不同），保持原路径。
+    if (conversation.mode === 'legacy' && this.#isReplyToSelf(chatKey, entries)) {
+      return {
+        tier: 5,
+        count: cappedByTokenSaver(Math.min(500, Math.max(1, Number(result.count) || 30)),
+          tokenSaverCapsOf(getConfig())?.allCount),
+        reason: '引用机器人',
+        shouldRespond: true,
+        conversationMode: conversation.mode
+      };
+    }
+    // hybrid：@ 与关键词仍必回；其余普通群聊先进入注意力判定，
+    // 失败时再由调用方回落到概率（probabilityShouldRespond/probabilityCount）。
+    const triggerMode = String(getConfig().trigger?.mode || 'probability');
+    const mandatory = result.tier === 1 || result.tier === 2;
+    if (result.shouldRespond && mandatory) return { ...result, conversationMode: conversation.mode };
+    if (triggerMode === 'hybrid' && conversation.mode === 'legacy') {
+      return {
+        ...result,
+        // 先让 wake 继续走到注意力判定；这里不能直接判“不回”。
+        shouldRespond: true,
+        needsAttention: true,
+        probabilityShouldRespond: result.shouldRespond === true,
+        probabilityCount: result.count,
+        reason: result.shouldRespond ? result.reason : '等待注意力判定',
+        conversationMode: 'legacy'
       };
     }
     if (result.shouldRespond) return { ...result, conversationMode: conversation.mode };
@@ -1250,6 +1285,48 @@ export class Orchestrator {
             reason: paced ? '自主节奏唤醒' : '控制台主动唤醒'
           }
         : tierResult0;
+
+      // 注意力层：普通群聊先让低成本模型判断“看不看、回不回”，
+      // @/关键词/引用/重试/私聊仍由上面的必回规则直接放行。
+      if (!manual && tierResult0.needsAttention && pendingEntries.length > 0) {
+        const att = cfgNow.trigger?.attention || {};
+        const decision = await this.#decideAttention(chatKey, pendingEntries, {
+          persona: resolvePersona(cfgNow, chatKey)
+        });
+        const minConfidence = Number(att.minConfidence);
+        const confident = Number.isFinite(minConfidence) ? minConfidence : 0.55;
+        if (decision && attentionShouldReply(decision, confident)) {
+          tierResult = {
+            ...tierResult0,
+            shouldRespond: true,
+            count: attentionContextCount(decision, att.defaultContextCount),
+            reason: `注意力判定：${decision.reason}`
+          };
+        } else {
+          // 明确 ignore 就尊重；判定失败/低置信度才回落到概率。
+          const fallback = !decision && att.fallbackToProbability !== false
+            && tierResult0.probabilityShouldRespond === true;
+          const lowConfidenceFallback = decision?.attend === 'reply'
+            && att.fallbackToProbability !== false
+            && tierResult0.probabilityShouldRespond === true;
+          if (!fallback && !lowConfidenceFallback) {
+            const marked = this.store.markRead(chatKey, pendingEntries.map((m) => m.id));
+            if (waitingSessionId) this.#discardWaiting(waitingSessionId);
+            this.emit('chat-update', chatKey);
+            log.info(`[attention] ${chatKey} 不回复（${decision
+              ? `${decision.attend}/${decision.confidence}：${decision.reason}`
+              : '判定失败'}），${marked} 条已读`);
+            if (this.store.unreadCount(chatKey) > 0) this.scheduleWake(chatKey);
+            return;
+          }
+          tierResult = {
+            ...tierResult0,
+            shouldRespond: true,
+            count: tierResult0.probabilityCount || tierResult0.count,
+            reason: '注意力回退概率'
+          };
+        }
+      }
 
       if (!manual && tierResult0.shouldRespond === false) {
         // 不响应：沉入历史（已读），不产生会话、不消耗 token。
@@ -3247,6 +3324,114 @@ export class Orchestrator {
       usage.calls = 1;
       this.sessions?.recordExternalUsage?.(usage, { model: model || response?.model || '' });
     } catch { /* 记账失败不影响主流程 */ }
+  }
+
+  /**
+   * 注意力判定模型调用：默认跟随聊天模型，也可用 trigger.attention.provider/model
+   * 指向 providers 里的专用小模型。失败/超时/超每日上限返回 null，由调用方回落概率。
+   */
+  async #attentionChat(messages, { signal } = {}) {
+    const cfg = getConfig();
+    const att = cfg.trigger?.attention || {};
+    const day = todayKey();
+    if (this.attentionDayKey !== day) {
+      this.attentionDayKey = day;
+      this.attentionCallsToday = 0;
+    }
+    const maxCalls = Math.max(0, Number(att.maxCallsPerDay) || 0);
+    if (maxCalls <= 0 || this.attentionCallsToday >= maxCalls) return null;
+    const budget = budgetStatus(cfg, this.sessions?.todayUsage?.(day) || {});
+    if (budget.enabled && budget.exceeded) return null;
+
+    let overrides = null;
+    let model = String(att.model || cfg.api?.model || '');
+    if (att.provider) {
+      const p = currentProviders().find((item) => item.id === att.provider);
+      if (!p?.baseURL || !att.model) return null;
+      overrides = {
+        baseUrl: p.baseURL,
+        apiKey: p.apiKey,
+        model: att.model,
+        timeoutMs: Math.max(500, Number(att.timeoutMs) || 2500)
+      };
+      model = att.model;
+    }
+    const timeoutSignal = AbortSignal.timeout(Math.max(500, Number(att.timeoutMs) || 2500));
+    const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    this.attentionCallsToday += 1;
+    const response = await chatCompletion({
+      messages,
+      temperature: 0,
+      purpose: 'judge',
+      maxTokens: 200,
+      signal: combined,
+      ...(overrides ? { overrides } : {})
+    });
+    this.#recordExternalUsage(response, model);
+    return response;
+  }
+
+  /**
+   * 对一批未读做注意力判定。返回 null 表示“没判出来”，调用方决定回落概率还是忽略。
+   * peek 最多一次；第二次仍 peek 视为 ignore，避免无限深读。
+   */
+  async #decideAttention(chatKey, entries, { persona = null, signal = null } = {}) {
+    const cfg = getConfig();
+    const att = cfg.trigger?.attention || {};
+    const ids = (entries || []).map((m) => m.id).join(',');
+    const cacheKey = `${chatKey}|${ids}|${att.provider || ''}|${att.model || ''}|${att.contextMessages || ''}`;
+    const cached = this.attentionCache.get(cacheKey);
+    if (cached && Date.now() - cached.at < 120000) return cached.decision;
+
+    const ctxLimit = Math.max(5, Number(att.contextMessages) || 20);
+    const exclude = new Set((entries || []).map((m) => m.id));
+    const context = () => this.store.recent(chatKey, {
+      limit: ctxLimit + (entries || []).length + 10,
+      readOnly: true
+    })
+      .filter((m) => m.eventKind !== 'game-secret' && !exclude.has(m.id))
+      .slice(-ctxLimit);
+    let contextMessages = context();
+    const handoff = this.memory?.getHandoff?.(chatKey) || null;
+    const build = () => buildAttentionMessages({
+      persona: persona || {},
+      selfNickname: persona?.selfNickname || this.onebot.selfNickname || '',
+      entries,
+      contextMessages,
+      handoff,
+      maxInputChars: att.maxInputChars
+    });
+
+    let decision = null;
+    try {
+      let response = await this.#attentionChat(build().messages, { signal });
+      decision = parseAttentionDecision(response?.message?.content);
+      if (decision?.attend === 'peek') {
+        const more = Math.min(100, Math.max(1, Number(decision.readCount) || 10));
+        contextMessages = this.store.recent(chatKey, {
+          limit: ctxLimit + more + (entries || []).length + 10,
+          readOnly: true
+        })
+          .filter((m) => m.eventKind !== 'game-secret' && !exclude.has(m.id))
+          .slice(-(ctxLimit + more));
+        response = await this.#attentionChat(build().messages, { signal });
+        decision = parseAttentionDecision(response?.message?.content);
+        if (decision?.attend === 'peek') {
+          decision = { ...decision, attend: 'ignore', reason: 'peek 后仍不确定' };
+        }
+      }
+    } catch (error) {
+      if (error?.code === 'TIME_CONTROL_INACTIVE') return null;
+      log.warn(`[attention] ${chatKey} 判定失败：${error?.message ?? error}`);
+      return null;
+    }
+    if (!decision) return null;
+    this.attentionCache.set(cacheKey, { at: Date.now(), decision });
+    if (this.attentionCache.size > 200) {
+      const oldest = this.attentionCache.keys().next().value;
+      if (oldest) this.attentionCache.delete(oldest);
+    }
+    return decision;
   }
 
   stopProactiveLoop() {

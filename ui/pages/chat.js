@@ -115,6 +115,8 @@ function renderChatSection(c) {
   // 刻度高亮与参数高亮都按"当前概率落在哪一段"来点
   const curSeg = segOfProbability(curPct);
   const paramOn = paramActiveForProbability(curPct);
+  const triggerMode = c.trigger?.mode === 'hybrid' ? 'hybrid' : 'probability';
+  const att = c.trigger?.attention || {};
 return `
     <h3>对话模式</h3>
     ${renderConversationModePanels(conversation)}
@@ -238,6 +240,25 @@ return `
 
     <h3>首次唤醒与历史</h3>
     <div class="hint conversation-trigger-hint" id="conversation-trigger-hint"></div>
+
+    <div class="field">
+      <label>触发方式</label>
+      <select id="cfg-trigger-mode">
+        <option value="probability" ${triggerMode === 'probability' ? 'selected' : ''}>概率（现有行为）</option>
+        <option value="hybrid" ${triggerMode === 'hybrid' ? 'selected' : ''}>模型注意力（普通群聊先判定）</option>
+      </select>
+      <div class="hint">模型注意力：@、关键词、引用机器人、私聊、失败重试仍然必回；普通群聊消息先让小模型判断
+        ignore / peek / reply，失败时回落到下面的概率。判定本身也计入预算与每日上限。
+        仅在「传统触发」模式下生效；参与者续接 / 完整生命周期已有自己的模型判断，不重复判定。</div>
+    </div>
+    <div class="field-row" id="trigger-attention-fields" style="${triggerMode === 'hybrid' ? '' : 'display:none'}">
+      <div class="field"><label>注意力判定模型（留空 = 聊天模型）</label>
+        <input type="text" id="cfg-attention-model" value="${esc(att.model || '')}" placeholder="例如 deepseek-v4-flash" /></div>
+      <div class="field"><label>最低置信度 0~1</label>
+        <input type="number" id="cfg-attention-confidence" step="0.05" min="0" max="1" value="${esc(att.minConfidence ?? 0.55)}" /></div>
+      <div class="field"><label>每日判定上限（0 = 不调用）</label>
+        <input type="number" id="cfg-attention-maxcalls" min="0" max="5000" value="${esc(att.maxCallsPerDay ?? 300)}" /></div>
+    </div>
 
     <div class="checkbox-row"><input type="checkbox" id="cfg-unifiedtier" ${st.unifiedTier !== false ? 'checked' : ''} />
       <label for="cfg-unifiedtier">统一设置响应概率（关掉就能给每个白名单群聊单独拖）</label></div>

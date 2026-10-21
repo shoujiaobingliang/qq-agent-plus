@@ -799,6 +799,19 @@ async function saveConfig({ quiet = false } = {}) {
         __replace__: (() => { try { return JSON.parse($('#tier-group-json')?.value || '{}'); } catch { return {}; } })()
       }
     };
+    patch.trigger = {
+      ...(c.trigger || {}),
+      mode: val('#cfg-trigger-mode', c.trigger?.mode || 'probability') === 'hybrid' ? 'hybrid' : 'probability',
+      attention: {
+        ...(c.trigger?.attention || {}),
+        model: val('#cfg-attention-model', c.trigger?.attention?.model || '').trim(),
+        minConfidence: (() => {
+          const n = Number(val('#cfg-attention-confidence', c.trigger?.attention?.minConfidence ?? 0.55));
+          return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0.55;
+        })(),
+        maxCallsPerDay: clampInt(val('#cfg-attention-maxcalls', c.trigger?.attention?.maxCallsPerDay ?? 300), 0, 5000, 300)
+      }
+    };
     // 注：老字段 pastStateLimit 已无读取方；pastStateMaxChars 仍在用（prompt.js 读它夹"过去
     // 状态"上限）—— 别误删。这里不再做 delete：patch 只是发给服务端的合并片段，
     // updateConfig 是深合并，删 patch 里的字段清不掉已存值（2026-10-12 审查：原来的两行
