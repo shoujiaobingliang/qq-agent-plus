@@ -17,6 +17,8 @@
 | 文档 | 说明 |
 | --- | --- |
 | [CONVERSATION_MODES.md](CONVERSATION_MODES.md) | 对话引擎三模式（legacy / threaded / lifecycle）的差异与选择 |
+| [ATTENTION.md](ATTENTION.md) | 模型注意力层：hybrid 触发、ignore/peek/reply、必回规则与回落策略 |
+| [IO-RETENTION.md](IO-RETENTION.md) | 降低云盘 IOPS 的写入/读取策略，以及消息、线程 transcript、会话文件的保留期配置 |
 | [DAILY_MOMENTS.md](DAILY_MOMENTS.md) | 每日说说：生成、发布、去重与计划/时间口径 |
 | [QZONE_INTERACTIONS.md](QZONE_INTERACTIONS.md) | 好友动态与评论回复的巡检节奏与退避 |
 | [model-prices.md](model-prices.md) | 价格体系：模型 id 归一化与别名、渠道价、账户口径三选一、实付/估算/未定价 |

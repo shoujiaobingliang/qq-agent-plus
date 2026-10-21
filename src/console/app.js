@@ -744,7 +744,22 @@ export function createApp({
       { name: '关系台账', run: () => identityPilot?.pruneRelationshipHistory?.() },
       { name: '异常台账', run: () => incidentPilot?.pruneResolvedIncidents() },
       { name: '运行台账', run: () => store.pruneRuns() },
-      { name: '会话留档', run: () => sessions.pruneSessions() }
+      {
+        name: '聊天消息',
+        run: () => {
+          const days = Number(getConfig().store?.messageRetentionDays);
+          if (!(days > 0)) return { messages: 0 };
+          return store.pruneMessagesBefore(Date.now() - days * 24 * 3600 * 1000);
+        }
+      },
+      {
+        name: '会话留档',
+        run: () => {
+          const days = Number(getConfig().store?.sessionRetentionDays);
+          if (!(days > 0)) return { removed: 0 };
+          return sessions.pruneSessions(days);
+        }
+      }
     ];
   }
   async function sendIdentityAdminText(ownerUin, text, signal) {
@@ -3693,21 +3708,25 @@ export function createApp({
 
   router.add('GET', '/api/status', async (req, res) => {
     const dayKey = todayKey();
+    // 今日统计只读 usage-today.json + 内存中的运行会话；不再在这里遍历/解析全部会话文件。
+    // 原来的 buildUsageStats('today') 会被 15 秒轮询触发全量扫描，是控制台读 IOPS 的主因。
     const sessionUsage = sessions.todayUsage(dayKey);
-    const dailyStats = buildUsageStats({ range: 'today' });
-    const totals = dailyStats.totals;
     const usage = {
       dayKey,
-      promptTokens: totals.promptTokens,
-      completionTokens: totals.completionTokens,
-      totalTokens: totals.totalTokens,
-      cachedTokens: totals.cachedTokens,
+      promptTokens: sessionUsage.promptTokens,
+      completionTokens: sessionUsage.completionTokens,
+      totalTokens: sessionUsage.totalTokens,
+      cachedTokens: sessionUsage.cachedTokens,
       runs: sessionUsage.runs,
-      webSearchCount: dailyStats.searchCount,
+      webSearchCount: sessionUsage.webSearchCount,
       // 改进方案 #8：当日估算金额与未计价运行数（budgetStatus 的口径来源）
       estimatedYuan: Number(sessionUsage.estimatedYuan) || 0,
       unpricedRuns: Number(sessionUsage.unpricedRuns) || 0
     };
+    // 成本明细（按模型/按天）仍来自会话文件汇总；collectUsageRows 有缓存与 TTL，
+    // 目录签名不再被运行中的 rewrite 打穿，因此这里最多每 2 分钟真正扫一次。
+    const dailyStats = buildUsageStats({ range: 'today' });
+    const totals = dailyStats.totals;
     const cfgNow = getConfig();
     // 省 Token 模式的"用户值 / 生效值"对照表：控制台设置页直接渲染，避免两边各写一份上限数字
     const tokenSaver = tokenSaverEffective(cfgNow);
@@ -5035,6 +5054,8 @@ export function createApp({
       server.closeIdleConnections?.();
     });
     store.close();
+    // 用量是内存累加 + 定时落盘；停服前强制刷一次，避免最后 15 秒的调用漏账。
+    sessions.flushUsage?.();
   }
 
   return {
@@ -5316,16 +5337,19 @@ function buildSessionView(s, store, options = {}) {
 // 永远对不上、缓存实际从未命中（用量页每次打开仍全量扫）。分槽后各自的 TTL 独立生效。
 const usageRowsCache = new Map();
 const USAGE_CACHE_MAX_KEYS = 8;
-const USAGE_CACHE_TTL_MS = 60000;   // 2026-10-02：20 秒 → 60 秒，打开用量页大多命中缓存；
-                                    // 新会话最多晚 1 分钟进统计，换来不再每次打开都全量扫描
+const USAGE_CACHE_TTL_MS = 120000;   // 2 分钟；/api/status 已不再走全量扫描，用量页命中率更高
 
-/** 目录快照：文件数 + 目录 mtime。成本低（一次 stat），足以捕捉增删。 */
+/**
+ * 目录快照：**只看文件名集合，不看目录 mtime**。
+ * 运行中的会话每 10 秒会 rewrite 自己那份 JSON，rename 会改目录 mtime；
+ * 以前把 mtime 写进签名，等于任何活跃会话都让缓存失效，控制台 15 秒轮询会反复全量解析
+ * 所有会话文件。文件增删仍然会改变签名，内容变化由 TTL 兜住。
+ */
 function sessionsDirSignature() {
   const dir = path.join(DATA_DIR, 'sessions');
   try {
-    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
-    const st = fs.statSync(dir);
-    return files.length + ':' + st.mtimeMs;
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+    return `${files.length}:${files.join('|')}`;
   } catch {
     return '';
   }

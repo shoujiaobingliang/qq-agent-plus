@@ -56,9 +56,24 @@ export class SessionRegistry {
     this.keepFiles = Math.max(0, Number.isFinite(Number(keepFiles)) ? Math.round(Number(keepFiles)) : 0);
     this.index = [];   // [{ id, chatKey, startedAt, endedAt, status, outcome, usage, trigger, model, promptChars }]
     this.current = new Map(); // id -> session object（运行中的在内存里）
+    const cfgStore = getConfig().store || {};
+    const persistMs = Number(cfgStore.sessionPersistIntervalMs);
+    this.persistIntervalMs = Number.isFinite(persistMs) && persistMs > 0
+      ? Math.min(60000, Math.max(2000, Math.round(persistMs)))
+      : 10000;
+    const retentionDays = Number(cfgStore.sessionRetentionDays);
+    this.sessionRetentionDays = Number.isFinite(retentionDays) && retentionDays > 0
+      ? Math.min(3650, Math.round(retentionDays))
+      : 0;
+    // usage-today 的内存缓冲：避免每次外部模型调用都读盘合并写盘。
+    this._usageToday = null;       // { dayKey, data }
+    this._usageDirty = false;
+    this._usageFlushTimer = null;
+    this.usageFlushIntervalMs = 15000;
     fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
     this.#loadIndex();
-    this.pruneSessions();   // 与运行台账同款：构造时清一次（常驻期间每日调度再跑）
+    // 0 = 不按时间删除；构造时清一次，常驻期间每日调度再跑。
+    if (this.sessionRetentionDays > 0) this.pruneSessions(this.sessionRetentionDays);
   }
 
   #loadIndex() {
@@ -273,7 +288,10 @@ export class SessionRegistry {
    * @returns {{ removed: number, kept: number }}
    */
   pruneSessions(retentionDays = 90) {
-    const days = Math.max(1, Number(retentionDays) || 90);
+    const raw = Number(retentionDays);
+    // 0/非法 = 不按时间删除（与 store.messageRetentionDays 同口径）
+    if (!Number.isFinite(raw) || raw <= 0) return { removed: 0, kept: this.index.length };
+    const days = Math.min(3650, Math.max(1, Math.round(raw)));
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     let removed = 0;
     let files = [];
@@ -348,33 +366,72 @@ export class SessionRegistry {
     return this.index.slice(0, limit);
   }
 
+  #emptyUsageDay(dayKey) {
+    return {
+      dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      cachedTokens: 0, runs: 0, webSearchCount: 0, estimatedYuan: 0, unpricedRuns: 0
+    };
+  }
+
+  #readUsageFile(dayKey) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
+      if (parsed?.dayKey === dayKey) return { ...this.#emptyUsageDay(dayKey), ...parsed };
+    } catch { /* 无记录 */ }
+    return this.#emptyUsageDay(dayKey);
+  }
+
+  #readUsageToday(dayKey) {
+    if (this._usageToday?.dayKey === dayKey) return this._usageToday.data;
+    // 跨天：先把前一天还没落盘的增量写掉，再切到新的一天
+    if (this._usageDirty) this.#flushUsageToday();
+    this._usageToday = { dayKey, data: this.#readUsageFile(dayKey) };
+    return this._usageToday.data;
+  }
+
+  #scheduleUsageFlush() {
+    if (this._usageFlushTimer) return;
+    this._usageFlushTimer = setTimeout(() => this.#flushUsageToday(), this.usageFlushIntervalMs);
+    this._usageFlushTimer.unref?.();
+  }
+
+  #flushUsageToday() {
+    if (this._usageFlushTimer) {
+      clearTimeout(this._usageFlushTimer);
+      this._usageFlushTimer = null;
+    }
+    if (!this._usageDirty || !this._usageToday) return;
+    const data = this._usageToday.data;
+    const tmp = path.join(DATA_DIR, `usage-today.json.${process.pid}.tmp`);
+    try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmp, path.join(DATA_DIR, 'usage-today.json'));
+      this._usageDirty = false;
+    } catch (error) {
+      console.error('[sessions] 用量落盘失败:', error?.message ?? error);
+    }
+  }
+
+  /** 停服/退出前把内存里的用量增量落盘。 */
+  flushUsage() {
+    this.#flushUsageToday();
+  }
+
   /** 今日 token 统计（含运行中的）。 */
   todayUsage(dayKey) {
-    let promptTokens = 0;
-    let completionTokens = 0;
-    let totalTokens = 0;
-    let cachedTokens = 0;
-    let runs = 0;
-    let webSearchCount = 0;
-    // 每日预算（改进方案 #8）的当日额度来源：此前这里的返回是 6 个 token 字段的白名单，
-    // 漏传 estimatedYuan/unpricedRuns 会让 budgetStatus 永远读到 0（拦截失效，2026-09-30
-    // 由集成用例抓到）。
-    let estimatedYuan = 0;
-    let unpricedRuns = 0;
-    // 结束的会话记在汇总文件里
-    try {
-      const data = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
-      if (data?.dayKey === dayKey) {
-        promptTokens = data.promptTokens || 0;
-        completionTokens = data.completionTokens || 0;
-        totalTokens = data.totalTokens || 0;
-        cachedTokens = data.cachedTokens || 0;
-        runs = data.runs || 0;
-        webSearchCount = data.webSearchCount || 0;
-        estimatedYuan = Number(data.estimatedYuan) || 0;
-        unpricedRuns = Number(data.unpricedRuns) || 0;
-      }
-    } catch { /* 无记录 */ }
+    const currentDay = todayKey(Date.now());
+    const data = dayKey === currentDay
+      ? this.#readUsageToday(dayKey)
+      : this.#readUsageFile(dayKey);
+    let promptTokens = Number(data.promptTokens) || 0;
+    let completionTokens = Number(data.completionTokens) || 0;
+    let totalTokens = Number(data.totalTokens) || 0;
+    let cachedTokens = Number(data.cachedTokens) || 0;
+    let webSearchCount = Number(data.webSearchCount) || 0;
+    const runs = Number(data.runs) || 0;
+    let estimatedYuan = Number(data.estimatedYuan) || 0;
+    let unpricedRuns = Number(data.unpricedRuns) || 0;
     // 加上运行中的
     for (const s of this.current.values()) {
       promptTokens += s.usage.promptTokens;
@@ -423,14 +480,10 @@ export class SessionRegistry {
     }, { model, vendor });
   }
 
-  /** 把一份用量增量并进 usage-today.json（读盘合并 → 估算金额 → 原子落盘）。 */
+  /** 把一份用量增量并进今天的汇总（内存累加 + 15 秒批量落盘）。 */
   #mergeTodayUsage(delta, { model = '', vendor = '' } = {}) {
     const dayKey = todayKey(Date.now());
-    let data = { dayKey, promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, runs: 0, webSearchCount: 0 };
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'usage-today.json'), 'utf8'));
-      if (parsed?.dayKey === dayKey) data = parsed;
-    } catch { /* 新的一天 */ }
+    const data = this.#readUsageToday(dayKey);
     data.promptTokens += delta.promptTokens;
     data.completionTokens += delta.completionTokens;
     data.totalTokens += delta.totalTokens;
@@ -452,11 +505,8 @@ export class SessionRegistry {
       data.estimatedYuan = (Number(data.estimatedYuan) || 0) + cost;
       if (delta.totalTokens > 0 && !(cost > 0)) data.unpricedRuns = (Number(data.unpricedRuns) || 0) + 1;
     } catch { /* 估价失败不影响用量累加（最坏情况＝这项当天少算） */ }
-    const tmp = path.join(DATA_DIR, `usage-today.json.${process.pid}.tmp`);
-    try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
-    fs.writeFileSync(tmp, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 });
-    fs.renameSync(tmp, path.join(DATA_DIR, 'usage-today.json'));
-    fs.chmodSync(path.join(DATA_DIR, 'usage-today.json'), 0o600); // btrfs 兜底（Issue #11）
+    this._usageDirty = true;
+    this.#scheduleUsageFlush();
   }
 
   /**
@@ -473,7 +523,7 @@ export class SessionRegistry {
     const now = Date.now();
     this._lastPersistAt ||= new Map();
     const last = this._lastPersistAt.get(s.id) || 0;
-    if (now - last < 2000) return;
+    if (now - last < this.persistIntervalMs) return;
     this._lastPersistAt.set(s.id, now);
     this.#persist(s);
   }
@@ -488,7 +538,8 @@ export class SessionRegistry {
       try { fs.rmSync(tmp, { force: true }); } catch { /* 不存在就算了 */ }
       fs.writeFileSync(tmp, JSON.stringify(s, null, 1), { encoding: 'utf8', mode: 0o600 });
       fs.renameSync(tmp, sessionFile(s.id));
-      fs.chmodSync(sessionFile(s.id), 0o600);
+      // 高温路径不再 chmod：tmp 以 0600 创建，rename 保留权限；服务单元 UMask=0077 兜底。
+      // 每次写盘多做一次元数据 syscall 会明显抬高云盘 IOPS。
       if (s.status !== 'running' && s.status !== 'waiting') this.#bumpTodayUsage(s);
     } catch (error) {
       console.error('[sessions] 持久化失败:', error?.message ?? error);

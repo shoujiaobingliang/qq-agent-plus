@@ -791,6 +791,12 @@ async function saveConfig({ quiet = false } = {}) {
         .split('\n').map((x) => x.trim()).filter(Boolean),
       randomCount: clampInt(val('#cfg-randcount', c.store?.randomCount), 0, 500, 8),
       allCount: clampInt(val('#cfg-allcount', c.store?.allCount), 0, 500, 80),
+      messageRetentionDays: clampInt(val('#cfg-message-retention', c.store?.messageRetentionDays ?? 7), 0, 3650, 7),
+      sessionRetentionDays: clampInt(val('#cfg-session-retention', c.store?.sessionRetentionDays ?? 7), 0, 3650, 7),
+      sessionPersistIntervalMs: clampInt(val('#cfg-session-persist-ms', c.store?.sessionPersistIntervalMs ?? 10000), 2000, 60000, 10000),
+      sqliteSynchronous: val('#cfg-sqlite-synchronous', c.store?.sqliteSynchronous || 'NORMAL').toUpperCase() === 'FULL'
+        ? 'FULL'
+        : 'NORMAL',
       // 统一开关 + 分群滑条表（__replace__：删掉的群设置要真删，深合并做不到）
       unifiedTier: chk('#cfg-unifiedtier', c.store?.unifiedTier !== false),
       // 明确声明语义：滑条上的数字就是概率（后端据此跳过老配置迁移）

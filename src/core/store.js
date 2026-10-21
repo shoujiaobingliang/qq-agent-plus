@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { openDatabase } from './sqlite.js';
-import { DATA_DIR } from './config.js';
+import { DATA_DIR, getConfig } from './config.js';
 import { safeSlice } from './util.js';
 
 function entry(row) {
@@ -77,10 +77,15 @@ export class ChatStore {
         : path.join(dataDir, 'messages.sqlite')
     );
     // journal_mode/synchronous 是本库既有持久化口径（WAL 会产生 -wal/-shm，manage.sh backup
-    // 对本库走一致性快照）；busy_timeout/foreign_keys 由 core/sqlite.js 统一设置
+    // 对本库走一致性快照）；busy_timeout/foreign_keys 由 core/sqlite.js 统一设置。
+    // synchronous 默认 NORMAL：WAL 下仍能扛应用崩溃，但不再为每条消息做一次 FULL fsync；
+    // 需要严格掉电持久化的实例可在配置里改回 FULL。
+    const syncMode = String(getConfig().store?.sqliteSynchronous || 'NORMAL').toUpperCase() === 'FULL'
+      ? 'FULL'
+      : 'NORMAL';
     this.db.exec(`
       PRAGMA journal_mode=WAL;
-      PRAGMA synchronous=FULL;
+      PRAGMA synchronous=${syncMode};
       CREATE TABLE IF NOT EXISTS chats (chat_key TEXT PRIMARY KEY, next_id INTEGER NOT NULL DEFAULT 1);
       CREATE TABLE IF NOT EXISTS messages (
         chat_key TEXT NOT NULL, id INTEGER NOT NULL, mid TEXT, ts INTEGER NOT NULL,
@@ -160,6 +165,11 @@ export class ChatStore {
     // 常驻期间由 console 的每日保留期调度复用同一方法（retentionPruneTargets）。
     this.pruneRuns();
     this.#importJson(dataDir);
+    // 消息/线程 transcript 的保留期：启动清一次，常驻期间由每日 retention 调度复用同一方法。
+    const retentionDays = Number(getConfig().store?.messageRetentionDays);
+    if (retentionDays > 0) {
+      this.pruneMessagesBefore(Date.now() - Math.min(3650, retentionDays) * 24 * 3600 * 1000);
+    }
   }
 
   #transaction(fn) {
@@ -452,6 +462,33 @@ export class ChatStore {
     } catch {
       return 0;
     }
+  }
+
+  /**
+   * 按时间清理聊天记录与线程 transcript。
+   * - 只删已处理/失败的消息；pending/leased/held 保留，避免把没处理的消息静默丢掉。
+   * - 线程 transcript/检查点只删已关闭线程的旧数据；活跃线程不动。
+   * - 0/非法 cutoff = 不清理。
+   */
+  pruneMessagesBefore(cutoffMs) {
+    const cutoff = Math.max(0, Number(cutoffMs) || 0);
+    if (!cutoff) return { messages: 0, threadTurns: 0, threadCheckpoints: 0, threads: 0 };
+    return this.#transaction(() => {
+      const messages = this.db.prepare(
+        "DELETE FROM messages WHERE ts < ? AND state IN ('acked','failed')"
+      ).run(cutoff).changes;
+      const activeThreads = "SELECT thread_id FROM conversation_threads WHERE state != 'closed'";
+      const threadTurns = this.db.prepare(
+        `DELETE FROM thread_turns WHERE created_at < ? AND thread_id NOT IN (${activeThreads})`
+      ).run(cutoff).changes;
+      const threadCheckpoints = this.db.prepare(
+        `DELETE FROM thread_checkpoints WHERE created_at < ? AND thread_id NOT IN (${activeThreads})`
+      ).run(cutoff).changes;
+      const threads = this.db.prepare(
+        "DELETE FROM conversation_threads WHERE state = 'closed' AND updated_at < ?"
+      ).run(cutoff).changes;
+      return { messages, threadTurns, threadCheckpoints, threads };
+    });
   }
 
   retryFailed(chatKey) {

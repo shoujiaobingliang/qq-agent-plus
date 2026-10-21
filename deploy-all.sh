@@ -673,6 +673,12 @@ services:
     image: "${SNOWLUMA_IMAGE}"
     container_name: "${SNOWLUMA_CONTAINER}"
     restart: unless-stopped
+    # 容器日志默认 json-file 无上限，长期运行会把云盘写满/打满 IOPS；限制大小并轮转。
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
     shm_size: 1gb
     ulimits:
       nofile:

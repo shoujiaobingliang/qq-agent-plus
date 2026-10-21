@@ -662,6 +662,14 @@ export const DEFAULT_CONFIG = {
     //   - store 的 #trim 在 maxPerChat<=0 时直接跳过
     // 注意：单群文件会随时间增长，磁盘占用请自行留意。
     maxMessagesPerChat: 0,
+    // 保留期清理（每日跑一次；0 = 不按时间删除）：
+    // 消息/线程 transcript 只保留最近 N 天，会话留档文件同理。默认 7 天。
+    messageRetentionDays: 7,
+    sessionRetentionDays: 7,
+    // 运行中会话 JSON 的落盘间隔：太小会持续写整份文件，云盘 IOPS 会被打满。
+    sessionPersistIntervalMs: 10000,
+    // WAL 下的同步级别：NORMAL 显著降低 fsync/IOPS；FULL 是更严格的掉电持久化。
+    sqliteSynchronous: 'NORMAL',
     // ── 响应概率（滑条上的数字就是概率）──
     // 0 = 只回 @ 和关键词；100 = 任何消息都响应；中间值 = 普通消息按该概率响应。
     // 被 @ 或命中关键词一定响应，不受这个数字影响。
@@ -1792,6 +1800,20 @@ export function updateConfig(patch) {
     next.sticker.collectCriteria = next.sticker.collectCriteria.slice(0, STICKER_COLLECT_CRITERIA_MAX);
   }
   next.tokenSaver = { ...(next.tokenSaver || {}), mode: normalizeTokenSaverMode(next.tokenSaver?.mode) };
+  // 存储保留期与落盘节流：0 = 不按时间删除；间隔夹到 2~60 秒，避免用户误填 0 后每轮都写盘。
+  next.store = next.store || {};
+  const retention = (value, fallback) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(3650, Math.max(0, Math.round(n))) : fallback;
+  };
+  next.store.messageRetentionDays = retention(next.store.messageRetentionDays, 7);
+  next.store.sessionRetentionDays = retention(next.store.sessionRetentionDays, 7);
+  next.store.sessionPersistIntervalMs = Math.min(60000, Math.max(
+    2000, Math.round(Number(next.store.sessionPersistIntervalMs) || 10000)
+  ));
+  next.store.sqliteSynchronous = String(next.store.sqliteSynchronous || 'NORMAL').toUpperCase() === 'FULL'
+    ? 'FULL'
+    : 'NORMAL';
   next.timeControl = normalizeTimeControl(next.timeControl);
   next.dailyMoments.scheduleWindows = normalizeMomentWindows(next.dailyMoments.scheduleWindows);
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');

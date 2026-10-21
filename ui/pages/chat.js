@@ -329,6 +329,26 @@ return `
       </div>
     </div>
 
+    <h3>存储与清理</h3>
+    <div class="field-row">
+      <div class="field"><label>聊天消息保留天数（0 = 不清理）</label>
+        <input type="number" id="cfg-message-retention" min="0" max="3650" value="${esc(st.messageRetentionDays ?? 7)}" /></div>
+      <div class="field"><label>会话日志保留天数（0 = 不清理）</label>
+        <input type="number" id="cfg-session-retention" min="0" max="3650" value="${esc(st.sessionRetentionDays ?? 7)}" /></div>
+      <div class="field"><label>运行中会话落盘间隔（毫秒）</label>
+        <input type="number" id="cfg-session-persist-ms" min="2000" max="60000" step="1000" value="${esc(st.sessionPersistIntervalMs ?? 10000)}" /></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>SQLite 同步级别</label>
+        <select id="cfg-sqlite-synchronous">
+          <option value="NORMAL" ${String(st.sqliteSynchronous || 'NORMAL').toUpperCase() !== 'FULL' ? 'selected' : ''}>NORMAL（推荐，低 IOPS）</option>
+          <option value="FULL" ${String(st.sqliteSynchronous || '').toUpperCase() === 'FULL' ? 'selected' : ''}>FULL（更严格的掉电持久化）</option>
+        </select>
+        <div class="hint">NORMAL 在 WAL 下仍能扛进程崩溃，但断电时可能丢最后几个事务；改成 FULL 会增加云盘 fsync/IOPS。</div>
+      </div>
+    </div>
+    <div class="hint">每天清理一次：只删除已处理/失败的消息和已关闭线程的旧 transcript；未处理消息不会删。默认保留 7 天，0 = 不按时间删除。</div>
+
     <h3>屏蔽名单</h3>
     <div class="field">
       <button class="btn btn-small" id="blocklist-btn">管理屏蔽名单</button>
