@@ -445,7 +445,7 @@ describe('Orchestrator', () => {
     await runner.wake('group:1');
 
     assert.equal(requests.length, 2);
-    const secondPrompt = String(requests[1].messages?.[1]?.content || '');
+    const secondPrompt = String(requests[1].messages?.at(-1)?.content || '');
     assert.match(secondPrompt, /【上次会话交接】/);
     assert.match(secondPrompt, /继续检查附件/);
     assert.match(secondPrompt, /第一轮确认了连接正常/);
@@ -482,14 +482,14 @@ describe('Orchestrator', () => {
     await runner.wake('group:1');
 
     assert.equal(requests.length, 2);
-    const assistant = requests[1].messages.find((m) => m.role === 'assistant');
+    const assistant = requests[1].messages.find((m) => m.role === 'assistant' && m.tool_calls);
     assert.equal(assistant.reasoning_content, '先读取成员再决定');
     const session = runner.sessions.get(runner.sessions.listSummaries(1)[0].id);
     assert.equal(session.callUsage.length, 2);
     assert.equal(session.callUsage[0].cacheHitRate, 0.4);
     assert.equal(session.inputRound, 2);
     assert.ok(session.inputTools.length > 0);
-    const auditedAssistant = session.inputMessages.find((m) => m.role === 'assistant');
+    const auditedAssistant = session.inputMessages.find((m) => m.role === 'assistant' && m.tool_calls);
     assert.equal(auditedAssistant.reasoning_content, '先读取成员再决定');
     assert.equal(auditedAssistant.tool_calls[0].function.name, 'get_active_members');
     assert.ok(session.inputPayloadChars > 0);
@@ -1047,14 +1047,15 @@ describe('Orchestrator', () => {
     store.appendIncoming('group:2', { mid: 2, text: '@猫猫 在吗', senderId: '43', senderName: 'member-43' });
     await runner.wake('group:2');
 
-    const globalPrompt = bodies[0].messages[0].content;
-    const catPrompt = bodies[1].messages[0].content;
+    const allText = (body) => body.messages.map((m) => String(m.content || '')).join('\n');
+    const globalPrompt = allText(bodies[0]);
+    const catPrompt = allText(bodies[1]);
     assert.match(globalPrompt, /DeepSeek 小鲸鱼/, 'group:1 用全局卡');
     assert.match(catPrompt, /二次元猫娘/, 'group:2 用按群覆盖的卡');
     assert.notEqual(globalPrompt, catPrompt);
     // 群内展示名优先用 QQ 昵称；按群覆盖的 botName 用于点名/称呼判断
-    assert.match(catPrompt, /你在群里的名字是「bot」/);
-    const catUserPrompt = String(bodies[1].messages?.[1]?.content || '');
+    assert.match(String(bodies[1].messages[0].content || ''), /你在群里的名字是「bot」/);
+    const catUserPrompt = String(bodies[1].messages?.at(-1)?.content || '');
     assert.match(catUserPrompt, /@我/, '@这个群生效的机器人名字要标成「@我」');
   });
 
@@ -1249,6 +1250,8 @@ describe('Orchestrator', () => {
 
   it('supports per-group lifecycle mode and reuses the append-only DeepSeek transcript', async (t) => {
     const { cfg, runner, store, sessions, append } = fixture(t);
+    // 这条用例断言 provider transcript 的精确边界，用旧合并布局；split 布局另有专门用例。
+    cfg.prompt = { ...(cfg.prompt || {}), layout: 'combined' };
     cfg.conversation.mode = 'legacy';
     cfg.conversation.unifiedMode = false;
     cfg.conversation.groupModes = { 1: 'lifecycle' };
@@ -1388,8 +1391,9 @@ describe('Orchestrator', () => {
     const secondThread = store.getConversationThread('group:1');
     assert.notEqual(secondThread.threadId, firstThread.threadId);
     assert.equal(secondThread.promptTokens, 15000);
-    assert.equal(requests[1].messages.length, 2, '换代后的请求不应携带旧 provider transcript');
-    assert.match(requests[1].messages[1].content, /上次生命周期检查点/);
+    // split 布局固定多两条：system + 人设 user + 确认 assistant + 当前 user。
+    assert.equal(requests[1].messages.length, 4, '换代后的请求不应携带旧 provider transcript');
+    assert.match(requests[1].messages.at(-1).content, /上次生命周期检查点/);
     const latest = sessions.get(sessions.listSummaries(1)[0].id);
     assert.equal(latest.contextRollover.reason, 'input-token-budget');
     assert.equal(latest.contextRollover.promptTokens, 32000);
@@ -1640,9 +1644,8 @@ it('提示词里不再写死默认人设的元素（示例改成中性的）', a
   };
   append(1, '哈哈', '42');
   await runner.wake('group:1');
-  // 这四处原来写死的是默认卡（小鲸鱼）的梗/属性，换到别的卡就变成"别人的残留"
-  // 只看平台段：角色卡正文里出现"大肥鱼"是这张卡自己的雷点，属于卡片内容，不算"平台写死"
-  const platform = system.slice(0, system.indexOf('【角色设定')) + system.slice(system.indexOf('【QQ 场景规则】'));
+  // split 布局下系统消息本身不含角色卡正文；平台段就是整条 system。
+  const platform = system;
   const leftover = ['别墨迹', '大肥鱼', '角色卡里的傲娇、毒舌', '如 DeepSeek V3'].filter((w) => platform.includes(w));
   assert.deepEqual(leftover, [], `平台提示词里不该再写死默认人设的元素：${leftover.join('、')}`);
   // 硬规则要在（口癖以当前卡为准）

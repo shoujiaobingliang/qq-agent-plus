@@ -329,7 +329,8 @@ test('纠正请求沿用该群生效的人设（按群人设）', async (t) => {
   await f.wake();
 
   assert.equal(f.bodies.length, 2);
-  assert.match(String(f.bodies[1].messages?.[0]?.content || ''), /二次元猫娘/, '纠正请求的 system prompt 仍用该群的卡');
+  const personaSeen = f.bodies[1].messages?.some((m) => /二次元猫娘/.test(String(m.content || '')));
+  assert.ok(personaSeen, '纠正请求仍带上该群生效的卡（split 布局下在独立人设消息里）');
 });
 
 test('纠正轮发送明确失败（连接被拒）：仍发兜底说明（不能一句都没有）', async (t) => {

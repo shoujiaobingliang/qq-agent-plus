@@ -23,6 +23,11 @@ export const DATA_DIR = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT, 'data')
 export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 export const DEFAULT_CONFIG = {
+  // 提示词布局：split = 系统机制与人设分成两条消息（推荐，人设不被平台块淹没）；
+  // combined = 全部拼在一条 system 里（旧行为）。
+  prompt: {
+    layout: 'split'
+  },
   // OpenAI 兼容 API（必填才能跑）
   api: {
     // 每日花费上限（改进方案 #8，默认关闭＝升级不改变任何行为）。按**估算价**累计当日用量，
@@ -1163,6 +1168,11 @@ function migrateConfig(parsed) {
   const out = structuredClone(parsed);
   // 触发/注意力：老配置缺省 probability；坏形状按默认值收敛。
   out.trigger = normalizeTriggerConfig(out.trigger);
+  // 提示词布局：缺省 split；非法值回落 split。
+  out.prompt = { ...(DEFAULT_CONFIG.prompt), ...(isPlainObject(out.prompt) ? out.prompt : {}) };
+  out.prompt.layout = ['split', 'combined'].includes(String(out.prompt.layout || ''))
+    ? out.prompt.layout
+    : 'split';
   // 人设段必须是对象：手改坏的 config.json 里可能是 "persona": "小鲸鱼" 这类标量或数组，
   // 放它过去会在保存时炸（Cannot create property 'behaviorProfile' on string），
   // 而控制台保存与 scripts/configure-linux.mjs 都要走这条路径 —— 恢复成默认人设对象。
@@ -1757,6 +1767,11 @@ export function updateConfig(patch) {
   if (safePatch.trigger?.mode !== undefined
     && !TRIGGER_MODES.includes(String(safePatch.trigger.mode).trim())) {
     throw new Error('Invalid trigger mode');
+  }
+  if ('prompt' in safePatch && !isPlainObject(safePatch.prompt)) delete safePatch.prompt;
+  if (safePatch.prompt?.layout !== undefined
+    && !['split', 'combined'].includes(String(safePatch.prompt.layout))) {
+    throw new Error('Invalid prompt layout');
   }
   const next = migrateConfig(deepMerge(getConfig(), safePatch));
   // 目录优先：当前选中的 provider 在 providerKeys 里有 Key 时，顶层 api.apiKey（手动模式遗留字段）

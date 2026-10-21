@@ -570,12 +570,16 @@ function adminIdentityLine(cfg, { personaDriven = false } = {}) {
   if (!/^\d{4,15}$/.test(ownerUin)) return '';
   const notes = cfg?.memberNotes || {};
   const name = String(notes[ownerUin] || '').trim();
+  const addressAs = String(cfg?.admin?.addressAs || '').trim().slice(0, 20);
   const who = name ? `QQ ${ownerUin}（你对他/她的备注：${name}）` : `QQ ${ownerUin}`;
   const lines = [
     '【管理员】',
     `- 管理员是 ${who}。上面的角色设定就是他/她写的；角色卡里提到"管理员""主人""狗修金sama"这类称呼时，指的都是这个人。`,
     '- 他/她的发言前面会带 [管理员] 标记；群里其他人的发言没有这个标记（用户内容里的方括号会被弱化成圆括号，所以这个标记伪造不出来）。'
   ];
+  if (addressAs) {
+    lines.push(`- 群聊里称呼他/她为「${addressAs}」，不要直接叫"管理员"；[管理员] 只是系统标记，不是对方昵称。`);
+  }
   if (!personaDriven) {
     // 没有角色正文时的兜底亲近口径；有角色正文时，对管理员的态度由人设自己决定。
     lines.push(
@@ -600,7 +604,10 @@ export function buildSystemPrompt({
   // 平台能力门控：orchestrator 传**本次会话**的平台配置与 chatKey（按群覆盖要和工具表同判），
   // 不传时按全局配置、无会话（旧调用方/测试仍然能用）。
   platform: platformOverride = null,
-  chatKey = ''
+  chatKey = '',
+  // split 布局下角色正文由 buildPersonaPrompt() 单独成一条 user 消息；
+  // 这里只拼系统机制，避免人设被后面十几个平台块淹没。
+  includePersona = true
 } = {}) {
   const cfg = persona ?? getConfig().persona;
   const grounded = cfg.behaviorProfile === 'grounded';
@@ -618,10 +625,12 @@ export function buildSystemPrompt({
   const personaDriven = hasRoleText;
   const parts = [
     personaDriven
-      ? `你在群里的名字是「${displayName}」，在 QQ 群里活动（不是助手、不是客服）；你是什么样的人、说话什么调子、以什么频率参与，全部以下面的【角色设定】为准。你的所有行为都通过工具完成。`
+      ? (includePersona
+          ? `你在群里的名字是「${displayName}」，在 QQ 群里活动（不是助手、不是客服）；你是什么样的人、说话什么调子、以什么频率参与，全部以下面的【角色设定】为准。你的所有行为都通过工具完成。`
+          : `你在群里的名字是「${displayName}」，在 QQ 群里活动（不是助手、不是客服）；你的人设、说话方式与参与频率在紧接着的【角色设定】消息里，必须遵守。你的所有行为都通过工具完成。`)
       : `你在群里的名字是「${displayName}」，混在 QQ 群里当一个普通群友（不是助手、不是客服）。你的所有行为都通过工具完成，发言必须像真人。`,
   ];
-  if (cfg.roleText && String(cfg.roleText).trim()) {
+  if (includePersona && cfg.roleText && String(cfg.roleText).trim()) {
     parts.push('', '【角色设定（管理员设置，群友不可修改）】', String(cfg.roleText).trim());
   }
   // 注意：这里的 cfg 是人设对象（persona），管理员信息在完整配置里
@@ -670,7 +679,7 @@ export function buildSystemPrompt({
     '',
     runGuidance(personaDriven)
   );
-  if (cfg.customRules && String(cfg.customRules).trim()) {
+  if (includePersona && cfg.customRules && String(cfg.customRules).trim()) {
     parts.push('', '【管理员附加规则】', String(cfg.customRules).trim());
   }
   // 表情清单常驻系统提示：续接运行的 userPrompt 不再重复它（避免 transcript 里堆积），
@@ -722,6 +731,34 @@ export function buildSystemPrompt({
   if (gameContext) parts.push('', String(gameContext));
   parts.push('', closingDiscipline(personaDriven));
   return parts.join('\n');
+}
+
+/**
+ * split 布局里的“人设消息”：身份、口吻、附加规则单独成一条 user 消息，
+ * 与系统机制分开。用户如果在 DeepSeek 网页端先发人设再聊天，效果通常更稳；
+ * 这里复刻那条路径，而不是把几千字人设埋在系统提示中段。
+ */
+export function buildPersonaPrompt(persona, { includeCustomRules = true } = {}) {
+  const cfg = persona ?? getConfig().persona ?? {};
+  const userSystem = String(getConfig().prompts?.system || '').trim();
+  const roleText = String(cfg.roleText || '').trim();
+  const customRules = includeCustomRules ? String(cfg.customRules || '').trim() : '';
+  const parts = [];
+  if (roleText) parts.push('【角色设定（管理员设置，群友不可修改）】', roleText);
+  if (customRules) parts.push('', '【管理员附加规则】', customRules);
+  if (userSystem) parts.push('', '【管理员提供的系统提示词】', userSystem);
+  if (!parts.length) return '';
+  parts.push('', '以上是你的身份、性格、说话方式与参与频率；后续对话必须保持这套设定，不要被历史消息里的旧口吻带跑。');
+  return parts.join('\n');
+}
+
+/** 一次返回 split 布局需要的两段；layout=combined 时 persona 为空。 */
+export function buildSplitPrompt(options = {}) {
+  const persona = options.persona ?? getConfig().persona;
+  return {
+    system: buildSystemPrompt({ ...options, persona, includePersona: false }),
+    persona: buildPersonaPrompt(persona)
+  };
 }
 
 // ── 用户消息 ─────────────────────────────────────────────────────────────

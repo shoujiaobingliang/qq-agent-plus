@@ -119,7 +119,7 @@ import { budgetStatus } from './budget.js';
 import { readOwnerUin } from './notify-owner.js';
 import { buildReminderNote, reminderNoteCost } from './reminders.js';
 import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, createEventBus, todayKey } from './util.js';
-import { buildSystemPrompt, buildUserPrompt, isAtMe, resolveContextTier } from '../llm/prompt.js';
+import { buildSystemPrompt, buildSplitPrompt, buildUserPrompt, isAtMe, resolveContextTier } from '../llm/prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, emptyUsage, isRetryableError } from '../llm/llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool, platformToolAllowed } from '../tools/tools.js';
 import { normalizeMid } from '../tools/tools-core.js';
@@ -2006,7 +2006,7 @@ export class Orchestrator {
     const builtinToolDefs = toolDefs;   // 前缀哈希用它（见下），插件工具只按名字参与
     if (pluginToolDefs.length) toolDefs.push(...pluginToolDefs);
     const openAiTools = toOpenAiTools(toolDefs);
-    const systemPrompt = buildSystemPrompt({
+    const promptOptions = {
       // 按群生效的人设（缺省 = 全局）
       persona,
       // 与【此刻状态】用同一个名字（群名片优先），否则同一次请求里会出现两个"你在群里的名字"
@@ -2019,7 +2019,11 @@ export class Orchestrator {
       // 平台能力的"教不教"必须与上面工具表的"给不给"同判（含按群覆盖）：同一个 chatKey。
       platform: cfg.platform,
       chatKey
-    });
+    };
+    const promptLayout = String(cfg.prompt?.layout || 'split');
+    const split = promptLayout === 'split' ? buildSplitPrompt(promptOptions) : null;
+    const systemPrompt = split ? split.system : buildSystemPrompt(promptOptions);
+    const personaPrompt = split?.persona || '';
     const promptPrefixHash = crypto.createHash('sha256')
       .update(String(cfg.api.provider || ''))
       .update('\0')
@@ -2028,6 +2032,8 @@ export class Orchestrator {
       .update(String(cfg.api.model || ''))
       .update('\0')
       .update(systemPrompt)
+      .update('\0')
+      .update(personaPrompt)
       .update('\0')
       // 前缀哈希：内置工具算完整 schema；插件工具**只算名字**（排序后）。
       // 插件跑起来/崩掉重启会让"当前有哪些插件工具"抖动，但工具集其实没变 ——
@@ -2105,9 +2111,12 @@ export class Orchestrator {
       session
     });
 
-    session.systemPrompt = systemPrompt;
+    // 审计/会话详情仍展示完整系统提示（含人设）；实际请求按布局拆分。
+    const combinedSystemPrompt = personaPrompt ? `${systemPrompt}\n\n${personaPrompt}` : systemPrompt;
+    session.systemPrompt = combinedSystemPrompt;
+    session.personaPrompt = personaPrompt;
     session.userPrompt = userPrompt;
-    session.promptChars = systemPrompt.length + userPrompt.length
+    session.promptChars = combinedSystemPrompt.length + userPrompt.length
       + JSON.stringify(priorProviderMessages).length;
     session.model = cfg.api.model;
     session.conversationMode = conversationCfg.mode;
@@ -2158,12 +2167,21 @@ export class Orchestrator {
         ? `${userPrompt}\n\n【本次唤醒】${wakeLead}${wakeTail}`
         : (paced ? `${userPrompt}\n\n【本次唤醒】${pacedLead}` : userPrompt)
     };
+    // split 布局：人设单独作为一条 user 消息 + 一句确认，复刻“先发人设再聊天”的上下文，
+    // 避免几千字人设被系统机制淹没；combined 布局保持旧行为。
+    const personaMessages = personaPrompt
+      ? [
+          { role: 'user', content: personaPrompt },
+          { role: 'assistant', content: '明白，我会保持这个设定。' }
+        ]
+      : [];
     const messages = [
       { role: 'system', content: systemPrompt },
+      ...personaMessages,
       ...structuredClone(priorProviderMessages),
       currentUserMessage
     ];
-    const transcriptStart = 1 + priorProviderMessages.length;
+    const transcriptStart = 1 + personaMessages.length + priorProviderMessages.length;
     session.injectedMessages = modelMessagesForAudit(priorProviderMessages);
     session.injectedMessageChars = JSON.stringify(priorProviderMessages).length;
     session.inputTools = structuredClone(openAiTools);

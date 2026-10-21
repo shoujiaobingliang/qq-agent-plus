@@ -449,6 +449,19 @@ function renderPersonaSection(c) {
   personaGridKey = null;
   return `
     <h3>人设</h3>
+    <div class="field-row">
+      <div class="field"><label>提示词布局</label>
+        <select id="cfg-prompt-layout">
+          <option value="split" ${c.prompt?.layout !== 'combined' ? 'selected' : ''}>分离（系统机制 + 人设两条消息，推荐）</option>
+          <option value="combined" ${c.prompt?.layout === 'combined' ? 'selected' : ''}>合并（全部拼进系统提示，旧行为）</option>
+        </select>
+        <div class="hint">分离布局把人设单独作为一条消息，避免几千字人设被平台规则淹没；合并布局与旧版逐字一致。</div>
+      </div>
+      <div class="field"><label>对管理员的称呼（可选）</label>
+        <input type="text" id="cfg-admin-address" value="${esc(c.admin?.addressAs || '')}" maxlength="20" placeholder="老大 / 主人 / 老板" />
+        <div class="hint">群聊里用这个称呼指代管理员；[管理员] 仍只是系统标记，不会当成昵称。</div>
+      </div>
+    </div>
     ${renderPersonaLibrary(c)}
     <div class="persona-detail">
       <div class="pd-head">

@@ -607,6 +607,14 @@ async function saveConfig({ quiet = false } = {}) {
       // 就别把原有的绑定清掉——正文没变，绑定关系也不该变。
       templateId = c.persona.templateId || '';
     }
+    patch.prompt = {
+      ...(c.prompt || {}),
+      layout: val('#cfg-prompt-layout', c.prompt?.layout || 'split') === 'combined' ? 'combined' : 'split'
+    };
+    patch.admin = {
+      // 只提交称呼，不要在这里碰 ownerUin：管理员 QQ 由「全局管理员 QQ」唯一维护。
+      addressAs: val('#cfg-admin-address', c.admin?.addressAs || '').trim().slice(0, 20)
+    };
     patch.persona = {
       botName: val('#cfg-botname', c.persona.botName).trim() || '小鲸鱼',
       selfNickname: val('#cfg-selfnick', c.persona.selfNickname || '').trim(),
