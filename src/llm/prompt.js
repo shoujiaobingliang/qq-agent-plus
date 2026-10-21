@@ -178,9 +178,22 @@ function quoteAndAt() {
   return [
     '【引用与点名：只在必要时用】',
     '- 群聊里需要明确"我在回谁/回哪句"时，用 send_message 的 replyToMessageId 引用那条消息；需要直接叫某人时用 atUserId 传对方 QQ 号（可在 get_active_members 或消息里看到）。',
-    '- 判断标准：只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续几句话指代不同的消息/人时才需要引用。真人不会每条都点。',
+    '- 判断标准：只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续几句话指代不同的消息/人时，才需要引用。真人不会每条都点。',
     '- 普通对话、上下文唯一、刚在接同一句话时，不要引用也不要 @。',
     '- 引用和 @ 不要叠满：已经引用就不必再 @，已经 @ 也不必再引用。'
+  ].join('\n');
+}
+
+/**
+ * 连续消息：QQ 上把一句话拆成多条发送非常常见。只靠“一条一行”的上下文，
+ * 模型容易针对最后一条或其中一条做反应，看起来答非所问。
+ */
+function fragmentedTurns() {
+  return [
+    '【连续消息：先合并理解再回】',
+    '- 同一个人短时间内连发多条、且标着「（接上条）」时，通常是一句话/一个想法被拆开发送：先合并理解整体意思，再决定怎么回。',
+    '- 不要只针对最末一条或其中某一条做反应；合并后仍不完整时，可以等对方说完，或直接问一句。',
+    '- 需要引用时选最能代表整体意思的一条（通常是最后一条），不要把每条都回一遍。'
   ].join('\n');
 }
 
@@ -645,6 +658,8 @@ export function buildSystemPrompt({
   parts.push(
     quoteAndAt(),
     '',
+    fragmentedTurns(),
+    '',
     memoryRules(identityPilotAvailable, friendProposalAvailable),
     '',
     stickerRules(grounded),
@@ -724,7 +739,20 @@ function participationText(level) {
 
 // withId：是否带 "#消息id" 前缀。id 只在需要引用/看图的场景展示（触发批、带图消息），
 // 纯文本历史行不带，避免整屏数字噪音。
-function formatEntry(m, { withId = true } = {}) {
+// 同一人连续发送的判定窗口：QQ 上把一句话拆成几条很常见，短时间内的连续消息
+// 通常属于同一个意思。只做提示词里的“接上条”标记，不改存储/触发语义。
+const BURST_CONTINUATION_MS = 90_000;
+
+function isBurstContinuation(prev, current) {
+  if (!prev || !current) return false;
+  if (Boolean(prev.self) !== Boolean(current.self)) return false;
+  const senderId = String(prev.senderId || '');
+  if (!senderId || senderId !== String(current.senderId || '')) return false;
+  const gap = Number(current.ts) - Number(prev.ts);
+  return Number.isFinite(gap) && gap >= 0 && gap <= BURST_CONTINUATION_MS;
+}
+
+function formatEntry(m, { withId = true, continuation = false } = {}) {
   const senderId = String(m.senderId || '');
   // 显示名口径（备注/代号优先于群名片 + 段头弱化）统一在 core/display-name.js ——
   // 工具结果与这里必须同口径，否则同一个人在一处叫"pyy"、另一处叫群名片（2026-10-10 反馈）
@@ -737,7 +765,9 @@ function formatEntry(m, { withId = true } = {}) {
   const replyPrefix = quotePrefixFor(m);
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
-  return `[${formatShortTime(m.ts)}] ${idPrefix}${adminTag}${who}：${replyPrefix}${m.text}`;
+  // 「接上条」只提示“这是同一人连续消息的一部分”，不合并正文、不改变消息 id。
+  const continuationTag = continuation ? '（接上条）' : '';
+  return `[${formatShortTime(m.ts)}] ${idPrefix}${adminTag}${who}${continuationTag}：${replyPrefix}${m.text}`;
 }
 
 /** 正则元字符转义（名字来自配置与群名片，可能含 . * ( 这类字符）。 */
@@ -876,12 +906,21 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
     if (blocked.size) messages = messages.filter((m) => m.self || !blocked.has(String(m.senderId)));
   }
   messages = messages.slice(-maxLimit);
+  // 同一人短时间连续发送：在行尾/名字后标「接上条」，提示模型先合并理解。
+  // 只基于最终选中的这段消息计算，避免边界外的消息影响标记。
+  const continuationIds = new Set();
+  for (let i = 1; i < messages.length; i += 1) {
+    if (isBurstContinuation(messages[i - 1], messages[i])) continuationIds.add(messages[i].id);
+  }
   const maxChars = Math.min(24000, Math.max(100, Number(cfg.pastStateMaxChars) || 24000));
   let remaining = maxChars;
   const selected = [];
   const lines = [];
   for (const m of [...messages].reverse()) {
-    const line = formatEntry({ ...m, text: safeSlice(m.text, 2000) }, { withId: true });
+    const line = formatEntry({ ...m, text: safeSlice(m.text, 2000) }, {
+      withId: true,
+      continuation: continuationIds.has(m.id)
+    });
     if (line.length + 1 > remaining) break;
     remaining -= line.length + 1;
     lines.unshift(line);
@@ -962,10 +1001,12 @@ function triggerLabels(entry, ctx) {
 /** 私聊/群聊时私聊始终高触发。 */
 export function buildTriggerBlock(triggerEntries, ctx) {
   const lines = [];
-  for (const m of triggerEntries) {
+  for (let i = 0; i < triggerEntries.length; i += 1) {
+    const m = triggerEntries[i];
     const labels = triggerLabels(m, ctx);
     const labelStr = labels.length ? `（${labels.join('/')}）` : '';
-    lines.push(`${formatEntry(m)}${labelStr}`);
+    const continuation = i > 0 && isBurstContinuation(triggerEntries[i - 1], m);
+    lines.push(`${formatEntry(m, { continuation })}${labelStr}`);
   }
   return lines.join('\n');
 }
@@ -1067,7 +1108,7 @@ export function buildUserPrompt(ctx) {
     parts.push('【生命周期续接】' + (staleNote ? staleNote + String.fromCharCode(10) : '')
       + '此前轮次已按原顺序放在上文；这里只处理本次新增消息，不要重复回复旧消息。');
   } else if (past.text) {
-    parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，越往下越新；你的发言标为"我"；这些都已经看过；每行的 #消息id 用来定位具体某条 —— 引用、看图、收藏表情、翻页工具都要用它，个别行如拍一拍没有 id）。这里只带了最近 ${past.count} 条；同一个会话里 #消息id 通常随时间递增，可以用它核对先后（遇到被补课的旧消息、或 id 跳号时，以行序为准）。要看更早的记录用 get_recent_messages 往前翻：\n${past.text}`);
+    parts.push(`【过去状态】${staleNote ? staleNote + String.fromCharCode(10) : ''}以下是这个会话最近的聊天记录（按时间排序，越往下越新；你的发言标为"我"；这些都已经看过；每行的 #消息id 用来定位具体某条 —— 引用、看图、收藏表情、翻页工具都要用它，个别行如拍一拍没有 id）。标着「（接上条）」的行表示同一人短时间内连续发送，通常是同一句话/一个想法的延续，先合并理解再决定回不回。这里只带了最近 ${past.count} 条；同一个会话里 #消息id 通常随时间递增，可以用它核对先后（遇到被补课的旧消息、或 id 跳号时，以行序为准）。要看更早的记录用 get_recent_messages 往前翻：\n${past.text}`);
   } else {
     // "这次没带历史"和"这个会话真的没有历史"必须分开说：前者（档位给 0 条、或字符预算
     // 连最新一条都放不下）以前也报"你第一次参与这个会话"，模型会当新会话开场、
@@ -1151,10 +1192,10 @@ export function buildUserPrompt(ctx) {
     // 是事实错误，模型会顺着它把提醒说成"管理员托的"（2026-10-10 复核）。具体要做什么
     // 由后面那段【本次唤醒】的说明（wakeNote）给出；这里只给中性交代。
     parts.push(triggerBlock
-      ? `【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`
+      ? `【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它；标着「（接上条）」的是同一人短时间内连续发送，先合并理解整体意思）：\n${triggerBlock}`
       : '【本次唤醒】到点了，看看群里的最近情况；具体要做什么以下面的说明为准。');
   } else {
-    parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它）：\n${triggerBlock}`);
+    parts.push(`【本次唤醒】以下是你还没看过的最新消息（每条前的 #数字 是消息 id，引用回复/看图时用它；标着「（接上条）」的是同一人短时间内连续发送，先合并理解整体意思）：\n${triggerBlock}`);
   }
 
   return parts.join('\n\n');
