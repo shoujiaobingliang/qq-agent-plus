@@ -805,7 +805,8 @@ function renderMessageTypesSection(c) {
       等内容被按需读取时才补上。）</div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-expand-forward" ${mt.expandForward !== false ? 'checked' : ''} />
       <label for="cfg-expand-forward">自动展开合并转发 / 聊天记录卡片</label></div>
-    <div class="hint" style="margin-left:26px">关掉后正文只留一行占位符，<b>任何一条都不自动展开（包括被 @ 的那条）</b>；模型需要时自己调 read_forward 展开。
+    <div class="hint" style="margin-left:26px">关掉后正文只留一行占位符，<b>任何一条都不自动展开（包括被 @ 的那条）</b>；read_forward 工具也会一并摘掉，模型不能再按需展开。
+      这类转发消息本身也不会触发回复（被 @、引用机器人、私聊除外），里面的内容不会进上下文。
       一条 20 条的记录展开后是几千字符，还会跟着进存档和之后每一轮的上下文。</div>
     <div class="checkbox-row" style="margin-top:8px"><input type="checkbox" id="cfg-mt-images" ${mt.images !== false ? 'checked' : ''} />
       <label for="cfg-mt-images">查看消息里的图片与表情包</label></div>

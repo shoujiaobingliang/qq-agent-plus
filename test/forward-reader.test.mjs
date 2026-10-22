@@ -183,10 +183,10 @@ test('聊天记录卡片单独标成 [卡片聊天记录 …]：提示词里的�
   assert.equal(cardToText({ type: 'json', data: {} }), '[卡片消息]');
 });
 
-// 「消息类型」关掉自动展开后（issue #34），**按需展开这条路必须还在** ——
-// 关的是"入站顺手展开"，不是"模型想看时看不到"。哪天有人把同一个闸门也加到工具上，
-// 这条用例会红。
-test('关掉自动展开后，read_forward 按需展开照旧可用', async () => {
+// 2026-10-22 口径变更：`messageTypes.expandForward=false` 现在是**硬开关** ——
+// 不只拦入站自动展开，运行中的 read_forward 也必须拒绝（否则开关只是把展开推迟到模型调用）。
+// 开关打开时按需展开照旧可用。
+test('关掉转发查看后，read_forward 执行层也拒绝；打开后按需展开照旧可用', async () => {
   const { updateConfig } = await import('../src/core/config.js');
   const calls = [];
   const entry = { mid: '-123', text: '[合并转发聊天记录]' };
@@ -207,9 +207,14 @@ test('关掉自动展开后，read_forward 按需展开照旧可用', async () =
   updateConfig({ messageTypes: { expandForward: false } });
   try {
     const result = await tool.execute(ctx, { messageId: '-123' });
-    assert.equal(result.isError, undefined);
-    assert.match(entry.text, /forward content/, '按需展开仍要写回存档');
+    assert.equal(result.isError, true, '关掉后执行层必须拒绝');
+    assert.match(result.content, /关闭了合并转发展开/);
+    assert.equal(entry.text, '[合并转发聊天记录]', '不能把展开正文写回存档');
+    assert.equal(calls.length, 0, '拒绝时不该向协议端请求');
   } finally {
     updateConfig({ messageTypes: { expandForward: true } });
   }
+  const result = await tool.execute(ctx, { messageId: '-123' });
+  assert.equal(result.isError, undefined);
+  assert.match(entry.text, /forward content/, '开关打开后按需展开仍要写回存档');
 });

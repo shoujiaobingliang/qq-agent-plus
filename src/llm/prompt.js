@@ -25,7 +25,10 @@ import {
   tierToSlider as _tierToSlider
 } from '../core/tier-slider.js';
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider };
-import { formatFullTime, formatShortTime, quotePrefixFor, safeSlice, sanitizeUserText, resolveSelfName } from '../core/util.js';
+import { formatFullTime, formatShortTime, safeSlice, sanitizeUserText, resolveSelfName } from '../core/util.js';
+import { isForwardEntry } from '../core/forward-text.js';
+import { personaAwareText } from '../core/persona-speech.js';
+export { isForwardEntry } from '../core/forward-text.js';
 import { displayNameOf } from '../core/display-name.js';
 import { buildStickerContext, buildStickerStrategyHint } from '../onebot/stickers.js';
 import { listSkills } from '../skills/registry.js';
@@ -319,6 +322,8 @@ function qqSceneRules(grounded = false, platform = null, chatKey = '', personaDr
   const canViewStickers = vision && stickersOn;    // 表情库里没备注的图
   const search = cfg.webSearch?.enabled !== false;
   const memeLookup = cfg.webSearch?.memes?.enabled !== false;
+  // 合并转发展开是硬开关：关掉后 read_forward 会被摘掉，提示词也不能再教它展开。
+  const forwardReadable = cfg.messageTypes?.expandForward !== false;
   const lines = [
     '【QQ 场景规则】',
     grounded
@@ -515,7 +520,9 @@ function qqSceneRules(grounded = false, platform = null, chatKey = '', personaDr
       ? '- 你听不了语音：消息里的 [语音] [文件…m4a|mp3 等] 只是占位提示，如实话一句"这边听不了语音"即可，不要编造声音内容；但 [视频] 的**画面**可以用 get_message_images 看（2×2 四宫格＝4 帧），看完照常说画面内容。'
       : '- 你无法处理语音/视频/音频文件：消息里的 [语音] [视频] [文件…m4a|mp3|mp4 等] 只是占位提示，如实话一句"这边听不了语音"即可，不要编造音频内容。');
   }
-  lines.push('- [卡片消息] 是占位符无法查看；[合并转发聊天记录] / [转发消息 …] 用 read_forward 工具 + 那条消息前的 #数字 展开看全文；[卡片聊天记录 …] 这种卡片协议端常常不给可取的内容，取不到就照实说看不到，别编造里面的内容。');
+  lines.push(forwardReadable
+    ? '- [卡片消息] 是占位符无法查看；[合并转发聊天记录] / [转发消息 …] 用 read_forward 工具 + 那条消息前的 #数字 展开看全文；[卡片聊天记录 …] 这种卡片协议端常常不给可取的内容，取不到就照实说看不到，别编造里面的内容。'
+    : '- [卡片消息]、[合并转发聊天记录] / [转发消息 …] / [卡片聊天记录 …] 都只是占位符：管理员在「消息类型」里关闭了转发内容查看，你读不到里面的内容，也不要猜、不要编造；有人问起就照实说"转发内容看不了（设置里关了）"。');
   return lines.join('\n');
 }
 
@@ -569,6 +576,8 @@ function priorityNote(personaDriven = false) {
       '- 人格、口吻、称呼、态度、喜恶、参与频率、说话节奏和消息长短，全部以【角色设定】和【管理员附加规则】为准；系统不提供默认人格，也不追加通用群友风格或发言频率。',
       '- 角色设定没写到的细节，按这个角色自然会怎么做来决定，不要套用客服腔、通用 AI 助手腔或别的人设。',
       '- **口癖、自称、梗一律以当前【角色设定】为准**：你历史消息里（包括你上一条自己发的、以及【上次会话交接】【过去状态】里引用的话）出现过的口癖/自称/称呼，只要与当前卡冲突就都不作数，立刻改口、不要沿用 —— 换卡之后尤其如此。',
+      '- 历史里如果出现整段语气、性格、态度或立场与当前【角色设定】明显不符的发言（不只一两个口癖），那是换卡前旧人格留下的，不是你的过去：不要模仿、不要把它当成自己的立场，一律以当前设定为准，必要时自然改口。不要把这条机制解释给群友听。',
+      '- 对上一条鱼（换卡前旧人格）的发言可以**适当**吐槽：只在历史里出现「换卡前的旧发言」占位、或别人引用/提到**你自己**那段旧发言时，顺口用符合当前人设的说法调侃一句（例如“上一条鱼又在发什么疯”“这谁啊”），轻轻带过即可。不要追问被遮住的内容、不要编造它说了什么、不要每条都提、不要攻击群友或评价管理员换卡，也不要把“吐槽上一条鱼”变成口头禅；大多数时候忽略就好。',
       '- 下面这些照旧算数、角色设定不许推翻：安全规则、工具用法、"发言只能走 send_message"这类机制约束。'
     ].join('\n');
   }
@@ -1038,7 +1047,7 @@ function isBurstContinuation(prev, current) {
   return Number.isFinite(gap) && gap >= 0 && gap <= BURST_CONTINUATION_MS;
 }
 
-function formatEntry(m, { withId = true, continuation = false } = {}) {
+function formatEntry(m, { withId = true, continuation = false, chatKey = '' } = {}) {
   const senderId = String(m.senderId || '');
   // 显示名口径（备注/代号优先于群名片 + 段头弱化）统一在 core/display-name.js ——
   // 工具结果与这里必须同口径，否则同一个人在一处叫"pyy"、另一处叫群名片（2026-10-10 反馈）
@@ -1048,12 +1057,17 @@ function formatEntry(m, { withId = true, continuation = false } = {}) {
   const adminTag = !m.self && senderId && senderId === String(getConfig().admin?.ownerUin || '').trim()
     ? '[管理员] '
     : '';
-  const replyPrefix = quotePrefixFor(m);
+  // 「转发内容查看」关掉时，历史里已经展开过的转发也遮成占位符：
+  // 否则关开关只是拦住新展开，旧记录仍会每轮跟着上下文进模型。
+  const forwardMuted = getConfig().messageTypes?.expandForward === false;
   const hasMid = m.mid !== null && m.mid !== undefined && String(m.mid) !== '';
   const idPrefix = withId && hasMid ? `#${m.mid} ` : '';
   // 「接上条」只提示“这是同一人连续消息的一部分”，不合并正文、不改变消息 id。
   const continuationTag = continuation ? '（接上条）' : '';
-  return `[${formatShortTime(m.ts)}] ${idPrefix}${adminTag}${who}${continuationTag}：${replyPrefix}${m.text}`;
+  // 正文的引用块、转发遮罩与“旧人设发言”遮罩统一交给 personaAwareText：
+  // 按同一口径补引用块 / 遮转发 / 遮换卡前的「我」发言，不会叠成两份前缀。
+  const body = personaAwareText(m, chatKey, { forwardMuted });
+  return `[${formatShortTime(m.ts)}] ${idPrefix}${adminTag}${who}${continuationTag}：${body}`;
 }
 
 /** 正则元字符转义（名字来自配置与群名片，可能含 . * ( 这类字符）。 */
@@ -1123,6 +1137,11 @@ export function hitKeyword(text, keywords = []) {
  * shouldRespond=false：调用方把这批消息标记已读、不创建会话、不调模型。
  * 内容仍留在存档，日后被艾特时会作为"已读历史"一起发出去。
  *
+ * ── 合并转发（messageTypes.expandForward=false）──
+ * 关闭查看时转发消息不参与概率/关键词/注意力判定：只剩转发消息的批次一律不响应
+ * （返回 forwardMutedOnly=true，调用方据此跳过 hybrid/续接）；被 @ 的转发仍按被艾特必回，
+ * 引用机器人、私聊不受影响。
+ *
  * ⚠️ 随机档结果必须**固定下来**（由调用方传 roll），否则每次渲染提示词
  *    都会重新掷骰子，导致会话记录与提示词不一致。
  *
@@ -1134,11 +1153,18 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
   // 滑条上的数字就是概率（0~100），存在 randomPercent 里；老配置由 config 层迁移过。
   const probability = clampProbability(c.randomPercent, 100);
 
-  const texts = (triggerEntries || []).map((e) => String(e?.text ?? ''));
+  const entries = Array.isArray(triggerEntries) ? triggerEntries : [];
+  // 「自动展开」关掉时，转发消息既不能被展开，也不能只靠自己触发回复：
+  // 概率 / 关键词 / 注意力判定都跳过它们（@、引用机器人、私聊仍由各自的必回规则放行）。
+  // 开关打开时行为完全不变 —— 展开后的转发照旧参与判定。
+  const forwardMuted = getConfig().messageTypes?.expandForward === false;
+  const candidates = forwardMuted ? entries.filter((entry) => !isForwardEntry(entry)) : entries;
+  const texts = candidates.map((e) => String(e?.text ?? ''));
   // 被 @ 的判定优先用入库时按原始消息段算出来的 mentionsSelf：群里给机器人改过名片时，
   // 消息文本里是**群名片**，跟 botName / 登录昵称都对不上，只按文本判断会漏 —— 表现为
   // "档位调低之后 @ 它也不回"。文本路径保留给非存档来源的调用方（预览、测试、旧数据）。
-  const atMe = (triggerEntries || []).some((entry) => entry?.mentionsSelf === true)
+  // mentionsSelf 对转发消息同样有效（被 @ 的转发仍算明确点名）。
+  const atMe = entries.some((entry) => entry?.mentionsSelf === true)
     || texts.some((t) => isAtMe(t, { selfNickname, botName, selfId }));
   const keyword = hitKeyword(texts.join('\n'), c.keywords);
   // 掷骰子：调用方可传入已固定的 roll（0-100），避免重复随机
@@ -1153,6 +1179,11 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
   }
   if (keyword) {
     return { tier: 2, count: n0(c.keywordCount, saverCaps?.keywordCount), reason: '关键词命中', shouldRespond: true };
+  }
+  // 只剩转发消息、且开关关掉了查看：不按概率/全部响应触发。
+  // forwardMutedOnly 交给 orchestrator 拦下 hybrid 注意力与续接判定。
+  if (forwardMuted && entries.length > 0 && candidates.length === 0) {
+    return { tier: 0, count: 0, reason: '转发内容已关闭查看', shouldRespond: false, forwardMutedOnly: true };
   }
   // 100% = 全响应（比掷骰子更省事，也让"触发方式"显示成"全部响应"）
   if (probability >= 100) {
@@ -1205,7 +1236,8 @@ export function buildPastState(store, chatKey, { excludeIds = [], limit = null }
   for (const m of [...messages].reverse()) {
     const line = formatEntry({ ...m, text: safeSlice(m.text, 2000) }, {
       withId: true,
-      continuation: continuationIds.has(m.id)
+      continuation: continuationIds.has(m.id),
+      chatKey
     });
     if (line.length + 1 > remaining) break;
     remaining -= line.length + 1;
@@ -1292,7 +1324,7 @@ export function buildTriggerBlock(triggerEntries, ctx) {
     const labels = triggerLabels(m, ctx);
     const labelStr = labels.length ? `（${labels.join('/')}）` : '';
     const continuation = i > 0 && isBurstContinuation(triggerEntries[i - 1], m);
-    lines.push(`${formatEntry(m, { continuation })}${labelStr}`);
+    lines.push(`${formatEntry(m, { continuation, chatKey: ctx.chatKey })}${labelStr}`);
   }
   return lines.join('\n');
 }

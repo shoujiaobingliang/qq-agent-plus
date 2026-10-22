@@ -151,7 +151,9 @@ async function stickerLookupHint(ctx, key) {
   }
 }
 
-import { normalizeMessageList, safeSlice, sanitizeUserText, textWithQuote, unquoteJsonString } from '../core/util.js';
+import { normalizeMessageList, safeSlice, sanitizeUserText, unquoteJsonString } from '../core/util.js';
+import { FORWARD_MUTED_TEXT, isForwardEntry } from '../core/forward-text.js';
+import { personaAwareReply, personaAwareText } from '../core/persona-speech.js';
 import { displayNameOf } from '../core/display-name.js';
 import { setMemberNote } from '../memory/memory-global.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
@@ -629,6 +631,10 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!modelVisible(entry)) return err(`在当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          // 转发内容查看关闭：收藏表情也要看图，不能从转发里绕过开关。
+          if (getConfig().messageTypes?.expandForward === false && isForwardEntry(entry)) {
+            return err('管理员关闭了转发内容查看，不能收藏这条转发里的图片。');
+          }
           const imageMedia = (entry.media || []).find((m) => m.kind === 'image' && m.url);
           if (!imageMedia) return err('该消息没有可收藏的图片');
           // 与"自动收藏"同一口径：先判一下这是不是真表情包 —— 只靠模型自己的判断，
@@ -1158,6 +1164,10 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          // 转发内容查看关闭：OCR 也不能绕过开关读转发里的图。
+          if (getConfig().messageTypes?.expandForward === false && isForwardEntry(entry)) {
+            return err('管理员关闭了转发内容查看，不能读取这条转发里的图片文字。');
+          }
           const media = (Array.isArray(entry.media) ? entry.media : []).filter((m) => m && m.kind === 'image');
           if (!media.length) return ok(`消息 ${args.messageId} 里没有图片。`);
           const candidates = [];
@@ -1541,6 +1551,10 @@ export function buildToolDefs() {
           const groupId = Number(ctx.chatId);
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          // 转发内容查看关闭：不能把转发里的图上传到群相册。
+          if (getConfig().messageTypes?.expandForward === false && isForwardEntry(entry)) {
+            return err('管理员关闭了转发内容查看，不能使用这条转发里的图片。');
+          }
           const media = (Array.isArray(entry.media) ? entry.media : []).filter((m) => m && m.kind === 'image');
           const target = media.find((m) => /^https?:\/\//i.test(String(m.url || ''))) || media[0];
           if (!target) return ok(`消息 ${args.messageId} 里没有可上传的图片。`);
@@ -1713,7 +1727,10 @@ export function buildToolDefs() {
     },
     {
       name: 'get_recent_messages',
-      description: '往前翻当前会话的更多历史消息（提示词里只带了最近一段；需要更早的上下文时用）。返回带 messageId（就是聊天记录里的 #数字），可用于引用或看图。消息文本出现 [合并转发聊天记录] 时，用 read_forward 展开看内容。',
+      description: '往前翻当前会话的更多历史消息（提示词里只带了最近一段；需要更早的上下文时用）。返回带 messageId（就是聊天记录里的 #数字），可用于引用或看图。'
+        + (getConfig().messageTypes?.expandForward === false
+          ? '管理员关闭了转发内容查看：消息里的 [合并转发聊天记录] 等占位符看不了，不要尝试展开。'
+          : '消息文本出现 [合并转发聊天记录] 时，用 read_forward 展开看内容。'),
       parameters: {
         type: 'object',
         properties: {
@@ -1724,6 +1741,8 @@ export function buildToolDefs() {
       async execute(ctx, args) {
         const limit = Math.min(100, Math.max(1, Number(args.limit) || 30));
         const offset = Math.max(0, Number(args.offset) || 0);
+        // 「转发内容查看」关掉时，翻历史也看不到转发正文：已展开的旧记录照样遮掉。
+        const forwardMuted = getConfig().messageTypes?.expandForward === false;
         const messages = ctx.store.recent(ctx.chatKey, { limit, offset: offset + (ctx.session.pastStateCount || 0) })
           // 引擎发的游戏私聊（身份/查验结果/行动回执）连翻页都不该看到：模型在私聊里不是上帝视角
           .filter((m) => m.eventKind !== 'game-secret');
@@ -1733,8 +1752,9 @@ export function buildToolDefs() {
             messageId: m.mid ?? undefined,
             time: new Date(m.ts).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
             sender: m.self ? '我' : displayNameOf(m.senderId, m.senderName),
-            // 与【过去状态】同一套渲染：正文缺引用块时补上（回复 + 合并转发卡片那类记录）
-            text: textWithQuote(m)
+            // 与【过去状态】同一套渲染：正文缺引用块时补上（回复 + 合并转发卡片那类记录），
+            // 换人设后屏蔽的旧发言也在这里统一遮掉
+            text: personaAwareText(m, ctx.chatKey, { forwardMuted })
           }))
         });
       }
@@ -1750,6 +1770,11 @@ export function buildToolDefs() {
         required: ['messageId']
       },
       async execute(ctx, args) {
+        // 硬开关：工具表里已经摘掉，这里再兜一层 —— 运行中途管理员关掉开关时，
+        // 本轮请求里可能还带着旧工具表，不能让它把全文读进上下文。
+        if (getConfig().messageTypes?.expandForward === false) {
+          return err('管理员在「消息类型」里关闭了合并转发展开，不能查看转发内容。');
+        }
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
@@ -2021,6 +2046,14 @@ export function buildToolDefs() {
         const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
         // game-secret 的行当作"不存在"：不确认它的存在，也不回正文（2026-09-29 审查 P1）
         if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+        const forwardMuted = getConfig().messageTypes?.expandForward === false;
+        // 引用的是转发时，reply 里缓存的 120 字预览也要遮掉，否则会从 side channel 漏内容；
+        // 换人设后屏蔽的旧机器人发言同理。
+        let reply = entry.reply;
+        if (reply && forwardMuted && isForwardEntry({ text: reply.text })) {
+          reply = { ...reply, text: FORWARD_MUTED_TEXT };
+        }
+        reply = personaAwareReply({ ...entry, reply }, ctx.chatKey);
         return ok({
           messageId: entry.mid,
           time: new Date(entry.ts).toLocaleString('zh-CN', { hour12: false }),
@@ -2028,8 +2061,8 @@ export function buildToolDefs() {
           senderId: entry.senderId,
           // 正文与【过去状态】同形（缺引用块就补）；reply 是结构化原字段（供取 id/发送者用），
           // 但 sender/text 是别人可控文本：与其他出口同口径过段头弱化（2026-10-12 审查）
-          text: textWithQuote(entry),
-          reply: entry.reply ? sanitizeDeep(entry.reply) : entry.reply
+          text: personaAwareText(entry, ctx.chatKey, { forwardMuted }),
+          reply: reply ? sanitizeDeep(reply) : reply
         });
       }
     },
@@ -2045,6 +2078,10 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          // 转发内容查看关闭：展开过的旧转发里可能存了图片，不能绕过开关从 media 侧看。
+          if (getConfig().messageTypes?.expandForward === false && isForwardEntry(entry)) {
+            return err('管理员关闭了转发内容查看，不能查看这条转发里的图片。');
+          }
           const viewables = await currentMessageImageUrls(ctx, entry);
           if (!viewables.length) return ok(`消息 ${args.messageId} 没有可查看的图片`);
           // 「消息类型」页可以关掉视频画面（省一次抽帧 + 一次视觉调用）：关了就跳过视频帧条，
@@ -2121,6 +2158,10 @@ export function buildToolDefs() {
         try {
           const entry = ctx.store.findByMid(ctx.chatKey, args.messageId);
           if (!modelVisible(entry)) return err(`当前会话找不到消息 ${args.messageId}。${midHint(ctx)}`);
+          // 转发内容查看关闭：音频/视频转写同样不能绕过开关。
+          if (getConfig().messageTypes?.expandForward === false && isForwardEntry(entry)) {
+            return err('管理员关闭了转发内容查看，不能转写这条转发里的音视频。');
+          }
           const result = await transcribeMessageAudio(ctx, entry);
           if (!result.ok) return err(result.error);
           return ok({

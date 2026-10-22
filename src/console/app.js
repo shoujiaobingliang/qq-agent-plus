@@ -1102,6 +1102,8 @@ export function createApp({
         // 引用的是不是自己的消息：引用块里要标"我"（与历史行口径一致），
         // 否则模型会把机器人自己的名片名当成别人（Issue #16：引用了自己的一条，答成"你发的啊"）。
         self: isSelfSender(senderId, onebot.selfId),
+        // 引用原消息的时间（毫秒）：换人设后要据此判断"引用的是不是换卡前的旧发言"。
+        ts: msg?.time ? Math.round(Number(msg.time) * 1000) : 0,
         text: safeSlice(String(text), 120)
       };
     } catch {
@@ -1141,6 +1143,7 @@ export function createApp({
               sender: local.self ? (onebot.selfNickname || cfgNow.persona?.botName || '我') : local.senderName,
               senderId: local.self ? String(onebot.selfId || '') : String(local.senderId || ''),
               self: Boolean(local.self),
+              ts: Number(local.ts) || 0,
               text: safeSlice(String(local.text || ''), 120)
             };
           }
@@ -1208,6 +1211,11 @@ export function createApp({
       reply,
       media,
       mentionsSelf,
+      // 合并转发 / 聊天记录卡片：入库时打标记。开关关闭时触发判定据此跳过这类消息
+      // （被 @、引用机器人、私聊仍照常），同时也让 read_forward 在运行中不可用。
+      // 注意用展开**之前**算出的 looksForward：展开后的正文同样以 [合并转发 共… 开头，
+      // 但那不影响标记（两种形态都算转发）。
+      forward: looksForward,
       // 引擎发的游戏私聊（身份/查验结果/行动回执）标成 game-secret：提示词构建时会过滤掉，
       // 模型在私聊里不该是上帝视角（2026-09-29 审查 P2）
       eventKind: isSelf && groupGame?.isSecretSelfMessage?.(chatKey, event.message_id) ? 'game-secret' : 'message'
@@ -3593,6 +3601,36 @@ export function createApp({
       threadsClosed: closed,
       activeRuns: runs,
       note: runs > 0 ? '有正在进行的会话：它们结束时会写回换卡前那轮的交接，建议过几分钟再清一次' : ''
+    });
+  });
+  router.add('POST', '/api/persona/mask-old-speech', async (req, res) => {
+    if (!keyEndpointAllowed(req)) return json(res, 403, { error: '请求来源不被信任，已拒绝。' });
+    const body = await readBody(req).catch(() => ({}));
+    if (body?.confirm !== true) {
+      return json(res, 409, { error: '屏蔽旧人设发言会改变机器人看到的历史：请带 confirm=true 再调用（控制台按钮已带）' });
+    }
+    // 人设默认是全局的：屏蔽也写成一条全局时间线。per-chat 覆盖表清空，
+    // 以后真要按群分别换卡/屏蔽时再单独写那个群（personaSpeechCutoffs）。
+    // 以“点击这一刻”为界：之前的机器人发言一律遮掉；晚点才点也不会把之后的发言误判成旧人设。
+    const cutoff = Date.now();
+    const chats = [...new Set([...store.listChats(), ...(memory.listChats?.() || [])])];
+    updateConfig({ personaSpeechCutoffAt: cutoff, personaSpeechCutoffs: { __replace__: {} } });
+    // 生命周期/续接线程里存的是旧提示词下的原始模型轮次，光遮消息挡不住 ——
+    // 与「换人设后清空交接」同一口径：把这些线程关掉，下一轮从新上下文开始。
+    let closed = 0;
+    for (const chatKey of chats) {
+      try { if (store.closeConversationThread(chatKey, 'persona-speech-masked')) closed += 1; } catch { /* 没有线程就跳过 */ }
+    }
+    const runs = Number(orchestrator?.activeRuns?.size ?? 0) || 0;
+    log(`[persona] 已写入全局屏蔽时间线 ${new Date(cutoff).toISOString()}`
+      + `（覆盖 ${chats.length} 个已知会话；关闭 ${closed} 个线程）`);
+    return json(res, 200, {
+      ok: true,
+      chats: chats.length,
+      threadsClosed: closed,
+      cutoff,
+      activeRuns: runs,
+      note: runs > 0 ? '有正在进行的会话：它们本轮已经在上下文里带了旧发言，下一轮起生效' : ''
     });
   });
   router.add('GET', '/api/search-providers', async (req, res) => {

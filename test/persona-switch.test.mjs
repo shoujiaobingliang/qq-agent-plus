@@ -85,6 +85,17 @@ test('换人设打时间戳；清空交接接口清掉交接并关线程', async
   const thread = storeAfter.getConversationThread(chatKey);
   assert.ok(!thread || thread.state === 'closed', '线程要关掉（这样 checkpoint 就不会再注入）');
   storeAfter.close();
+
+  // 4) 屏蔽旧人设发言：同样要 confirm；写入每个会话的 cutoff，并关闭线程
+  const noConfirmMask = await request('/api/persona/mask-old-speech', { method: 'POST' });
+  assert.equal(noConfirmMask.status, 409, '不带 confirm 应被拒');
+  const masked = await request('/api/persona/mask-old-speech', { method: 'POST', body: { confirm: true } });
+  assert.equal(masked.status, 200);
+  assert.ok(masked.body.cutoff > 0, '要返回屏蔽时间线');
+  assert.ok(masked.body.chats >= 1, '要报告覆盖了几个会话');
+  assert.equal(typeof masked.body.threadsClosed, 'number');
+  assert.ok(getConfig().personaSpeechCutoffAt > 0, '要写入全局屏蔽时间线（人设是全局的）');
+  assert.deepEqual(getConfig().personaSpeechCutoffs, {}, '全局按钮应清掉按会话覆盖，保持一条时间线');
 });
 
 test('PERSONAS.md 记录了换卡后的清残留流程（与 UI 按钮名锚定）', () => {
@@ -92,9 +103,13 @@ test('PERSONAS.md 记录了换卡后的清残留流程（与 UI 按钮名锚定�
   const uiSrc = fs.readFileSync(new URL('../ui/pages/persona.js', import.meta.url), 'utf8');
   const label = /id="persona-reset-handoff-btn"[^>]*>([^<]+)</.exec(uiSrc)?.[1] || '';
   assert.ok(label, '要从 ui/pages/persona.js 抠出「换人设后清空交接」按钮文案');
+  const maskLabel = /id="persona-mask-old-speech-btn"[^>]*>([^<]+)</.exec(uiSrc)?.[1] || '';
+  assert.ok(maskLabel, '要从 ui/pages/persona.js 抠出「屏蔽旧人设发言」按钮文案');
   const doc = fs.readFileSync(new URL('../docs/PERSONAS.md', import.meta.url), 'utf8');
   assert.ok(doc.includes(`「${label}」`), `PERSONAS.md 要提到按钮「${label}」`);
+  assert.ok(doc.includes(`「${maskLabel}」`), `PERSONAS.md 要提到按钮「${maskLabel}」`);
   assert.match(doc, /POST \/api\/persona\/reset-handoffs/);
+  assert.match(doc, /POST \/api\/persona\/mask-old-speech/);
   assert.match(doc, /不动聊天记录、不动人物印象/);
   assert.match(doc, /删掉正在使用的自定义卡不等于换人设/);
   assert.match(doc, /「保存设置」/, '要写清"未保存不生效"的前提');

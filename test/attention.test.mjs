@@ -187,3 +187,41 @@ test('trigger 配置：hybrid 持久化、数值夹取、非法 mode 拒绝', as
   const saveUi = fs.readFileSync(path.join(process.cwd(), 'ui/pages/settings-save.js'), 'utf8');
   assert.ok(saveUi.includes('patch.trigger'), '保存分支要写入 trigger 配置');
 });
+
+// 2026-10-22：转发开关关闭时，纯转发批次不能借 hybrid 注意力"复活"；
+// 被 @ 的转发仍是必回，且本轮工具表里不该出现 read_forward。
+test('hybrid + 转发开关关闭：纯转发不跑注意力、不回复', async (t) => {
+  const f = fixture(t, { randomPercent: 100 });
+  f.cfg.messageTypes.expandForward = false;
+  f.append(1, '[合并转发聊天记录]', { forward: true });
+  await f.wake();
+  assert.equal(f.bodies.length, 0, '不应调用注意力模型或主模型');
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.store.unreadCount('group:1'), 0, '应标记已读、留作历史');
+});
+
+test('hybrid + 转发开关关闭：被 @ 的转发仍必回，且工具表没有 read_forward', async (t) => {
+  const f = fixture(t);
+  f.cfg.messageTypes.expandForward = false;
+  f.responses.push(f.sendReply('这个转发的图我看不了'));
+  f.append(1, '[合并转发聊天记录]', { forward: true, mentionsSelf: true });
+  await f.wake();
+  assert.equal(f.bodies.length, 1, '被 @ 不应该再多跑一次注意力');
+  assert.equal(f.bodies[0].messages[0].content.includes('注意力判定器'), false);
+  const names = (f.bodies[0].tools || []).map((tool) => tool?.function?.name);
+  assert.ok(!names.includes('read_forward'), '开关关闭时工具表里不能有 read_forward');
+  assert.deepEqual(f.sent, ['这个转发的图我看不了']);
+});
+
+// 用户的原始复现配置：普通概率模式 + 100% 全响应 + 没 @ 的转发。
+// 这条路径不经过注意力层，必须由 resolveContextTier/#predictTier 自己拦住。
+test('概率 100% + 转发开关关闭：纯转发也不触发（无 @）', async (t) => {
+  const f = fixture(t, { randomPercent: 100 });
+  f.cfg.trigger.mode = 'probability';
+  f.cfg.messageTypes.expandForward = false;
+  f.append(1, '[合并转发聊天记录]', { forward: true });
+  await f.wake();
+  assert.equal(f.bodies.length, 0, '不应调用主模型');
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.store.unreadCount('group:1'), 0, '应标记已读、留作历史');
+});

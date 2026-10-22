@@ -430,11 +430,15 @@ function renderPersonaLibrary(c) {
         <button class="btn btn-small" id="new-persona-btn">＋ 新建自定义卡</button>
         <button class="btn btn-small btn-danger hidden" id="del-persona-btn">删除当前自定义卡</button>
         <button class="btn btn-small" id="persona-reset-handoff-btn" title="换完人设后点一下：清掉所有群的会话交接与线程状态，避免它继续沿用上一张卡的口癖/自称">换人设后清空交接</button>
+        <button class="btn btn-small" id="persona-mask-old-speech-btn" title="换完人设后点一下：把此前机器人自己发的消息在提示词与工具里遮成『换卡前的旧发言』，避免模型照着旧口癖学；不删聊天记录、不动群友发言">屏蔽旧人设发言</button>
       </div>
       <div class="hint" style="margin:2px 0 8px" id="persona-reset-handoff-hint">
         换了角色卡之后，它历史里还留着自己上一张卡的发言和"交接"，容易继续用旧口癖（我们实测换卡一天后仍在喵）。
-        正文/优先级已经写明"以当前卡为准"，点上面那个按钮可以再彻底一点：清空各群的会话交接与线程状态（<strong>不动聊天记录、不动记忆</strong>）。
+        正文/优先级已经写明"以当前卡为准"，点上面两个按钮可以再彻底一点：
+        「换人设后清空交接」清掉各群的会话交接与线程状态；「屏蔽旧人设发言」把**所有群（包括以后新增的会话）**在此之前的机器人发言在提示词/工具里遮成占位符
+        （<strong>不删聊天记录、不动群友发言、不动人物印象</strong>）。两个都点最彻底。
       </div>
+      <div class="hint" style="margin:2px 0 8px" id="persona-mask-old-speech-hint"></div>
       <div class="persona-grid" id="persona-grid">${renderPersonaGrid(c)}</div>
     </div>
     <span id="persona-pick-hint" class="muted" style="font-size: var(--fs-sm)"></span>`;
@@ -586,7 +590,45 @@ function openPersonaCreateModal() {
 }
 
 
+/**
+ * 「屏蔽旧人设发言」按钮：确认后调用接口，把点击前的机器人发言在提示词/工具里遮掉。
+ * 与「换人设后清空交接」互补：前者清工作状态，这里清“旧语气示例”。
+ * 绑定逻辑留在 settings-bind.js（它手里有草稿冲正与确认弹窗），这里只放行为，
+ * 避免 settings-bind 再长一截撞上 max-lines 闸门。
+ */
+async function runMaskOldSpeech({ flushDraft, confirm, button }) {
+  flushDraft();
+  const hint = $('#persona-mask-old-speech-hint');
+  if (personaDraftDirty()) {
+    const text = '人设改动还没保存：先点页面最底下的「保存设置」，再点「屏蔽旧人设发言」。';
+    if (hint) hint.textContent = text;
+    alert(text);
+    return;
+  }
+  const NL = String.fromCharCode(10);
+  const ok = await confirm(
+    '屏蔽所有群里机器人此前（点击前）自己发的消息？' + NL + NL
+    + '· 提示词与工具结果里会显示成「[换卡前的旧发言（口吻不作数）]」' + NL
+    + '· 不删聊天记录、不动群友发言、不动人物印象' + NL
+    + '· 同时关闭进行中的对话线程（否则生命周期里旧轮次仍会续接）' + NL
+    + '· 全局生效：所有群（包括以后新增的会话）都按这条时间线屏蔽' + NL
+    + '· 和「换人设后清空交接」一起点最彻底'
+  );
+  if (!ok) return;
+  button.disabled = true;
+  try {
+    const res = await api('/api/persona/mask-old-speech', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+    const activeNote = res.note ? ` ${res.note}` : '';
+    if (hint) hint.textContent = `已屏蔽 ${res.chats || 0} 个群的旧人设发言（关闭了 ${res.threadsClosed || 0} 个进行中的线程）。${activeNote}`;
+  } catch (error) {
+    if (hint) hint.textContent = `屏蔽失败：${error?.message ?? error}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 export {
   applyPersonaDraft, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
-  personaBaseCardId, personaDraftDirty, personaSectionBody, renderPersonaSection, savedPersonaId, syncPersonaButtons
+  personaBaseCardId, personaDraftDirty, personaSectionBody, renderPersonaSection, runMaskOldSpeech,
+  savedPersonaId, syncPersonaButtons
 };

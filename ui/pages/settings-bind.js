@@ -23,7 +23,7 @@ import {
 } from './moments.js';
 import {
   applyPersonaDraft, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
-  personaBaseCardId, personaDraftDirty, personaSectionBody, savedPersonaId, syncPersonaButtons
+  personaBaseCardId, personaDraftDirty, personaSectionBody, runMaskOldSpeech, savedPersonaId, syncPersonaButtons
 } from './persona.js';
 import { saveConfig } from './settings-save.js';
 import { bindImageGenPreset, bindTtsControls } from './settings-voice.js';
@@ -1741,6 +1741,14 @@ function bindSettingsPersonaAndVision() {
       resetHandoffBtn.disabled = false;
     }
   });
+
+  // 换卡后屏蔽旧发言：不删记录，只遮点击前机器人自己的消息（与「清空交接」互补）。
+  const maskOldSpeechBtn = $('#persona-mask-old-speech-btn');
+  if (maskOldSpeechBtn) maskOldSpeechBtn.addEventListener('click', () => runMaskOldSpeech({
+    flushDraft: flushPersonaSectionEdit,
+    confirm: askForConfirmation,
+    button: maskOldSpeechBtn
+  }));
 
   const newPersonaBtn = $('#new-persona-btn');
   if (newPersonaBtn) newPersonaBtn.addEventListener('click', () => openPersonaCreateModal());

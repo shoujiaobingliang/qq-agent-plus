@@ -306,6 +306,12 @@ export const DEFAULT_CONFIG = {
   // 按群人设：chatKey（`group:<群号>` / `private:<QQ>`）→ 覆盖字段。
   // 空 = 所有会话跟随全局 persona，行为与升级前完全一致。
   personaPerChat: {},
+  // 换人设后手动屏蔽旧发言：全局 cutoff（毫秒）；早于它的**机器人自己**的消息
+  // 在提示词与工具结果里遮成占位符（不删记录、不动群友发言），避免模型把上一张卡的
+  // 语气/口癖当成示例继续学。由控制台「屏蔽旧人设发言」写入。
+  // personaSpeechCutoffs 是按会话覆盖（一般不用；留给按群人设分别换卡的场景）。
+  personaSpeechCutoffAt: 0,
+  personaSpeechCutoffs: {},
   // 接入白名单
   allow: { groups: [], private: [] },
   deny: { groups: [], private: [] },
@@ -614,9 +620,9 @@ export const DEFAULT_CONFIG = {
   // 图片与表情包在这里各有一个开关（默认开）；它们**叠加**在 api.vision 之上 ——
   // 模型本身不能看图时这两个开关没有意义，相关工具同样会被摘掉。
   messageTypes: {
-    // 入站自动展开「合并转发 / 聊天记录卡片」。关掉后正文只留一行占位符
-    // （[合并转发聊天记录] / [卡片聊天记录 …]），模型需要时自己调 read_forward 展开；
-    // **被 @ 的那条仍然自动展开** —— 用户点名要看的东西不该再多花一轮工具调用。
+    // 合并转发 / 聊天记录卡片的硬开关。关掉后：入站不展开、read_forward 工具一并摘掉
+    // （模型也不能按需展开），且这类消息只靠自己不会触发回复 —— 只有被 @、引用机器人、
+    // 私聊仍照常响应（见 prompt.js 的 resolveContextTier 与 orchestrator 的工具过滤）。
     // 一条 20 条的记录展开后是几千字符，而且会跟着进存档与后续每一轮的上下文，省的是这块。
     expandForward: true,
     // 视频画面（get_message_images 抽 4 帧拼 2×2）。关掉后视频只剩声音（get_message_audio），

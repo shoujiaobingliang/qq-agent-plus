@@ -16,6 +16,9 @@ function entry(row) {
     reply,
     media: JSON.parse(row.media || '[]'),
     mentionsSelf: Boolean(row.mentions_self),
+    // 合并转发 / 聊天记录卡片：开关关闭时这类消息不参与概率/关键词/注意力触发，
+    // 也不能被 read_forward 展开（见 prompt.js 的 resolveContextTier 与 orchestrator 的工具过滤）。
+    forward: Boolean(row.is_forward),
     targetUserId: String(row.target_user_id || ''),
     eventKind: String(row.event_kind || 'message')
   };
@@ -92,6 +95,7 @@ export class ChatStore {
         sender_id TEXT, sender_name TEXT, text TEXT NOT NULL, self INTEGER NOT NULL DEFAULT 0,
         reply TEXT, media TEXT NOT NULL DEFAULT '[]',
         mentions_self INTEGER NOT NULL DEFAULT 0,
+        is_forward INTEGER NOT NULL DEFAULT 0,
         target_user_id TEXT NOT NULL DEFAULT '',
         event_kind TEXT NOT NULL DEFAULT 'message',
         state TEXT NOT NULL DEFAULT 'pending', lease_id TEXT, attempts INTEGER NOT NULL DEFAULT 0,
@@ -155,6 +159,7 @@ export class ChatStore {
     ensureColumn(this.db, 'conversation_threads', 'transcript_chars', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.db, 'conversation_threads', 'prompt_tokens', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.db, 'messages', 'mentions_self', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(this.db, 'messages', 'is_forward', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(this.db, 'messages', 'target_user_id', "TEXT NOT NULL DEFAULT ''");
     ensureColumn(this.db, 'messages', 'event_kind', "TEXT NOT NULL DEFAULT 'message'");
     // runs 是全仓唯一没有回收纪律的账本（每次带租约的运行 +1，常驻不删，5 秒全表扫）：
@@ -227,23 +232,33 @@ export class ChatStore {
       if (existing) {
         // 首次落库与"后来才知道它是引擎私聊"可能竞速（发送端先写、回显后到，或反之）：
         // 命中重复时把 game-secret 补上，避免这行永远留在模型可见的历史里（2026-09-29 审查）
-        if (m.eventKind === 'game-secret' && existing.event_kind !== 'game-secret') {
+        let row = existing;
+        let marked = false;
+        if (m.eventKind === 'game-secret' && row.event_kind !== 'game-secret') {
           this.db.prepare("UPDATE messages SET event_kind='game-secret' WHERE chat_key=? AND mid=?").run(chatKey, mid);
-          return { ...entry({ ...existing, event_kind: 'game-secret' }), duplicate: true, marked: true };
+          row = { ...row, event_kind: 'game-secret' };
+          marked = true;
         }
-        return { ...entry(existing), duplicate: true };
+        // 同上：先落库的副本可能不知道它是合并转发（例如发送端先写、事件回显后到）。
+        // 补标记而不是新插一行，避免开关关闭时这条转发仍按普通消息触发。
+        if (m.forward === true && !Number(row.is_forward)) {
+          this.db.prepare('UPDATE messages SET is_forward=1 WHERE chat_key=? AND mid=?').run(chatKey, mid);
+          row = { ...row, is_forward: 1 };
+          marked = true;
+        }
+        return { ...entry(row), duplicate: true, ...(marked ? { marked: true } : {}) };
       }
     }
     this.db.prepare('INSERT OR IGNORE INTO chats(chat_key) VALUES (?)').run(chatKey);
     const id = this.db.prepare('SELECT next_id FROM chats WHERE chat_key=?').get(chatKey).next_id;
     this.db.prepare(`INSERT INTO messages
       (chat_key,id,mid,ts,sender_id,sender_name,text,self,reply,media,
-       mentions_self,target_user_id,event_kind,state)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+       mentions_self,is_forward,target_user_id,event_kind,state)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       chatKey, id, mid, Number(m.ts) || Date.now(), String(m.senderId || ''),
       String(m.senderName || ''), String(m.text || ''), m.self ? 1 : 0,
       m.reply ? JSON.stringify(m.reply) : null, JSON.stringify(m.media || []),
-      m.mentionsSelf ? 1 : 0, String(m.targetUserId || ''),
+      m.mentionsSelf ? 1 : 0, m.forward ? 1 : 0, String(m.targetUserId || ''),
       String(m.eventKind || 'message'), state
     );
     this.db.prepare('UPDATE chats SET next_id=next_id+1 WHERE chat_key=?').run(chatKey);

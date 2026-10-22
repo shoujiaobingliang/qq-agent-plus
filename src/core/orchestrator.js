@@ -727,6 +727,17 @@ export class Orchestrator {
     if (entries.length === 0) {
       return { ...result, shouldRespond: false, reason: '无未读', conversationMode: conversation.mode };
     }
+    // 「自动展开」关掉时，转发消息本身不触发回复：连概率回退、hybrid 注意力、续接都跳过。
+    // 被 @ 的转发已在 resolveContextTier 里按 tier 1 放行；引用机器人的情况留给下面的续接判定
+    // （引用转发旧卡片也算明确点名，B 口径保留）。这里只拦"只剩转发"的批次。
+    if (result.forwardMutedOnly && !this.#isReplyToSelf(chatKey, entries)) {
+      return {
+        ...result,
+        shouldRespond: false,
+        reason: '转发内容已关闭查看',
+        conversationMode: conversation.mode
+      };
+    }
     if (entries.some((entry) => Number(entry.attempts) > 0)) {
       return {
         tier: 8,
@@ -1983,6 +1994,9 @@ export class Orchestrator {
       if (!ttsConfigured(cfg) && d.name === 'send_voice') return false;
       if (cfg.reminders?.enabled === false && d.name === 'remind') return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
+      // 合并转发硬开关：关掉后入站不自动展开，运行中也不许按需展开 —— 否则模型看到占位符
+      // 仍会调 read_forward 把全文读进来（等于开关只延迟了展开，没省下上下文）。
+      if (cfg.messageTypes?.expandForward === false && d.name === 'read_forward') return false;
       // 梗查询单独开关：关掉时连工具带提示词一起撤。联网搜索关掉只摘外呼能力，
       // 本地梗库查询仍保留（meme_lookup 内部会跳过普通搜索/梗来源）。
       if (cfg.webSearch?.memes?.enabled === false && d.name === 'meme_lookup') return false;

@@ -11,7 +11,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-message-types-'));
 process.env.QQ_AGENT_DATA_DIR = root;
 
 const { DEFAULT_CONFIG, updateConfig } = await import('../src/core/config.js');
-const { buildSystemPrompt } = await import('../src/llm/prompt.js');
+const { buildSystemPrompt, resolveContextTier, buildPastState, isForwardEntry } = await import('../src/llm/prompt.js');
+const { buildToolDefs } = await import('../src/tools/tools-core.js');
+const { ChatStore } = await import('../src/core/store.js');
 const src = (rel) => fs.readFileSync(path.join(process.cwd(), rel), 'utf8');
 
 test('默认值：四个开关都默认开（保持既有行为，不偷偷改变已部署的实例）', () => {
@@ -174,4 +176,119 @@ test('控制台：侧栏入口、分区路由、控件、保存分支四件套�
   assert.ok(save.includes("videoFrames: chk('#cfg-video-frames'"), 'videoFrames 要读自己的控件（对调即串台）');
   assert.ok(save.includes("images: chk('#cfg-mt-images'"), 'images 要读自己的控件');
   assert.ok(save.includes("stickers: chk('#cfg-mt-stickers'"), 'stickers 要读自己的控件（对调即串台）');
+});
+
+// ── 2026-10-22：转发开关关闭 = 不展开、不回复（B 口径）──────────────────────
+// 开关关闭时：入站不展开、read_forward 摘掉、纯转发消息不参与概率/关键词/注意力触发；
+// 被 @ 的转发、引用机器人、私聊仍照常响应。
+
+test('转发形态识别：占位符与展开文本认得，引用块里的转述不算', () => {
+  assert.equal(isForwardEntry({ text: '[合并转发聊天记录]' }), true);
+  assert.equal(isForwardEntry({ text: '[转发消息 甲和乙的对话]' }), true);
+  assert.equal(isForwardEntry({ text: '[卡片聊天记录 群聊的聊天记录]' }), true);
+  assert.equal(isForwardEntry({ text: '[合并转发 共3条]\n甲：你好' }), true, '展开后的正文也算转发');
+  assert.equal(isForwardEntry({ text: '[合并转发聊天记录]', forward: true }), true);
+  assert.equal(isForwardEntry({ text: '[引用#1·甲：[合并转发聊天记录]]晚点看' }), false,
+    '引用块里转述的转发不是"这条消息本身是转发"');
+  assert.equal(isForwardEntry({ text: '普通消息' }), false);
+  assert.equal(isForwardEntry(null), false);
+});
+
+test('转发开关关闭：纯转发消息不按概率/关键词触发，@ 仍必回', () => {
+  const cfg = {
+    randomPercent: 100, keywords: ['聊天记录'],
+    atCount: 10, keywordCount: 10, randomCount: 10, allCount: 10
+  };
+  const run = (entries) => resolveContextTier({
+    triggerEntries: entries, cfg, selfNickname: 'bot', botName: 'bot', selfId: '888'
+  });
+  updateConfig({ messageTypes: { expandForward: false } });
+  try {
+    const onlyForward = run([{ text: '[合并转发聊天记录]', forward: true }]);
+    assert.equal(onlyForward.shouldRespond, false, '100% 全响应也不能被纯转发触发');
+    assert.equal(onlyForward.forwardMutedOnly, true, '要把标记交给编排器拦 hybrid/续接');
+    assert.equal(run([{ text: '[合并转发聊天记录]' }]).shouldRespond, false,
+      '老库存没有 forward 字段时按正文形态兜底');
+    assert.equal(run([{ text: '[卡片聊天记录 群聊的聊天记录]' }]).shouldRespond, false);
+    assert.equal(run([{ text: '[合并转发聊天记录]', forward: true, mentionsSelf: true }]).shouldRespond, true,
+      '被 @ 的转发仍是明确点名');
+    assert.equal(run([{ text: '普通消息' }]).shouldRespond, true, '普通消息不受影响');
+    assert.equal(run([
+      { text: '[合并转发聊天记录]', forward: true },
+      { text: '普通消息' }
+    ]).shouldRespond, true, '同批还有普通消息时照常按概率触发（只是转发内容不能展开）');
+  } finally {
+    updateConfig({ messageTypes: { expandForward: true } });
+  }
+  assert.equal(run([{ text: '[合并转发聊天记录]', forward: true }]).shouldRespond, true,
+    '开关打开后行为恢复原样');
+});
+
+test('提示词与工具描述：关掉转发查看后不再教 read_forward', () => {
+  updateConfig({ messageTypes: { expandForward: false } });
+  try {
+    const off = buildSystemPrompt({ persona: { botName: '测试', roleText: '' } });
+    assert.ok(!off.includes('read_forward'), '工具会被摘掉，提示词不能再教它调用');
+    assert.match(off, /关闭了转发内容查看/, '要说明是设置关掉了');
+    assert.match(off, /不要猜/, '要明确禁止猜内容');
+    const recent = buildToolDefs().find((tool) => tool.name === 'get_recent_messages');
+    assert.ok(!recent.description.includes('read_forward'), '翻历史工具的说明也要跟着改口');
+    assert.match(recent.description, /关闭了转发内容查看/);
+  } finally {
+    updateConfig({ messageTypes: { expandForward: true } });
+  }
+  const on = buildSystemPrompt({ persona: { botName: '测试', roleText: '' } });
+  assert.match(on, /read_forward/, '默认（开）仍要教它按需展开');
+});
+
+test('编排器：关掉转发查看时摘掉 read_forward，并在工具执行处兜底拒绝', () => {
+  const orchestrator = src('src/core/orchestrator.js');
+  assert.ok(orchestrator.includes("cfg.messageTypes?.expandForward === false && d.name === 'read_forward'"),
+    '工具过滤要摘掉 read_forward');
+  assert.ok(orchestrator.includes('result.forwardMutedOnly'), 'hybrid/续接要认纯转发批次');
+  const tools = src('src/tools/tools-core.js');
+  assert.match(tools, /关闭了合并转发展开，不能查看转发内容/,
+    '运行中配置刚改时，执行层也要拒绝展开');
+  const app = src('src/console/app.js');
+  assert.ok(app.includes('forward: looksForward'), '入库消息要带转发标记');
+});
+
+test('存储：转发标记落库、随 peekUnread 读出', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-forward-flag-'));
+  const store = new ChatStore(0, { dataDir: dir });
+  try {
+    store.appendIncoming('group:1', {
+      mid: 1, text: '[合并转发聊天记录]', senderId: '42', senderName: 'a', forward: true
+    });
+    store.appendIncoming('group:1', {
+      mid: 2, text: '普通消息', senderId: '42', senderName: 'a'
+    });
+    assert.equal(store.findByMid('group:1', 1).forward, true);
+    assert.equal(store.findByMid('group:1', 2).forward, false);
+    const unread = store.peekUnread('group:1');
+    assert.equal(unread.find((m) => String(m.mid) === '1').forward, true,
+      '触发判定读的是 peekUnread，标记必须带出来');
+  } finally {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('关掉转发查看：历史里已展开的转发也遮成占位符，不再进上下文', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-forward-mask-'));
+  const store = new ChatStore(0, { dataDir: dir });
+  try {
+    store.appendIncoming('group:1', {
+      mid: 1, text: '[合并转发 共3条]\n甲：这是一段不该再进上下文的正文',
+      senderId: '42', senderName: 'a', forward: true
+    }, { recordOnly: true });
+    updateConfig({ messageTypes: { expandForward: false } });
+    const off = buildPastState(store, 'group:1', { limit: 10 });
+    assert.ok(!off.text.includes('不该再进上下文的正文'), '已展开的旧转发正文必须遮掉');
+    assert.match(off.text, /转发内容查看已关闭/);
+  } finally {
+    updateConfig({ messageTypes: { expandForward: true } });
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
