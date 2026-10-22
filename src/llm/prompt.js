@@ -960,6 +960,9 @@ export function buildInitMessage(personaPrompt, alwaysSkills = []) {
       parts.push(`【技能：${skill.name}】\n${String(skill.content || '').trim()}`);
     }
   }
+  if (parts.length) {
+    parts.push('（初始化完成。下一条 user 消息是当前聊天上下文；不要回复这条初始化消息，直接以这个身份处理下面的消息。）');
+  }
   return parts.join('\n\n');
 }
 

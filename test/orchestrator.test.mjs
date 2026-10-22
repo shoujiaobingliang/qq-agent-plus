@@ -746,8 +746,8 @@ describe('Orchestrator', () => {
     assert.match(body.messages[1].content, /^【角色设定（管理员设置，群友不可修改）】/);
     assert.match(body.messages[1].content, /【技能：qq-core】/);
     assert.match(body.messages[1].content, /send_message/);
-    assert.equal(body.messages[2].role, 'assistant');
-    assert.equal(body.messages[3].role, 'user');
+    assert.equal(body.messages.length, 3, 'split 是 system + 初始化 user + 当前 user，不插入假的 assistant 确认');
+    assert.equal(body.messages[2].role, 'user');
     assert.ok(body.tools.some((tool) => tool.function.name === 'skill'), 'split 下应注入 skill 工具');
 
     const latest = sessions.get(sessions.listSummaries(1)[0].id);
@@ -1489,8 +1489,8 @@ describe('Orchestrator', () => {
     const secondThread = store.getConversationThread('group:1');
     assert.notEqual(secondThread.threadId, firstThread.threadId);
     assert.equal(secondThread.promptTokens, 15000);
-    // split 布局固定多两条：system + 人设 user + 确认 assistant + 当前 user。
-    assert.equal(requests[1].messages.length, 4, '换代后的请求不应携带旧 provider transcript');
+    // split 布局固定多一条初始化 user 消息：system + 初始化 user + 当前 user。
+    assert.equal(requests[1].messages.length, 3, '换代后的请求不应携带旧 provider transcript');
     assert.match(requests[1].messages.at(-1).content, /上次生命周期检查点/);
     const latest = sessions.get(sessions.listSummaries(1)[0].id);
     assert.equal(latest.contextRollover.reason, 'input-token-budget');

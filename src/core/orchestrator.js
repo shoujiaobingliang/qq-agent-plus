@@ -2192,13 +2192,11 @@ export class Orchestrator {
         ? `${userPrompt}\n\n【本次唤醒】${wakeLead}${wakeTail}`
         : (paced ? `${userPrompt}\n\n【本次唤醒】${pacedLead}` : userPrompt)
     };
-    // split 布局：人设 + 常驻技能合成一条初始化 user 消息 + 一句确认。
-    // 人设是这条消息的第一段；combined 布局保持旧行为（没有 initMessage）。
+    // split 布局：人设 + 常驻技能合成一条初始化 user 消息，不插入假的 assistant 确认。
+    // 那句确认会让模型把自己当成"已接受设定的助手"，而不是直接以角色身份处理后面的聊天；
+    // 人设是这条消息的第一段，当前聊天上下文紧跟在它后面。
     const personaMessages = initMessage
-      ? [
-          { role: 'user', content: initMessage },
-          { role: 'assistant', content: '明白，我会保持这个设定。' }
-        ]
+      ? [{ role: 'user', content: initMessage }]
       : [];
     const messages = [
       { role: 'system', content: systemPrompt },
