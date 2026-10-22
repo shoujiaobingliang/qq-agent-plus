@@ -3,6 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { openDatabase } from '../core/sqlite.js';
 import { DATA_DIR } from '../core/config.js';
+import {
+  cleanText,
+  readSlangRecords,
+  slangFile,
+  slangRecord,
+  writeSlangRecords
+} from '../core/slang-store.js';
 import { IdentityStore, identityDatabasePath } from '../identity/identity-store.js';
 import { normalizeStickerEntry } from '../onebot/stickers.js';
 
@@ -14,82 +21,6 @@ function readJson(file, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function cleanText(value, max = 300) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
-}
-
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600
-  });
-  fs.renameSync(tmp, file);
-  try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
-}
-
-function slangFile(dataDir) {
-  return path.join(dataDir, 'slang.json');
-}
-
-function slangRecord(entry, index = 0, { strictStatus = false } = {}) {
-  const rawStatus = entry?.status;
-  if (
-    strictStatus
-    && rawStatus !== undefined
-    && !['candidate', 'confirmed', 'rejected'].includes(rawStatus)
-  ) {
-    throw new Error('黑话状态必须是 candidate、confirmed 或 rejected');
-  }
-  const status = ['candidate', 'confirmed', 'rejected'].includes(rawStatus)
-    ? rawStatus
-    : 'candidate';
-  return {
-    ...(entry && typeof entry === 'object' ? entry : {}),
-    id: cleanText(entry?.id || `slang-${index + 1}`, 100),
-    content: cleanText(entry?.content, 80),
-    meaning: cleanText(entry?.meaning, 500),
-    usage: cleanText(entry?.usage, 300),
-    example: cleanText(entry?.example, 300),
-    risk: cleanText(entry?.risk, 300),
-    status,
-    source: entry?.source === 'manual' ? 'manual' : 'ai',
-    scope: entry?.scope === 'chat-private' ? 'chat-private' : 'global-safe',
-    scopeChatKey: /^(group|private):\d+$/.test(String(entry?.scopeChatKey || ''))
-      ? String(entry.scopeChatKey)
-      : '',
-    sources: Array.isArray(entry?.sources)
-      ? entry.sources.map((item) => cleanText(item, 500)).filter(Boolean).slice(0, 10)
-      : [],
-    researchId: cleanText(entry?.researchId, 100),
-    count: Math.max(0, Math.round(Number(entry?.count) || 0)),
-    evidence: Array.isArray(entry?.evidence) ? entry.evidence.slice(0, 100) : [],
-    updatedAt: String(entry?.updatedAt || new Date().toISOString())
-  };
-}
-
-function readSlangRecords(dataDir, { strict = false } = {}) {
-  const file = slangFile(dataDir);
-  let raw;
-  try {
-    let text = fs.readFileSync(file, 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    raw = JSON.parse(text);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return [];
-    if (strict) throw new Error(`黑话库读取失败，已停止写入：${String(error?.message ?? error)}`);
-    return [];
-  }
-  if (!Array.isArray(raw)) {
-    if (strict) throw new Error('黑话库格式错误，已停止写入');
-    return [];
-  }
-  return raw
-    .map(slangRecord)
-    .filter((entry) => entry.content);
 }
 
 export function readSlangAssets(dataDir = DATA_DIR) {
@@ -469,6 +400,9 @@ export class AssetObserver {
       usage: input.usage,
       example: input.example,
       risk: input.risk,
+      aliases: input.aliases,
+      sourceUrl: input.sourceUrl,
+      confidence: input.confidence ?? 1,
       status: input.status,
       source: 'manual',
       scope,
@@ -478,7 +412,7 @@ export class AssetObserver {
       updatedAt: new Date().toISOString()
     }, entries.length, { strictStatus: true });
     entries.push(entry);
-    writeJson(slangFile(this.dataDir), entries);
+    writeSlangRecords(entries, this.dataDir);
     return { ...entry, evidenceCount: 0 };
   }
 
@@ -516,6 +450,9 @@ export class AssetObserver {
       usage: cleanText(input.usage ?? existing?.usage, 300),
       example: cleanText(input.example ?? existing?.example, 300),
       risk: cleanText(input.risk ?? existing?.risk, 300),
+      aliases: input.aliases ?? existing?.aliases,
+      sourceUrl: input.sourceUrl ?? existing?.sourceUrl,
+      confidence: input.confidence ?? existing?.confidence,
       status: existing?.status === 'confirmed' ? 'confirmed' : 'candidate',
       source: existing?.source === 'manual' ? 'manual' : 'ai',
       count: Math.max(
@@ -533,7 +470,7 @@ export class AssetObserver {
     }, index >= 0 ? index : entries.length, { strictStatus: true });
     if (index >= 0) entries[index] = entry;
     else entries.push(entry);
-    writeJson(slangFile(this.dataDir), entries);
+    writeSlangRecords(entries, this.dataDir);
     return { ...entry, evidenceCount: entry.evidence.length };
   }
 
@@ -557,6 +494,10 @@ export class AssetObserver {
       ...(patch.usage !== undefined ? { usage: patch.usage } : {}),
       ...(patch.example !== undefined ? { example: patch.example } : {}),
       ...(patch.risk !== undefined ? { risk: patch.risk } : {}),
+      ...(patch.aliases !== undefined ? { aliases: patch.aliases } : {}),
+      ...(patch.sourceUrl !== undefined ? { sourceUrl: patch.sourceUrl } : {}),
+      // 管理员点"已确认"就是最高优先级：候选摘要带来的 0.45 不该继续挂在这个词条上。
+      confidence: patch.confidence ?? (patch.status === 'confirmed' ? 1 : entries[index].confidence),
       ...(patch.status !== undefined ? { status: patch.status } : {}),
       ...(patch.count !== undefined ? { count: patch.count } : {}),
       scope,
@@ -575,7 +516,7 @@ export class AssetObserver {
       throw new Error('黑话词条已存在');
     }
     entries[index] = next;
-    writeJson(slangFile(this.dataDir), entries);
+    writeSlangRecords(entries, this.dataDir);
     return { ...next, evidenceCount: next.evidence.length };
   }
 
@@ -583,7 +524,7 @@ export class AssetObserver {
     const entries = readSlangRecords(this.dataDir, { strict: true });
     const next = entries.filter((entry) => entry.id !== String(id || ''));
     if (next.length === entries.length) return false;
-    writeJson(slangFile(this.dataDir), next);
+    writeSlangRecords(next, this.dataDir);
     return true;
   }
 

@@ -548,6 +548,10 @@ async function saveConfig({ quiet = false } = {}) {
     patch.webSearch = {
       ...c.webSearch,
       enabled: chk('#cfg-websearch', c.webSearch?.enabled !== false),
+      memes: {
+        ...(c.webSearch?.memes || {}),
+        enabled: chk('#cfg-memes', c.webSearch?.memes?.enabled !== false)
+      },
       provider: val('#cfg-searchprovider', c.webSearch?.provider || 'bing'),
       searchUrl: val('#cfg-searchurl', c.webSearch?.searchUrl || 'https://cn.bing.com/search').trim() || 'https://cn.bing.com/search',
       deepseek: {

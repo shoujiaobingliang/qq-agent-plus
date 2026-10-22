@@ -1979,6 +1979,9 @@ export class Orchestrator {
       if (!ttsConfigured(cfg) && d.name === 'send_voice') return false;
       if (cfg.reminders?.enabled === false && d.name === 'remind') return false;
       if (!searchEnabled && (d.name === 'web_search' || d.name === 'web_fetch')) return false;
+      // 梗查询单独开关：关掉时连工具带提示词一起撤。联网搜索关掉只摘外呼能力，
+      // 本地梗库查询仍保留（meme_lookup 内部会跳过普通搜索/梗来源）。
+      if (cfg.webSearch?.memes?.enabled === false && d.name === 'meme_lookup') return false;
       if (!selfWakeEnabled && d.name === 'schedule_wake') return false;
       // 群游戏引擎关掉：group_game 工具一并摘掉 —— 提示词侧（prompt.js 玩法与工具箱）
       // 只在开启时教"主持小游戏"，工具表却恒在，模型仍会去调一个必然报错的工具
@@ -2405,6 +2408,16 @@ export class Orchestrator {
         session.webSearchCount = webSearchCount;
         markActivity(`正在调用 ${name}…`);
         const result = await executeTool(toolDefs, ctx, name, argsRaw);
+        // meme_lookup 命中本地库时零外呼；只有真的走到普通搜索/梗来源才计入"联网次数"。
+        if (name === 'meme_lookup' && result?.isError !== true) {
+          try {
+            const payload = JSON.parse(String(result?.content ?? ''));
+            if (payload?.stage === 'web' || payload?.stage === 'source') {
+              webSearchCount += 1;
+              session.webSearchCount = webSearchCount;
+            }
+          } catch { /* 非 JSON 结果不计数 */ }
+        }
         if (
           result.isError
           && result.incidentCaptured !== true

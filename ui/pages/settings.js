@@ -426,6 +426,8 @@ function renderSearchSection(c) {
     <h3 id="settings-search">搜索服务</h3>
     <div class="checkbox-row"><input type="checkbox" id="cfg-websearch" ${c.webSearch?.enabled !== false ? 'checked' : ''} />
       <label for="cfg-websearch">联网搜索：启用 web_search / web_fetch 工具</label></div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-memes" ${c.webSearch?.memes?.enabled !== false ? 'checked' : ''} />
+      <label for="cfg-memes">梗/黑话查询：本地梗库 → 普通搜索 → 梗来源（meme_lookup；关掉联网搜索时只查本地）</label></div>
     <div class="field"><label>搜索提供方</label>
       <select id="cfg-searchprovider">
         <option value="bing" ${prov === 'bing' ? 'selected' : ''}>Bing 网页解析</option>

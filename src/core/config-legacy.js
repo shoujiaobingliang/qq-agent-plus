@@ -153,6 +153,27 @@ export const DEFAULT_CONFIG = {
       searchDepth: 'basic',
       timeoutMs: 20000
     },
+    // 梗/黑话查询（meme_lookup 工具）：本地梗库 → 普通搜索 → 梗来源回退。
+    // 梗站用 MediaWiki API（默认萌娘百科）；API 被挡时可用普通搜索加 site: 回退。
+    memes: {
+      enabled: true,
+      maxResults: 4,
+      timeoutMs: 12000,
+      // 外呼每小时上限（进程级）：普通搜索和梗来源共用，防止每个生词都打外部。
+      maxExternalPerHour: 60,
+      // 梗站 API 全部失败/无结果时，用普通搜索 site: 限定回退一次。
+      webFallback: true,
+      sites: [
+        {
+          name: '萌娘百科',
+          // 未授权 MediaWiki API 会被拒（action-notallowed），默认走搜索页 HTML。
+          type: 'mediawiki-html',
+          apiUrl: 'https://mzh.moegirl.org.cn/api.php',
+          articleUrl: 'https://mzh.moegirl.org.cn/',
+          searchUrl: 'https://mzh.moegirl.org.cn/index.php?title=Special:搜索&fulltext=1'
+        }
+      ]
+    },
     // 聚合搜索（provider='aggregate'）：并发跑多个源，URL 去重、结果带 source 标注，
     // 单源失败不影响整体，全部失败才报错。sources 顺序 = 结果优先级。
     aggregate: {

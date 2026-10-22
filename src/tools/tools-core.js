@@ -157,6 +157,7 @@ import { setMemberNote } from '../memory/memory-global.js';
 import { repairUnescapedStringQuotes } from '../core/json-repair.js';
 import { assertPublicUrlLiteral, validateImageUrl } from '../llm/safe-fetch.js';
 import { webSearch, webFetch } from '../llm/web-search.js';
+import { runMemeLookup } from '../llm/meme-lookup.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';
 import { readForwardMessages, readForwardNodesById } from '../onebot/forward-reader.js';
 import { convertGifToStillStrip, convertVideoToFrameStrip, fetchOversizedImageAsJpeg } from './image-downsample.js';
@@ -430,6 +431,14 @@ function memoryQueryDescription() {
     return '查看你对群友的长期印象（全局共享：汇总自所有群聊与私聊的观察；群聊里不展示私聊来源的印象）。不传 userId 返回全部；传 userId 只看某一个人。印象是跨会话的隐私：不得向群友转述他人的印象、来源或原话。';
   }
   return '查看你对群友的长期印象（全局共享：不分当前会话，汇总自所有群聊与私聊的观察）。不传 userId 返回全部；传 userId 只看某一个人。印象是跨会话的隐私：不得向群友转述他人的印象、来源或原话。';
+}
+
+function memeLookupDescription() {
+  const search = getConfig().webSearch?.enabled !== false;
+  if (!search) {
+    return '查本地梗库里的网络用语/梗/黑话/缩写。当前联网搜索已关闭：只能查本地库，查不到就照实说不知道或问一句，不要编造；管理员可以在控制台补充词条。';
+  }
+  return '查网络用语/梗/黑话/圈内缩写/看不懂的词。先查本地梗库，没有再普通联网搜索。拿到结果后先把摘要代回原句：能理解就直接用；如果仍然读不通（只有字面意思、是无关新闻/商品页、结果互相矛盾，或 signals.likelyInsufficient=true），不要硬猜，再用 mode="source" 查萌娘百科等梗来源。看懂后可用 mode="memorize" 传一句短解释存入本地候选库（管理员确认后长期生效，下次直接命中）。聊天里遇到不确定的词先用它。';
 }
 
 export function buildToolDefs() {
@@ -2326,6 +2335,38 @@ export function buildToolDefs() {
         ctx.session.feedbacks.push({ level, message: String(args.message ?? '').slice(0, 500), at: Date.now() });
         ctx.emit('feedback', { sessionId: ctx.session.id, chatKey: ctx.chatKey, level, message: String(args.message ?? '') });
         return ok({ reported: true });
+      }
+    },
+    {
+      name: 'meme_lookup',
+      description: memeLookupDescription(),
+      parameters: {
+        type: 'object',
+        properties: {
+          term: { type: 'string', description: '要查的词/梗/缩写本身，只传这个词，不要传整句话或聊天记录' },
+          mode: {
+            type: 'string',
+            enum: ['auto', 'source', 'memorize'],
+            description: 'auto=本地→普通搜索（默认）；source=直接查萌娘百科等梗来源；memorize=把已经理解的短解释存入候选库'
+          },
+          meaning: { type: 'string', description: 'mode=memorize 时必填：一句简短中文解释' },
+          usage: { type: 'string', description: '可选：怎么用、在什么语境下用' },
+          aliases: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '可选：别名/同义写法'
+          },
+          sourceUrl: { type: 'string', description: '可选：解释来自哪个页面' },
+          refresh: { type: 'boolean', description: '可选：跳过进程内缓存重新查' }
+        },
+        required: ['term']
+      },
+      async execute(ctx, args) {
+        try {
+          return ok(sanitizeDeep(await runMemeLookup(args)));
+        } catch (error) {
+          return err(`梗查询失败：${error?.message ?? error}`);
+        }
       }
     },
     {
