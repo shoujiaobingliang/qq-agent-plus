@@ -20,6 +20,10 @@ import {
 } from '../src/update-network.js';
 import { checkForUpdate, githubApiBase, readVersionAt } from '../src/update-notice.js';
 import { readJsonBounded } from '../src/core/http-body.js';
+import {
+  defaultUpdateRepository,
+  LEGACY_DEFAULT_UPDATE_REPOSITORY
+} from '../src/update-repository.js';
 
 const { values } = parseArgs({
   options: {
@@ -764,6 +768,10 @@ async function run() {
   }
 
   repository = String(settings.repository || '').trim();
+  // 旧配置/新安装没有显式仓库时，按安装来源解析（fork 默认指 fork，而不是上游）。
+  if (!repository || (repository === LEGACY_DEFAULT_UPDATE_REPOSITORY && settings.repositoryPinned !== true)) {
+    repository = defaultUpdateRepository({ root: appDir });
+  }
   branch = String(settings.branch || 'main').trim();
   if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(repository)) {
     throw new Error('Automatic update repository is not an approved GitHub HTTPS URL');

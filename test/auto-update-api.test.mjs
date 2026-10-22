@@ -80,16 +80,23 @@ test('console routes updater administrator aliases into global admin', async (t)
   // value must be persisted exclusively as config.admin.ownerUin.
   const settings = await request('/api/auto-update/settings', 'PUT', {
     ownerUin: '900001',
-    intervalHours: 12
+    intervalHours: 12,
+    repository: 'https://github.com/fork-owner/fork.git',
+    branch: 'release'
   });
   assert.equal(settings.response.status, 200);
   assert.equal(settings.body.status.intervalHours, 12);
   assert.equal(settings.body.status.ownerUin, '900001');
+  assert.equal(settings.body.status.repository, 'https://github.com/fork-owner/fork.git');
+  assert.equal(settings.body.status.branch, 'release');
+  assert.equal(settings.body.status.repositoryPinned, true);
 
   const afterSettings = await request('/api/config');
   assert.equal(afterSettings.body.admin.ownerUin, '900001');
   assert.ok(afterSettings.body.allow.private.includes('900001'));
   assert.equal(afterSettings.body.autoUpdate.ownerUin, '900001');
+  assert.equal(afterSettings.body.autoUpdate.repository, 'https://github.com/fork-owner/fork.git');
+  assert.equal(afterSettings.body.autoUpdate.branch, 'release');
 
   const resumed = await request('/api/auto-update/resume', 'POST', {
     confirm: true,

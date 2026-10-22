@@ -14,6 +14,10 @@ import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 import { normalizeTokenSaverMode } from './token-saver.js';   // 零依赖模块，避免循环依赖
 import { normalizeMomentWindows } from '../features/moment-schedule.js';
 import { PLATFORM_GATE_KEYS } from './platform-gates.js';   // 零依赖模块：按群覆盖的键名校验
+import {
+  defaultUpdateRepository,
+  LEGACY_DEFAULT_UPDATE_REPOSITORY
+} from '../update-repository.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 本文件在 src/core/ 下：仓库根要多退一层（挪目录时最容易漏的就是这里）
@@ -400,7 +404,10 @@ export const DEFAULT_CONFIG = {
   autoUpdate: {
     enabled: false,
     ownerUin: '',
-    repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git',
+    // 留空 = 跟随当前部署来源（.deployment.json / git origin / 环境变量）；
+    // 从 fork 部署时默认指向 fork，而不是上游。手动保存后 repositoryPinned=true。
+    repository: defaultUpdateRepository({ root: ROOT }),
+    repositoryPinned: false,
     branch: 'main',
     intervalHours: 6,
     // 协议端（SnowLuma）镜像的自动更新：默认关（它会重启协议端容器，虽然数据卷不动、
@@ -2071,9 +2078,15 @@ export function updateConfig(patch) {
     }
   }
   const autoUpdate = next.autoUpdate || {};
-  const updateRepository = String(
-    autoUpdate.repository || DEFAULT_CONFIG.autoUpdate.repository
-  ).trim();
+  const rawRepository = String(autoUpdate.repository || '').trim();
+  // 只有显式保存过（repositoryPinned）才把值钉死；否则跟随当前部署来源。
+  // 旧版本写死的上游默认值也视为“没配过”，fork 部署会自动改指 fork。
+  const repositoryPinned = autoUpdate.repositoryPinned === true && Boolean(rawRepository);
+  const updateRepository = repositoryPinned
+    ? rawRepository
+    : (!rawRepository || rawRepository === LEGACY_DEFAULT_UPDATE_REPOSITORY
+      ? defaultUpdateRepository({ root: ROOT })
+      : rawRepository);
   const updateBranch = String(
     autoUpdate.branch || DEFAULT_CONFIG.autoUpdate.branch
   ).trim();
@@ -2099,6 +2112,7 @@ export function updateConfig(patch) {
     repository: updateRepository.endsWith('.git')
       ? updateRepository
       : `${updateRepository}.git`,
+    repositoryPinned,
     branch: updateBranch,
     intervalHours: Math.min(
       168,

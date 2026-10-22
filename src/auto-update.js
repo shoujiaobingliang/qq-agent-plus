@@ -326,6 +326,7 @@ export class AutoUpdateManager {
       busy,
       ownerUin: autoUpdateOwner(cfg),
       repository: String(settings.repository || ''),
+      repositoryPinned: settings.repositoryPinned === true,
       branch: String(settings.branch || 'main'),
       intervalHours: Number(settings.intervalHours) || 6,
       ...network,
@@ -355,6 +356,7 @@ export class AutoUpdateManager {
       ? null
       : { ownerUin: String(options.ownerUin || '').trim() };
     for (const key of [
+      'repository',
       'branch',
       'networkRetries',
       'retryBaseMs',
@@ -366,6 +368,14 @@ export class AutoUpdateManager {
     ]) {
       if (options[key] !== undefined) next[key] = options[key];
     }
+    // 显式保存过目标仓库就钉死（fork 自己维护自己的更新源）；值没变且原本没钉死时，
+    // 继续跟随部署来源，避免“只改检查间隔”把默认仓库固定住。
+    if (options.repository !== undefined) {
+      const previousRepository = String(autoUpdate.repository || '').trim();
+      const nextRepository = String(options.repository || '').trim();
+      next.repositoryPinned = autoUpdate.repositoryPinned === true
+        || nextRepository !== previousRepository;
+    }
     const cfg = this.updateConfig({
       autoUpdate: next,
       ...(adminPatch ? { admin: adminPatch } : {})
@@ -374,17 +384,26 @@ export class AutoUpdateManager {
     return cfg.autoUpdate;
   }
 
-  resume({ ownerUin, intervalHours = 6 } = {}) {
+  resume({ ownerUin, intervalHours = 6, repository, branch } = {}) {
     const current = this.config();
     const adminPatch = ownerUin === undefined
       ? null
       : { ownerUin: String(ownerUin || '').trim() };
+    const next = {
+      ...(current.autoUpdate || {}),
+      enabled: true,
+      intervalHours
+    };
+    if (repository !== undefined) {
+      const previousRepository = String(current.autoUpdate?.repository || '').trim();
+      const nextRepository = String(repository || '').trim();
+      next.repository = repository;
+      next.repositoryPinned = current.autoUpdate?.repositoryPinned === true
+        || nextRepository !== previousRepository;
+    }
+    if (branch !== undefined) next.branch = branch;
     const cfg = this.updateConfig({
-      autoUpdate: {
-        ...(current.autoUpdate || {}),
-        enabled: true,
-        intervalHours
-      },
+      autoUpdate: next,
       ...(adminPatch ? { admin: adminPatch } : {})
     });
     // 显式恢复更新：清掉失败自停标记，否则更新器仍按 autoDisabled 跳过

@@ -387,6 +387,11 @@ function renderControlHub(data = {}) {
           <input type="hidden" id="auto-update-owner" data-global-admin-mirror="true" value="${esc(update.ownerUin || '')}" />
         </label>
         <label><span>检查间隔（小时）</span><input type="number" id="auto-update-interval" min="1" max="168" value="${esc(update.intervalHours || 6)}" /></label>
+        <label><span>目标仓库（fork 可改）</span>
+          <input type="text" id="auto-update-repository" value="${esc(update.repository || '')}" placeholder="https://github.com/&lt;owner&gt;/&lt;repo&gt;.git" />
+          <span class="hint" style="margin:0">默认跟随当前部署来源（.deployment.json / git origin）；修改后会固定到这个仓库。</span>
+        </label>
+        <label><span>目标分支</span><input type="text" id="auto-update-branch" value="${esc(update.branch || 'main')}" placeholder="main" /></label>
       </div>
       <div class="control-result error hidden" id="hub-deploy-error" style="margin-top:8px"></div>
       <div class="settings-actions">
@@ -546,6 +551,8 @@ function updateControlHubFields(box, statuses, update) {
   };
   syncInput('auto-update-owner', update.ownerUin || '');
   syncInput('auto-update-interval', update.intervalHours || 6);
+  syncInput('auto-update-repository', update.repository || '');
+  syncInput('auto-update-branch', update.branch || 'main');
 
   // 错误行
   const errorBox = document.getElementById('hub-deploy-error');
@@ -608,7 +615,9 @@ async function loadControlHub({ force = false } = {}) {
 function autoUpdateSettingsBody() {
   return {
     ownerUin: $('#auto-update-owner')?.value?.trim() || '',
-    intervalHours: clampInt($('#auto-update-interval')?.value, 1, 168, 6)
+    intervalHours: clampInt($('#auto-update-interval')?.value, 1, 168, 6),
+    repository: $('#auto-update-repository')?.value?.trim() || '',
+    branch: $('#auto-update-branch')?.value?.trim() || 'main'
   };
 }
 

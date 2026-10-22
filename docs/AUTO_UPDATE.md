@@ -51,7 +51,8 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
   "autoUpdate": {
     "enabled": false,
     "ownerUin": "",
-    "repository": "https://github.com/sakurawwwxh/qq-agent-plus.git",
+    "repository": "",
+    "repositoryPinned": false,
     "branch": "main",
     "intervalHours": 6,
     "networkRetries": 4,
@@ -71,7 +72,10 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
 ```
 
 - 仓库只接受 GitHub HTTPS 地址。
-- 分支名经过格式校验，默认 `main`；控制页可直接切换目标分支。
+- `repository` 留空（或仍是旧版写死的上游默认值）时，按**当前部署来源**解析：`.deployment.json` → 当前 checkout 的 `git origin` → `package.json` → 最后才回落到上游。从 fork 部署时默认检查 fork，而不是上游；`QQ_AGENT_REPOSITORY` 可显式覆盖。
+- 在控制页显式修改并保存目标仓库后 `repositoryPinned=true`，后续不再跟随部署来源；把仓库清空再保存可恢复跟随。
+- 分支名经过格式校验，默认 `main`；控制页可直接修改目标仓库和分支。
+- 已有安装如果 `.deployment.json` 里还是上游地址，第一次在控制页保存 fork 仓库即可；自动更新发起的部署会按控制台设置执行，并在成功后把记录同步到 fork。
 - `networkRetries` 为网络操作失败后的额外重试次数，范围 0-10。
 - 重试采用指数退避：从 `retryBaseMs` 开始，最多增长到 `retryMaxMs`。
 - `connectivityTimeoutSeconds` 控制轻量连通性预检超时；`fetchTimeoutSeconds` 控制实际 Git 拉取超时。

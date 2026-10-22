@@ -3135,7 +3135,8 @@ input[type=checkbox], input[type=radio] {
 .pw-row > input { flex: 1; min-width: 0; }
 
 /* 其余长文本字段（URL 等）：不再铺满整行，但保留比普通字段更宽的宽度 */
-#cfg-price-remote-url, #new-baseurl, #auto-update-branch-advanced { max-width: 520px; }
+#cfg-price-remote-url, #new-baseurl, #auto-update-repository { max-width: 520px; }
+#auto-update-branch { max-width: 220px; }
 #cfg-model-pick { max-width: 560px; }
 
 /* ── 主题切换的平滑过渡与状态条对齐（消除"闪"与横向位移）──

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { defaultUpdateRepository } from '../src/update-repository.js';
 const { QQ_INSTALL_DIR: root, QQ_DATA_DIR: data, QQ_NODE: node, QQ_SERVICE: service } = process.env;
 if (![root, data, node, service].every(Boolean)) throw new Error('Missing deployment environment');
 const quote = (v) => JSON.stringify(v);
@@ -22,7 +23,7 @@ const port = Number(process.env.QQ_PORT || previous.port || 0) || 0;
 const repository = String(
   process.env.QQ_AGENT_REPOSITORY
   || previous.repository
-  || 'https://github.com/sakurawwwxh/qq-agent-plus.git'
+  || defaultUpdateRepository({ root })
 ).trim();
 const branch = String(process.env.QQ_AGENT_BRANCH || previous.branch || 'main').trim();
 if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/.test(repository)) {

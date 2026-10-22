@@ -2059,7 +2059,9 @@ export function createApp({
     try {
       autoUpdate.configure({
         ownerUin: body.ownerUin,
-        intervalHours: body.intervalHours
+        intervalHours: body.intervalHours,
+        repository: body.repository,
+        branch: body.branch
       });
       return json(res, 200, { ok: true, status: autoUpdate.status() });
     } catch (error) {
@@ -2092,7 +2094,9 @@ export function createApp({
     try {
       autoUpdate.resume({
         ownerUin: body.ownerUin,
-        intervalHours: body.intervalHours
+        intervalHours: body.intervalHours,
+        repository: body.repository,
+        branch: body.branch
       });
       auditWrite('auto-update.resume', String(body.ownerUin ?? ''), { req, after: autoUpdate.status() });
       return json(res, 200, { ok: true, status: autoUpdate.status() });

@@ -39,7 +39,8 @@ import { esc } from './core/dom.js';
   }
 
   function advancedPayload() {
-    const branch = String(fieldValue('auto-update-branch-advanced', 'main')).trim();
+    // 分支在基础设置里维护；这里只做网络策略。旧 DOM 没有基础班分支输入时才回退。
+    const branch = String(fieldValue('auto-update-branch', fieldValue('auto-update-branch-advanced', 'main'))).trim();
     if (!validBranch(branch)) throw new Error('部署分支名称无效');
     const retries = Math.min(10, Math.max(0, Math.round(Number(fieldValue('auto-update-retries', 4)) || 0)));
     const baseSeconds = Math.min(30, Math.max(0.1, Number(fieldValue('auto-update-retry-base', 1.5)) || 1.5));
@@ -131,10 +132,6 @@ import { esc } from './core/dom.js';
     const connectivityClass = c.status === 'failed' ? 'error' : c.status === 'ok' ? 'success' : 'muted';
     return `
       <div data-auto-update-network class="update-deploy-settings" style="margin-top:10px;align-items:end">
-        <label><span>部署分支</span>
-          <input type="text" id="auto-update-branch-advanced" list="auto-update-branch-options" value="${esc(status.branch || 'main')}" autocomplete="off" />
-          <datalist id="auto-update-branch-options"><option value="main"></option><option value="${esc(status.branch || 'main')}"></option></datalist>
-        </label>
         <label><span>Git 网络重试次数</span><input type="number" id="auto-update-retries" min="0" max="10" value="${esc(status.networkRetries ?? 4)}" /></label>
         <label><span>首次重试等待（秒）</span><input type="number" id="auto-update-retry-base" min="0.1" max="30" step="0.1" value="${esc(retryBase)}" /></label>
         <label><span>最大重试等待（秒）</span><input type="number" id="auto-update-retry-max" min="0.5" max="120" step="0.5" value="${esc(retryMax)}" /></label>

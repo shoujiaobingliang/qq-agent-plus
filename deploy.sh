@@ -519,6 +519,22 @@ ARGS=(--data-dir "$DATA_DIR" --host "$HOST" --port "$PORT")
 [[ -z "$IMPORT_BRIDGE" ]] || ARGS+=(--import-bridge "$IMPORT_BRIDGE")
 [[ -z "$CREDENTIAL_FILE" ]] || ARGS+=(--credential-file "$CREDENTIAL_FILE")
 "$NODE_BIN" scripts/configure-linux.mjs "${ARGS[@]}"
+# 首次/手动部署没显式给 --repository 时，用源码 checkout 的 origin 作为安装记录：
+# fork 部署要记成 fork，自动更新才不会回头拉上游。只在 install-service 前推导，
+# 不参与上面的目标校验（老安装记录是上游时不会被这里改写后误判漂移）。
+if [[ -z "$DEPLOY_REPOSITORY" && -n "${QQ_AGENT_REPOSITORY:-}" ]]; then
+  DEPLOY_REPOSITORY="$QQ_AGENT_REPOSITORY"
+fi
+if [[ -z "$DEPLOY_REPOSITORY" && -d "$ROOT/.git" ]]; then
+  DEPLOY_REPOSITORY="$(git -C "$ROOT" remote get-url origin 2>/dev/null || true)"
+  case "$DEPLOY_REPOSITORY" in
+    git@github.com:*) DEPLOY_REPOSITORY="https://github.com/${DEPLOY_REPOSITORY#git@github.com:}" ;;
+    ssh://git@github.com/*) DEPLOY_REPOSITORY="https://github.com/${DEPLOY_REPOSITORY#ssh://git@github.com/}" ;;
+  esac
+  [[ "$DEPLOY_REPOSITORY" == https://github.com/* ]] || DEPLOY_REPOSITORY=""
+fi
+[[ -z "$DEPLOY_REPOSITORY" ]] || export QQ_AGENT_REPOSITORY="$DEPLOY_REPOSITORY"
+[[ -z "$DEPLOY_BRANCH" ]] || export QQ_AGENT_BRANCH="$DEPLOY_BRANCH"
 export QQ_INSTALL_DIR="$INSTALL_DIR" QQ_DATA_DIR="$DATA_DIR" QQ_NODE="$NODE_BIN" QQ_SERVICE="$SERVICE" QQ_HOST="$HOST" QQ_PORT="$PORT"
 "$NODE_BIN" scripts/install-service.mjs
 systemd-analyze --user verify "$HOME/.config/systemd/user/$SERVICE.service"

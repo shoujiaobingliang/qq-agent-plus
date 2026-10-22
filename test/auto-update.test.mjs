@@ -361,6 +361,22 @@ test('currentRevision 以 deployed-revision 为准：状态文件里的旧值不
   assert.equal(f.manager.status().currentRevision, 'd'.repeat(40), '提交部署时显示提交号');
 });
 
+test('configure 接受目标仓库/分支；只有仓库变化时才钉死', (t) => {
+  const f = fixture(t);
+  const initialRepo = f.config.autoUpdate.repository;
+  f.manager.configure({ intervalHours: 8, repository: initialRepo, branch: 'dev' });
+  assert.equal(f.config.autoUpdate.branch, 'dev');
+  assert.equal(f.config.autoUpdate.repository, initialRepo);
+  assert.equal(f.config.autoUpdate.repositoryPinned, false, '只改分支/间隔不固定默认仓库');
+
+  f.manager.configure({ repository: 'https://github.com/fork-owner/fork.git' });
+  assert.equal(f.config.autoUpdate.repository, 'https://github.com/fork-owner/fork.git');
+  assert.equal(f.config.autoUpdate.repositoryPinned, true, '显式换仓库后固定');
+
+  f.manager.configure({ intervalHours: 10, repository: 'https://github.com/fork-owner/fork.git' });
+  assert.equal(f.config.autoUpdate.repositoryPinned, true, '已固定的仓库继续保持');
+});
+
 test('failureDetail：有 TAP 失败项就列失败项，不再拿输出结尾当详情（2026-10-10 事故）', () => {
   const stdout = [
     '# Subtest: some passing test',
