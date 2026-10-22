@@ -56,8 +56,8 @@
 
 ## 角色卡与其它
 
-- 角色卡正文：[`roles/`](../roles)，一张卡一个 markdown（内置默认小鲸鱼、损友、温柔陪聊、
-  技术宅、猫娘），说明见 [PERSONAS.md](PERSONAS.md)；新增卡要在 `src/personas.js` 登记，
+- 角色卡正文：[`roles/`](../roles)，一张卡一个 markdown（内置默认小鲸鱼、傲娇萝莉），
+  说明见 [PERSONAS.md](PERSONAS.md)；新增卡要在 `src/personas.js` 登记，
   由 `test/personas.test.mjs` 检查。
 - 远程价格表（随版本发布）：[`prices.json`](../prices.json)
 - 运行数据与凭据：`data/`（**不入库**，分享前使用 `node scripts/sanitize-release.mjs` 生成脱敏副本）

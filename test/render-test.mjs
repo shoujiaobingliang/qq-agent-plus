@@ -228,9 +228,11 @@ try {
   const personaTemplates = {
     ...Object.fromEntries(Object.entries(PERSONAS).map(([id, p]) => [id, { ...p, builtin: true }])),
     custom_0: {
-      ...PERSONAS.jishu_zhai,
       name: 'Grounded copy',
-      customRules: 'Explain version assumptions'
+      text: '# 角色卡：Grounded copy\n\n你是测试角色。',
+      customRules: 'Explain version assumptions',
+      behaviorProfile: 'grounded',
+      builtin: false
     }
   };
   vm.runInContext(`state.personaTemplates = ${JSON.stringify(personaTemplates)};`, ctx);
@@ -284,9 +286,38 @@ try {
   // ── 人设页改版：卡库 + 结构化正文视图 ──
   // 角色正文原来只给一个 textarea（"留言板"）；现在解析成分节面板，
   // 招牌渲染成标签、黑名单渲染成打叉标签、示例渲染成聊天气泡。
-  const catText = PERSONAS.maoniang.text;
+  const catText = [
+    '# 角色卡：测试猫娘',
+    '',
+    '## 一、你是谁',
+    '你是群里的二次元猫娘。',
+    '',
+    '## 二、你的标志',
+    '- 每轮至少一条带喵。',
+    '',
+    '## 三、示例',
+    '群友：给我喵一个',
+    '你不要：装听不见',
+    '你可以：喵',
+    '',
+    '## 四、说话方式',
+    '短句，带喵。',
+    '',
+    '## 五、你在群里的习惯',
+    '偶尔潜水。',
+    '',
+    '## 六、对管理员',
+    '对管理员软一点，认 [管理员] 标记。',
+    '',
+    '## 七、原则',
+    '> 保持自然。',
+    '',
+    '## 八、禁止',
+    '- 不接亲密关系。',
+    '- 不装客服。'
+  ].join('\n');
   const catParsed = ctx.parsePersonaCard(catText);
-  const parseOk = catParsed.title === '角色卡：猫娘（二次元）'
+  const parseOk = catParsed.title === '角色卡：测试猫娘'
     && catParsed.sections.length >= 8
     && catParsed.sections.some((s) => s.name.includes('你的标志'));
   parseOk ? pass++ : fail++;
@@ -297,7 +328,7 @@ try {
   const exampleBlocks = exampleSection ? exampleSection.blocks.filter((b) => b.type === 'example') : [];
   const askGranted = exampleBlocks.some((b) => b.turns.some((t) => t.role === 'peer' && t.text.includes('给我喵一个'))
     && b.turns.some((t) => t.role === 'ok' && t.text.includes('喵')));
-  const exOk = exampleBlocks.length >= 8 && askGranted;
+  const exOk = exampleBlocks.length >= 1 && askGranted;
   exOk ? pass++ : fail++;
   console.log('  ' + (exOk ? 'OK   ' : 'FAIL ') + '示例按"群友/你不要/你可以"分组（含"给我喵一个"的给法）'
     + (exOk ? '' : ` -> blocks=${exampleBlocks.length} askGranted=${askGranted}`));

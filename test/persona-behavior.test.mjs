@@ -18,26 +18,32 @@ const { buildQzoneInteractionPrompt, qzoneInteractionPersonaHash } = await impor
 const { buildFriendReviewSystemPrompt } = await import('../src/llm/friend-review-prompt.js');
 const { mdToPlain } = await import('../src/llm/md-to-plain.js');
 
-// 用技术宅这张卡做 grounded 档的样本（grounded 的行为契约与具体是哪张卡无关）
+// grounded 档的行为契约与具体是哪张卡无关：用一张合成的 grounded 人设做样本。
 function groundedPersona() {
-  const template = PERSONAS.jishu_zhai;
   return {
     ...DEFAULT_CONFIG.persona,
-    roleText: template.text,
-    behaviorProfile: template.behaviorProfile
+    roleText: [
+      '# 角色卡：测试技术宅',
+      '',
+      '你是群里那个搞技术的，先给结论，再补关键证据。',
+      '- 不确定的地方明确说不确定，不编造运行结果。',
+      '- 代码用 fenced code block，保留缩进和英文间隔。',
+      '- 不碰违法和不道德的技术。',
+      '- 保持排查口气：先问关键信息，再给可验证的下一步。'
+    ].join('\n'),
+    behaviorProfile: 'grounded'
   };
 }
 
 test('内置卡单一来源，默认人设不受影响', () => {
   assert.equal(DEFAULT_CONFIG.persona.roleText, PERSONAS.xiaojingyu.text);
   assert.equal(DEFAULT_CONFIG.persona.behaviorProfile, 'legacy');
-  assert.equal(PERSONAS.jishu_zhai.behaviorProfile, 'grounded');
-  assert.equal(PERSONAS.jishu_zhai.text, fs.readFileSync(
-    new URL('../roles/jishu-zhai.md', import.meta.url), 'utf8'
+  assert.deepEqual(Object.keys(PERSONAS).sort(), ['tsundere_loli', 'xiaojingyu']);
+  assert.equal(PERSONAS.xiaojingyu.text, fs.readFileSync(
+    new URL('../roles/xiaojingyu.md', import.meta.url), 'utf8'
   ).trim());
-  for (const text of ['Linux、Docker、网络和二手硬件', '不碰违法和不道德的技术', '没有实际运行结果', '排查口气']) {
-    assert.ok(PERSONAS.jishu_zhai.text.includes(text), text);
-  }
+  assert.match(PERSONAS.xiaojingyu.text, /【核心系统指令】/);
+  assert.match(PERSONAS.tsundere_loli.text, /【PERSONA_LOAD】/);
   for (const [id, persona] of Object.entries(PERSONAS)) {
     assert.doesNotMatch(persona.text, /mcp__|qq_mark_read|\[SILENT\]/, id);
   }
@@ -230,9 +236,9 @@ test('控制台接口能列出、选择、自定义与回退内置卡', async (t
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   const templates = (await (await request('/api/persona-templates')).json()).templates;
-  const builtin = templates.find((p) => p.id === 'jishu_zhai');
-  assert.equal(builtin.text, groundedPersona().roleText);
-  assert.equal(builtin.behaviorProfile, 'grounded');
+  const builtin = templates.find((p) => p.id === 'xiaojingyu');
+  assert.equal(builtin.text, PERSONAS.xiaojingyu.text);
+  assert.equal(builtin.behaviorProfile, 'legacy');
   assert.equal(builtin.builtin, true);
   assert.equal((await request('/api/config', { persona: groundedPersona() })).status, 200);
   assert.equal((await (await request('/api/config')).json()).persona.behaviorProfile, 'grounded');

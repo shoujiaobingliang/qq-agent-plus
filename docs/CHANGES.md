@@ -145,6 +145,12 @@ HTML 里的 markdown 星号）。
   源码 checkout 的 origin 写进 `.deployment.json`。
 - 内置 Node 运行时升级到 22.23.4（安全修复）。
 
+**默认人设卡**
+
+- 默认小鲸鱼卡改为「核心系统指令 + 角色人设」版；损友卡改为「傲娇萝莉」token 卡。
+- `wenrou_peiliao` / `jishu_zhai` / `maoniang` 下线；旧 `duzui_sunyou` 绑定自动迁移到
+  `tsundere_loli`。已下线卡的绑定载入时清掉，当前正文保留，不会被换成默认卡。
+
 **其他**
 
 - 模型注意力层（hybrid）、降低云盘 IOPS 与 7 天保留期清理、连续消息先合并理解、

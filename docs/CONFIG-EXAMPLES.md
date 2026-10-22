@@ -696,8 +696,8 @@
 ```json
 {
   "personaPerChat": {
-    "group:100200301": { "templateId": "maoniang" },
-    "group:100200302": { "templateId": "duzui_sunyou", "customRules": "这个群人比较正经，少开玩笑" },
+    "group:100200301": { "templateId": "tsundere_loli" },
+    "group:100200302": { "templateId": "xiaojingyu", "customRules": "这个群人比较正经，少开玩笑" },
     "private:700000001": { "roleText": "你是一只看门狗。", "behaviorProfile": "legacy" }
   }
 }

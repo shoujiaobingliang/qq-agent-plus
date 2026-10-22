@@ -25,8 +25,8 @@ const writeConfig = (persona) => {
 const readConfig = () => JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
 
 test('登记的模板 id 都能取到卡，未知 id 返回 null', () => {
-  assert.ok(PERSONA_TEMPLATE_IDS.includes('maoniang'));
-  assert.equal(builtinPersonaTemplate('maoniang').name, '猫娘（二次元）');
+  assert.ok(PERSONA_TEMPLATE_IDS.includes('tsundere_loli'));
+  assert.equal(builtinPersonaTemplate('tsundere_loli').name, '傲娇萝莉');
   assert.equal(builtinPersonaTemplate('custom_0'), null);
   assert.equal(builtinPersonaTemplate(''), null);
   assert.equal(builtinPersonaTemplate(undefined), null);
@@ -34,24 +34,24 @@ test('登记的模板 id 都能取到卡，未知 id 返回 null', () => {
 
 test('绑定的内置卡：载入时按卡文件刷新正文（改了卡不用重选）', () => {
   // 档位故意写成与卡不同的值：绑定的卡只管正文，档位是实例自己的开关（见 personas.js 注释）
-  writeConfig({ templateId: 'maoniang', roleText: '# 角色卡：猫娘（二次元）\n（实例里的旧正文）', behaviorProfile: 'grounded' });
+  writeConfig({ templateId: 'tsundere_loli', roleText: '# 角色卡：傲娇萝莉\n（实例里的旧正文）', behaviorProfile: 'grounded' });
   const cfg = loadConfig();
-  assert.equal(cfg.persona.roleText, PERSONAS.maoniang.text, '正文应被卡文件刷新');
+  assert.equal(cfg.persona.roleText, PERSONAS.tsundere_loli.text, '正文应被卡文件刷新');
   assert.equal(cfg.persona.behaviorProfile, 'grounded', '刷新正文不该顺手改掉档位');
 });
 
 test('卡文件改了以后，下次载入就跟着变（模拟升级带的正文更新）', () => {
-  const original = PERSONAS.maoniang.text;
+  const original = PERSONAS.tsundere_loli.text;
   try {
-    PERSONAS.maoniang.text = '# 角色卡：猫娘（二次元）\n（升级后的新正文）';
-    writeConfig({ templateId: 'maoniang', roleText: original, behaviorProfile: 'legacy' });
-    assert.equal(loadConfig().persona.roleText, PERSONAS.maoniang.text);
+    PERSONAS.tsundere_loli.text = '# 角色卡：傲娇萝莉\n（升级后的新正文）';
+    writeConfig({ templateId: 'tsundere_loli', roleText: original, behaviorProfile: 'legacy' });
+    assert.equal(loadConfig().persona.roleText, PERSONAS.tsundere_loli.text);
   } finally {
-    PERSONAS.maoniang.text = original;
+    PERSONAS.tsundere_loli.text = original;
   }
   // 绑定关系还在：磁盘上放一份过期正文，下次载入照样被刷回文件内容
-  writeConfig({ templateId: 'maoniang', roleText: '（绑定还在，但这正文过期了）', behaviorProfile: 'legacy' });
-  assert.equal(loadConfig().persona.roleText, PERSONAS.maoniang.text);
+  writeConfig({ templateId: 'tsundere_loli', roleText: '（绑定还在，但这正文过期了）', behaviorProfile: 'legacy' });
+  assert.equal(loadConfig().persona.roleText, PERSONAS.tsundere_loli.text);
 });
 
 test('磁盘上人设段是标量/数组/字符串时：载入与保存都不打崩', () => {
@@ -81,17 +81,17 @@ test('未绑定（手改正文 / 自定义卡）：正文原样保留', () => {
 
 test('老配置（没有 templateId 键）不会被误绑成默认卡', () => {
   // 默认值里带的是 templateId: 'xiaojingyu'，迁移必须补空串把它挡住
-  writeConfig({ roleText: '# 角色卡：猫娘（二次元）\n（老实例里存着的猫娘正文）' });
+  writeConfig({ roleText: '# 角色卡：傲娇萝莉\n（老实例里存着的傲娇萝莉正文）' });
   const cfg = loadConfig();
   assert.equal(cfg.persona.templateId, '');
-  assert.ok(cfg.persona.roleText.includes('猫娘'), '老实例的正文不能被换成默认卡');
+  assert.ok(cfg.persona.roleText.includes('傲娇萝莉'), '老实例的正文不能被换成默认卡');
   assert.notEqual(cfg.persona.roleText, PERSONAS.xiaojingyu.text);
 });
 
 test('保存配置时同样会刷新，且只在绑定时生效', () => {
-  writeConfig({ templateId: 'maoniang', roleText: '旧正文', behaviorProfile: 'legacy' });
-  updateConfig({ persona: { templateId: 'maoniang', roleText: '旧正文' } });
-  assert.equal(updateConfig({}).persona.roleText, PERSONAS.maoniang.text);
+  writeConfig({ templateId: 'tsundere_loli', roleText: '旧正文', behaviorProfile: 'legacy' });
+  updateConfig({ persona: { templateId: 'tsundere_loli', roleText: '旧正文' } });
+  assert.equal(updateConfig({}).persona.roleText, PERSONAS.tsundere_loli.text);
 
   // 解绑后保存自己的正文：不会被文件覆盖，且落盘
   updateConfig({ persona: { templateId: '', roleText: '解绑后的自定义正文' } });
@@ -105,9 +105,9 @@ test('applyPersonaTemplate 对空配置/坏配置不抛错', () => {
   assert.equal(applyPersonaTemplate({ persona: {} }), null);
   assert.equal(applyPersonaTemplate({ persona: null }), null);
   assert.equal(applyPersonaTemplate({ persona: 'not-an-object' }), null);
-  assert.equal(applyPersonaTemplate({ persona: { templateId: 'maoniang', roleText: PERSONAS.maoniang.text } }), null);
-  const note = applyPersonaTemplate({ persona: { templateId: 'maoniang', roleText: 'stale' } });
-  assert.deepEqual(note, { id: 'maoniang', name: '猫娘（二次元）' });
+  assert.equal(applyPersonaTemplate({ persona: { templateId: 'tsundere_loli', roleText: PERSONAS.tsundere_loli.text } }), null);
+  const note = applyPersonaTemplate({ persona: { templateId: 'tsundere_loli', roleText: 'stale' } });
+  assert.deepEqual(note, { id: 'tsundere_loli', name: '傲娇萝莉' });
 });
 
 test('认不出的 templateId 会被清成未绑定（不留永远不生效的 id）', () => {
@@ -122,9 +122,9 @@ test('认不出的 templateId 会被清成未绑定（不留永远不生效的 i
 
 test('人设字段传了非对象（null / 字符串）时当没改，不会打崩保存', () => {
   // 不依赖磁盘/缓存先后顺序：先把运行态设成想要的样子，再断言坏 patch 什么都没改
-  updateConfig({ persona: { templateId: 'maoniang', roleText: '旧正文', behaviorProfile: 'legacy' } });
+  updateConfig({ persona: { templateId: 'tsundere_loli', roleText: '旧正文', behaviorProfile: 'legacy' } });
   const before = structuredClone(getConfig().persona);
-  assert.equal(before.roleText, PERSONAS.maoniang.text);
+  assert.equal(before.roleText, PERSONAS.tsundere_loli.text);
 
   assert.doesNotThrow(() => updateConfig({ persona: null }));
   assert.deepEqual(getConfig().persona, before, '坏 patch 不该改动人设');

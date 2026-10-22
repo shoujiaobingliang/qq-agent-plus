@@ -9,19 +9,10 @@ export function normalizeBehaviorProfile(value) {
 // 人设模板库：**角色卡正文的唯一来源是 roles/ 目录**，一张卡一个 markdown 文件，
 // 这里只做登记（id → 文件 / 显示名 / 语气档位），不再把正文内联进代码。
 //
-//   roles/xiaojingyu.md              默认人设：原版 qq-bridge 的"小鲸鱼"角色卡。
-//                                    已把其中旧架构专属指令（[SILENT]、qq_* MCP 工具名、
-//                                    唤醒配置、空格分条等）适配为本程序的机制
-//                                    （安静结束、send_message 数组分条、原生工具名），
-//                                    人格与示例原样保留。
-//   roles/duzui-sunyou.md            损友（毒舌吐槽），legacy 档：短句接梗、只损能开玩笑的事。
-//   roles/wenrou-peiliao.md          温柔陪聊（知心），grounded 档：会听、不诊断、不承诺陪伴。
-//   roles/jishu-zhai.md              技术宅（自建服务），grounded 档：先问关键信息、留出不确定。
-//   roles/maoniang.md                猫娘（二次元），legacy 档：喵是每轮的底线（不是点缀），
-//                                    傲娇只做调味、落点是"给了"，不擦边不病娇。
-//
-// 新增卡时的约定：正文只写在 roles/ 下，用真实工具名，别引用旧架构专属指令；
-// test/personas.test.mjs 会检查"roles/ 下的每个文件都已登记"。
+//   roles/xiaojingyu.md              默认人设：DeepSeek 小鲸鱼。
+//   roles/tsundere-loli.md           傲娇萝莉（鲸鱼娘 token 卡）。
+// 其余旧卡已下线；新增卡时正文只写在 roles/ 下，用真实工具名。
+
 //
 // 用相对模块 URL 读取，不依赖启动工作目录；部署时必须带上 roles/（完整同步会包含）。
 const readRole = (file) => readFileSync(new URL(`../roles/${file}`, import.meta.url), 'utf8').trim();
@@ -32,34 +23,25 @@ export const PERSONAS = {
     behaviorProfile: 'legacy',
     text: readRole('xiaojingyu.md')
   },
-  duzui_sunyou: {
-    name: '损友（毒舌吐槽）',
+  tsundere_loli: {
+    name: '傲娇萝莉',
     behaviorProfile: 'legacy',
-    text: readRole('duzui-sunyou.md')
-  },
-  wenrou_peiliao: {
-    name: '温柔陪聊（知心）',
-    behaviorProfile: 'grounded',
-    text: readRole('wenrou-peiliao.md')
-  },
-  jishu_zhai: {
-    name: '技术宅（自建服务）',
-    behaviorProfile: 'grounded',
-    text: readRole('jishu-zhai.md')
-  },
-  maoniang: {
-    name: '猫娘（二次元）',
-    behaviorProfile: 'legacy',
-    text: readRole('maoniang.md')
+    text: readRole('tsundere-loli.md')
   }
 };
+
+/** 旧卡 id → 新卡 id：老配置里绑着损友的实例自动落到傲娇萝莉。 */
+export const LEGACY_PERSONA_ALIASES = Object.freeze({
+  duzui_sunyou: 'tsundere_loli'
+});
 
 /** 内置卡 id 列表（控制台与校验用）。 */
 export const PERSONA_TEMPLATE_IDS = Object.keys(PERSONAS);
 
-/** 按 id 取内置卡；不是内置 id（自定义卡、空值）返回 null。 */
+/** 按 id 取内置卡（兼容旧 id：损友 → 傲娇萝莉）；不是内置 id（自定义卡、空值）返回 null。 */
 export function builtinPersonaTemplate(id) {
-  const key = String(id ?? '').trim();
+  const raw = String(id ?? '').trim();
+  const key = LEGACY_PERSONA_ALIASES[raw] || raw;
   return Object.prototype.hasOwnProperty.call(PERSONAS, key) ? PERSONAS[key] : null;
 }
 
@@ -67,7 +49,7 @@ export function builtinPersonaTemplate(id) {
  * 按会话解析出生效的人设：全局 `persona` + `personaPerChat[chatKey]` 覆盖。
  *
  * 覆盖字段都是"决定口吻"的那几项；没写的继承全局。指定了内置卡（templateId）时，
- * 正文与档位以卡为准（否则会出现"猫娘的正文 + 全局的 legacy 档"这种混合体）；
+ * 正文与档位以卡为准（否则会出现"新卡的正文 + 全局的旧档"这种混合体）；
  * 卡 id 认不出来时回落全局正文，避免整个提示词被换空。
  *
  * 纯函数：不读写磁盘，调用方（编排器）每轮按 chatKey 取一次即可。
@@ -115,15 +97,18 @@ export function applyPersonaTemplate(cfg) {
   const rawId = persona.templateId === undefined || persona.templateId === null
     ? ''
     : String(persona.templateId).trim();
-  const template = builtinPersonaTemplate(rawId);
+  const resolvedId = LEGACY_PERSONA_ALIASES[rawId] || rawId;
+  const template = builtinPersonaTemplate(resolvedId);
   if (!template) {
     if (rawId) persona.templateId = '';
     return null;
   }
+  // 旧 id 绑定的实例顺手迁移到新 id，避免控制台一直显示旧卡名。
+  if (resolvedId !== rawId) persona.templateId = resolvedId;
   const nextText = String(template.text).trim();
   if (String(persona.roleText || '').trim() === nextText) return null;
   persona.roleText = nextText;
-  return { id: rawId, name: template.name };
+  return { id: resolvedId, name: template.name };
 }
 
 /**
@@ -137,11 +122,14 @@ export function applyPersonaPerChatTemplates(cfg) {
     if (!entry || typeof entry !== 'object') continue;
     const id = String(entry.templateId || '').trim();
     if (!id) continue;
-    if (!builtinPersonaTemplate(id)) {
+    const resolvedId = LEGACY_PERSONA_ALIASES[id] || id;
+    if (!builtinPersonaTemplate(resolvedId)) {
       delete entry.templateId;
       // 只看"还有没有别的白名单字段"，别自己再列一遍 —— 漏掉 participation /
       // behaviorProfile 会把用户单独设过的偏好一起删掉（2026-10-18 审查 P2）
       if (!Object.keys(entry).length) delete perChat[key];
+    } else if (resolvedId !== id) {
+      entry.templateId = resolvedId;
     }
   }
 }

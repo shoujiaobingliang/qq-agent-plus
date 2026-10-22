@@ -322,14 +322,14 @@ test('判定函数：CQ 码的 @ 与短名字边界', () => {
 
 test('纠正请求沿用该群生效的人设（按群人设）', async (t) => {
   const f = fixture(t, { group: true });
-  f.cfg.personaPerChat = { 'group:1': { templateId: 'maoniang' } };
+  f.cfg.personaPerChat = { 'group:1': { templateId: 'tsundere_loli' } };
   setRuntimeConfig(f.cfg);
   f.responses.push(f.textReply(), f.sendReply());
   f.append('m1', '@bot 在吗', { mentionsSelf: true });
   await f.wake();
 
   assert.equal(f.bodies.length, 2);
-  const personaSeen = f.bodies[1].messages?.some((m) => /二次元猫娘/.test(String(m.content || '')));
+  const personaSeen = f.bodies[1].messages?.some((m) => /傲娇萝莉/.test(String(m.content || '')));
   assert.ok(personaSeen, '纠正请求仍带上该群生效的卡（split 布局下在独立人设消息里）');
 });
 

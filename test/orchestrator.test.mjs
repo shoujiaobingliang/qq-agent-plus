@@ -1206,7 +1206,7 @@ describe('Orchestrator', () => {
   it('按群人设：同一个进程里不同群用不同的角色卡与群内名字', async (t) => {
     const { cfg, runner, store } = fixture(t);
     cfg.allow.groups = ['1', '2'];
-    cfg.personaPerChat = { 'group:2': { templateId: 'maoniang', botName: '猫猫' } };
+    cfg.personaPerChat = { 'group:2': { templateId: 'tsundere_loli', botName: '猫猫' } };
     setRuntimeConfig(cfg);
     const bodies = [];
     globalThis.fetch = async (_url, options) => {
@@ -1221,8 +1221,8 @@ describe('Orchestrator', () => {
     const allText = (body) => body.messages.map((m) => String(m.content || '')).join('\n');
     const globalPrompt = allText(bodies[0]);
     const catPrompt = allText(bodies[1]);
-    assert.match(globalPrompt, /DeepSeek 小鲸鱼/, 'group:1 用全局卡');
-    assert.match(catPrompt, /二次元猫娘/, 'group:2 用按群覆盖的卡');
+    assert.match(globalPrompt, /【核心系统指令】|DeepSeek/, 'group:1 用全局卡');
+    assert.match(catPrompt, /傲娇萝莉|CETACEA_LOLI/, 'group:2 用按群覆盖的卡');
     assert.notEqual(globalPrompt, catPrompt);
     // 群内展示名优先用 QQ 昵称；按群覆盖的 botName 用于点名/称呼判断
     assert.match(String(bodies[1].messages[0].content || ''), /你在群里的名字是「bot」/);

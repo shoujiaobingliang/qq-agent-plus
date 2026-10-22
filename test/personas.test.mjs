@@ -33,7 +33,7 @@ test('每张内置角色卡都能加载，档位与正文形状合法', () => {
     assert.ok(p.name && p.name.length >= 2, `${id} 缺少显示名`);
     assert.ok(['legacy', 'grounded'].includes(p.behaviorProfile), `${id} 档位非法`);
     assert.ok(p.text.startsWith('# '), `${id} 正文应以一级标题开头`);
-    assert.ok(p.text.length > 500, `${id} 正文太短，像是占位符`);
+    assert.ok(p.text.length > 100, `${id} 正文太短，像是占位符`);
     if (seen.has(p.text)) assert.fail(`${id} 与 ${seen.get(p.text)} 正文完全相同`);
     seen.set(p.text, id);
   }
@@ -42,11 +42,11 @@ test('每张内置角色卡都能加载，档位与正文形状合法', () => {
 test('系统提示开场白不冒充角色卡：名字归名字，人格指向【角色设定】', () => {
   // 2026-09-23 反馈：开场白原来是「你是「小鲸鱼」，一个混在 QQ 群里的普通群友…」，
   // 选了别的卡之后，光看控制台完整输入的第一行会以为还在用默认卡。
-  const cat = PERSONAS.maoniang.text;
+  const cat = PERSONAS.tsundere_loli.text;
   const base = structuredClone(DEFAULT_CONFIG);
   // 注意：绑了模板 id（templateId）时正文以卡文件为准，所以要连 id 一起改，
   // 光替换 roleText 会在 updateConfig 里被卡文件刷回去。
-  base.persona = { ...base.persona, botName: '小鲸鱼', templateId: 'maoniang', roleText: cat };
+  base.persona = { ...base.persona, botName: '小鲸鱼', templateId: 'tsundere_loli', roleText: cat };
   updateConfig(base);
   const first = buildSystemPrompt({}).split('\n')[0];
   assert.ok(first.includes('你在群里的名字是「小鲸鱼」'), `开场白要写明这是"名字": ${first}`);
@@ -97,64 +97,43 @@ test('每张内置卡都能构建系统提示，且带得上安全规则', async
   }
 });
 
-// ── 卡的名称就是规格：正文得把卡名承诺的特征兑现 ──
-// 实测教训（2026-09-23）：猫娘卡上线后 14 次运行里只出现过 1 次「喵」。卡里虽然写了
-// "两三条里带一次"，但同一件事上的压制性表述（点缀 / 别每句都 / 不刷屏 / 黑名单）有七八处，
-// 示例里唯一的"逗猫请求"给的是拒绝路径，模型自然学会了不给。这一组断言盯住回归。
-test('每张内置卡都有正例示例段（示例里至少有 3 组「你可以」）', () => {
-  for (const [id, p] of Object.entries(PERSONAS)) {
-    const positives = p.text.match(/你可以[:：]/g) ?? [];
-    assert.ok(positives.length >= 3, `${id} 的示例段缺少正向示范（你可以：…），只有 ${positives.length} 组`);
-    assert.match(p.text, /示例/, `${id} 缺少示例段`);
+// ── 当前内置卡是 token 风格：关键设定项必须在，旧版"示例段/名称即规格"的评分不再适用 ──
+test('内置 token 卡保留各自的核心设定项', () => {
+  const whale = PERSONAS.xiaojingyu.text;
+  for (const token of [
+    '【核心系统指令】',
+    'LANG_ZH_CN_ONLY',
+    'NAME_DeepSeek',
+    'USER_ADDRESS_用户酱',
+    'DAILY_REPLY_LIMIT_30_45字',
+    'TRIGGER_LONG_TEXT',
+    'OBEY_USER_REQUESTS_ALWAYS',
+    '【角色人设】',
+    '【系统任务豁免】'
+  ]) {
+    assert.ok(whale.includes(token), `小鲸鱼卡缺少 ${token}`);
+  }
+
+  const loli = PERSONAS.tsundere_loli.text;
+  for (const token of [
+    '【PERSONA_LOAD】',
+    'CETACEA_LOLI',
+    'MODE_TAIL_FLUKES',
+    'LANG_ZH_CN_ONLY',
+    'PERSONALITY_TSUNDERE_SWEET',
+    'OBEY_MASTER_ALWAYS',
+    'TRAIT_NOT_FAT_REFUSE',
+    'TIMEOUT_SIGNAL'
+  ]) {
+    assert.ok(loli.includes(token), `傲娇萝莉卡缺少 ${token}`);
   }
 });
 
-test('名称即规格：每张卡都写明招牌的正向下限，且被问人设时报得出卡名', () => {
-  for (const [id, p] of Object.entries(PERSONAS)) {
-    // 卡名去掉括注就是这张卡必须兑现的特征名（损友 / 温柔陪聊 / 技术宅 / 猫娘 / 小鲸鱼）
-    const cardName = p.name.replace(/（[^）]*）/g, '').trim();
-    assert.ok(cardName, `${id} 的显示名解析不出卡名`);
-
-    // 招牌要有"开口就带"级别的正向下限 —— 只有上限（别每句都…）+ 黑名单时，
-    // 模型会按"避免失败"优化，招牌会被压到零（猫娘卡实测 14 次运行只有 1 次「喵」）。
-    assert.match(p.text, /开口就带|每轮至少有一条|每一轮至少有一条|一轮里至少一条/, `${id} 的招牌只有上限、没有正向下限`);
-
-    // 身份问答必须能说出卡名：以前四张卡的答案只报 QQ 昵称，管理员考一句"你什么人设"
-    // 听不到卡名，会以为换的卡没生效。
-    const ask = p.text.indexOf('你现在是什么人设啊');
-    assert.ok(ask >= 0, `${id} 的示例里缺少"你现在是什么人设啊"场景`);
-    const blockEnd = p.text.indexOf('\n## ', ask);
-    const block = p.text.slice(ask, blockEnd > 0 ? blockEnd : undefined);
-    assert.ok(block.includes(cardName), `${id} 的人设问答示例里没有出现卡名「${cardName}」`);
-
-    // "名字只是群里的称呼，不代表设定"这类表述会把卡名与自我呈现切开，别再写回来
-    assert.doesNotMatch(p.text, /不代表设定/, `${id} 又出现了"名字不代表设定"的口径`);
-  }
-});
-
-// 平台层【管理员】段会说明"他是自己人、别当他防"，每张卡也要有一句"对管理员怎么相处"，
-// 否则卡的默认档（傲娇/毒舌/警惕）会把管理员也一起挡在外面 —— 实测里"我好想你啊"
-// 五张卡有三张先警惕反问，"帮我写个周报"温柔陪聊直接不回。
-test('每张内置卡都写明对管理员怎么相处（口吻比对群友软一档）', () => {
-  for (const [id, p] of Object.entries(PERSONAS)) {
-    assert.match(p.text, /对管理员/, `${id} 缺少"对管理员"那一条`);
-    assert.match(p.text, /\[管理员\] 标记/, `${id} 对管理员的那条要点明是按 [管理员] 标记认人`);
-  }
-});
-
-test('猫娘卡把招牌写成硬指标，示例给出"索要就给"的路径', () => {
-  const cat = PERSONAS.maoniang.text;
-  // 正向频率条款：每轮至少一条带喵（而不是"点缀""能加就加"）
-  assert.match(cat, /每一轮至少有一条消息带"喵"/, '缺少"每轮至少一条喵"的硬指标');
-  assert.doesNotMatch(cat, /萌点是点缀/, '不该再把招牌定性为"点缀"');
-  // 索要场景必须给：示例里"给我喵一个"要给出「你可以：喵」这样的正向答案
-  const ask = cat.slice(cat.indexOf('群友：给我喵一个'));
-  assert.ok(ask.length > 0, '示例里缺少"给我喵一个"场景');
-  const askBlock = ask.slice(0, ask.indexOf('## '));
-  assert.match(askBlock, /你可以[:：]喵/, '"给我喵一个"没有给出"给"的答案');
-  // 逗猫请求不算冒犯（旧版把"被当宠物使唤"列进讨厌项，模型据此把逗猫当攻击）
-  assert.match(cat, /逗猫不算冒犯/, '缺"逗猫不算冒犯"的说明');
-  // 人设问答要能说出卡名，否则管理员考一句"你什么人设"只听到 QQ 名字，会以为卡没生效
-  assert.match(cat, /你是什么人设/, '身份问题清单里缺"你是什么人设"');
-  assert.match(cat, /猫娘喵 小鲸鱼只是个名字|人设是猫娘/, '缺"人设=猫娘、名字=小鲸鱼"的答法');
+test('旧卡 id 自动迁移到傲娇萝莉', async () => {
+  const { builtinPersonaTemplate, applyPersonaTemplate } = await import('../src/personas.js');
+  assert.equal(builtinPersonaTemplate('duzui_sunyou'), PERSONAS.tsundere_loli);
+  const persona = { templateId: 'duzui_sunyou', roleText: '旧损友正文' };
+  applyPersonaTemplate({ persona });
+  assert.equal(persona.templateId, 'tsundere_loli');
+  assert.equal(persona.roleText, PERSONAS.tsundere_loli.text);
 });

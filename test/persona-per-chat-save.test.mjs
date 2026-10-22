@@ -9,8 +9,7 @@ const { buildPerChatPatch, perChatOptions } = await import('../ui/pages/persona-
 
 const templates = [
   ['xiaojingyu', { name: '小鲸鱼', text: '鲸鱼正文', behaviorProfile: 'legacy', builtin: true }],
-  ['maoniang', { name: '猫娘', text: '猫娘正文', behaviorProfile: 'legacy', builtin: true }],
-  ['wenrou_peiliao', { name: '温柔陪聊', text: '温柔正文', behaviorProfile: 'grounded', builtin: true }],
+  ['tsundere_loli', { name: '傲娇萝莉', text: '傲娇正文', behaviorProfile: 'legacy', builtin: true }],
   ['custom_0', {
     name: '自定义A', text: '自定义A正文', behaviorProfile: 'grounded', customRules: 'A 的规则', builtin: false
   }],
@@ -22,41 +21,41 @@ const templates = [
 const save = (value, current = {}, key = 'group:123') => buildPerChatPatch([{ key, value }], current, templates);
 
 test('内置卡 → 自定义卡：旧 templateId 必须清掉（否则卡文件正文会盖住自定义正文）', () => {
-  const out = save('custom:custom_0', { 'group:123': { templateId: 'maoniang' } });
+  const out = save('custom:custom_0', { 'group:123': { templateId: 'tsundere_loli' } });
   assert.deepEqual(out['group:123'], { roleText: '自定义A正文', behaviorProfile: 'grounded', customRules: 'A 的规则' });
 });
 
 test('自定义卡 → 内置卡：正文/档位/卡自带规则都要清掉，档位由新卡决定', () => {
-  const out = save('builtin:maoniang', {
+  const out = save('builtin:tsundere_loli', {
     'group:123': { roleText: '自定义A正文', behaviorProfile: 'grounded', customRules: 'A 的规则' }
   });
-  assert.deepEqual(out['group:123'], { templateId: 'maoniang' });
+  assert.deepEqual(out['group:123'], { templateId: 'tsundere_loli' });
 });
 
 test('内置卡 A → 内置卡 B：显式档位/规则随卡切换，实例级偏好（名字/参与度）保留', () => {
-  const out = save('builtin:wenrou_peiliao', {
-    'group:123': { templateId: 'maoniang', behaviorProfile: 'legacy', customRules: '旧规则', botName: '猫猫', participation: 'high' }
+  const out = save('builtin:xiaojingyu', {
+    'group:123': { templateId: 'tsundere_loli', behaviorProfile: 'grounded', customRules: '旧规则', botName: '猫猫', participation: 'high' }
   });
-  assert.deepEqual(out['group:123'], { botName: '猫猫', participation: 'high', templateId: 'wenrou_peiliao' });
+  assert.deepEqual(out['group:123'], { botName: '猫猫', participation: 'high', templateId: 'xiaojingyu' });
 });
 
 test('改回跟随全局：整条删除', () => {
-  assert.deepEqual(save('', { 'group:123': { templateId: 'maoniang' } }), {});
+  assert.deepEqual(save('', { 'group:123': { templateId: 'tsundere_loli' } }), {});
 });
 
 test('同卡重复保存：不带旧 changedAt（时间戳由服务端维护）', () => {
-  const out = save('builtin:maoniang', { 'group:123': { templateId: 'maoniang', changedAt: 111 } });
-  assert.deepEqual(out['group:123'], { templateId: 'maoniang' });
+  const out = save('builtin:tsundere_loli', { 'group:123': { templateId: 'tsundere_loli', changedAt: 111 } });
+  assert.deepEqual(out['group:123'], { templateId: 'tsundere_loli' });
 });
 
 test('同一张内置卡重复保存：该群手改的规则与显式档位不能被删掉', () => {
   const old = {
-    templateId: 'maoniang',
+    templateId: 'tsundere_loli',
     behaviorProfile: 'grounded',
     customRules: '这个群人比较正经，少开玩笑',
     botName: '猫猫'
   };
-  assert.deepEqual(save('builtin:maoniang', { 'group:123': old }), { 'group:123': old });
+  assert.deepEqual(save('builtin:tsundere_loli', { 'group:123': old }), { 'group:123': old });
 });
 
 test('同一张自定义卡重复保存：手改的附加规则保留', () => {
@@ -92,8 +91,8 @@ test('未知卡 id 与对不上任何卡的自定义正文：给「保持」项�
 
 test('非法 chatKey 不写入；同一个 key 只保留最后一行', () => {
   const out = buildPerChatPatch([
-    { key: 'group:abc', value: 'builtin:maoniang' },
-    { key: 'group:123', value: 'builtin:maoniang' },
+    { key: 'group:abc', value: 'builtin:tsundere_loli' },
+    { key: 'group:123', value: 'builtin:tsundere_loli' },
     { key: 'group:123', value: 'builtin:xiaojingyu' }
   ], {}, templates);
   assert.deepEqual(out, { 'group:123': { templateId: 'xiaojingyu' } });
