@@ -435,7 +435,7 @@ function renderPersonaLibrary(c) {
       <div class="hint" style="margin:2px 0 8px" id="persona-reset-handoff-hint">
         换了角色卡之后，它历史里还留着自己上一张卡的发言和"交接"，容易继续用旧口癖（我们实测换卡一天后仍在喵）。
         正文/优先级已经写明"以当前卡为准"，点上面两个按钮可以再彻底一点：
-        「换人设后清空交接」清掉各群的会话交接与线程状态；「屏蔽旧人设发言」把**所有群（包括以后新增的会话）**在此之前的机器人发言在提示词/工具里遮成占位符
+        「换人设后清空交接」清掉各群的会话交接与线程状态；「屏蔽旧人设发言」把<strong>所有群（包括以后新增的会话）</strong>在此之前的机器人发言在提示词/工具里遮成占位符
         （<strong>不删聊天记录、不动群友发言、不动人物印象</strong>）。两个都点最彻底。
       </div>
       <div class="hint" style="margin:2px 0 8px" id="persona-mask-old-speech-hint"></div>
