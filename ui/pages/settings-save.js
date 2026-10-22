@@ -22,7 +22,8 @@ import { buildPerChatPatch } from './persona-per-chat.js';
 // 「平台能力」页的键表与配额行：渲染在 platform.js，这里只按同一份键名读控件
 // （键名与 id 约定只维护一处；改名不同步时源码锚点用例会红）。
 import { ALL_GATE_KEYS, QUOTA_ROWS, gateCheckboxId, gateDefaultOn, hydratePlatformGates } from './platform.js';
-import { currentPersonaId } from './persona.js';
+import { currentPersonaId, syncPersonaButtons } from './persona.js';
+import { customPersonaCardsPatch } from './persona-custom.js';
 import { captureTimeControlRule } from './settings-bind.js';
 import { syncThinkingUi } from './settings.js';
 // 外观的数值夹紧搬到 ui/core/appearance.js 的 resolveAppearance —— 它已经是那条唯一入口，
@@ -604,6 +605,8 @@ async function saveConfig({ quiet = false } = {}) {
     // 刷新正文，卡文件改了不用再来这里重选一次；手写了正文、或选的是自定义卡时这里为空，
     // 正文就按自定义处理，不会被文件覆盖。
     const roleTextDraft = val('#cfg-roletext', c.persona.roleText || '');
+    const customRulesDraft = val('#cfg-customrules', c.persona.customRules || '');
+    const behaviorProfileDraft = val('#cfg-behavior-profile', c.persona.behaviorProfile || 'legacy');
     const pickedId = currentPersonaId();
     let templateId = pickedId.startsWith('custom_') ? '' : pickedId;
     if (!templateId && roleTextDraft === (c.persona.roleText || '')) {
@@ -623,11 +626,19 @@ async function saveConfig({ quiet = false } = {}) {
       botName: val('#cfg-botname', c.persona.botName).trim() || '小鲸鱼',
       selfNickname: val('#cfg-selfnick', c.persona.selfNickname || '').trim(),
       participation: val('#cfg-participation', c.persona.participation),
-      behaviorProfile: val('#cfg-behavior-profile', c.persona.behaviorProfile || 'legacy'),
+      behaviorProfile: behaviorProfileDraft,
       roleText: roleTextDraft,
-      customRules: val('#cfg-customrules', c.persona.customRules || ''),
+      customRules: customRulesDraft,
       templateId
     };
+    // 当前草稿来自自定义卡时，把编辑写回卡库里的同一张卡；否则只更新 persona 快照。
+    // 这样保存后界面仍能匹配到那张卡，不会多出一张“自定义正文/额外自定义卡”。
+    const customCards = customPersonaCardsPatch(c.customPersonas, state.personaDraftCardId, {
+      text: roleTextDraft,
+      customRules: customRulesDraft,
+      behaviorProfile: behaviorProfileDraft
+    });
+    if (customCards) patch.customPersonas = customCards;
     // 按群人设：整份替换（用 __replace__ 才能把"改回跟随全局"的行真正删掉）。
     // 装配逻辑在 persona-per-chat.js（纯函数，行为用例直接覆盖换卡/保持各分支）。
     const rows = $$('[data-per-chat]').map((row) => ({
@@ -944,6 +955,22 @@ async function saveConfig({ quiet = false } = {}) {
 
   const data = await api('/api/config', { method: 'POST', body: JSON.stringify(patch) });
   state.config = data.config;
+  // 编辑自定义卡后，卡库快照也要跟着更新；否则切走再点回来会拿旧正文覆盖刚保存的修改。
+  if (Array.isArray(patch.customPersonas)) {
+    const templates = { ...state.personaTemplates };
+    for (let index = 0; index < patch.customPersonas.length; index += 1) {
+      const id = `custom_${index}`;
+      templates[id] = {
+        ...(templates[id] || {}),
+        ...patch.customPersonas[index],
+        id,
+        builtin: false
+      };
+    }
+    state.personaTemplates = templates;
+    state.personaTemplatesVersion = (Number(state.personaTemplatesVersion) || 0) + 1;
+    syncPersonaButtons();
+  }
   // 按群覆盖草稿作废：下次渲染从刚保存的配置重新克隆。不清的话，若别的标签页/直连 API
   // 改过 perGroup，本页再用陈旧草稿提交就会整体覆盖回去（__replace__ 是整表替换，2026-10-07 审计 P3）。
   state.platformPerGroupDraft = undefined;

@@ -57,6 +57,7 @@ const state = {
 state.personaCollapsedSections = new Set();
 state.personaEditingSection = -1;   // 正在按小节编辑的序号；-1 = 没在编辑
 state.personaEditNote = '';         // 小节编辑后的提示（"还得点保存设置"这类）
+state.personaDraftCardId = '';      // 当前草稿来自哪张卡（点卡时记下；保存时用于同步自定义卡）
 
 /**
  * 用量页当前选中的时间范围（对应 USAGE_RANGES 里的值）。

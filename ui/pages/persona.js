@@ -64,18 +64,30 @@ function savedPersonaId() {
 function syncPersonaButtons() {
   const draft = personaDraftState();
   refreshPersonaFold(draft.roleText);
-  const tpl = state.personaTemplates[draft.id];
+  // 页面刚载入/模板刚加载时还没经过点卡：用当前匹配到的卡初始化来源，
+  // 这样直接编辑当前自定义卡后保存也能写回同一张卡。
+  if (!state.personaDraftCardId) {
+    const matched = currentPersonaId();
+    if (matched) state.personaDraftCardId = matched;
+  }
+  const selectedCardId = String(state.personaDraftCardId || '');
+  const selectedCustom = selectedCardId.startsWith('custom_')
+    ? state.personaTemplates[selectedCardId]
+    : null;
+  const tpl = state.personaTemplates[draft.id] || selectedCustom;
   // 卡库还没读出来时，"匹配不到任何卡"并不等于"正文被改过" —— 下面几处提示都要区分这两种情况
   const templatesKnown = Object.keys(state.personaTemplates || {}).length > 0;
   const delBtn = $('#del-persona-btn');
-  if (delBtn) delBtn.classList.toggle('hidden', !String(draft.id).startsWith('custom_'));
+  if (delBtn) delBtn.classList.toggle('hidden', !selectedCardId.startsWith('custom_'));
   const hint = $('#persona-pick-hint');
   // 正文与内置模板不一致时（升级改了模板而实例里存的是旧正文，或管理员手改过），
   // 选择框会是空的，容易让人以为人设丢了 —— 用提示行说明这是按自定义处理。
   const hasText = String(draft.roleText || '').trim().length > 0;
   if (hint) {
     hint.textContent = tpl
-      ? (tpl.builtin ? `内置卡：跟着 roles/ 下的卡文件走，改卡重启即生效。` : `自定义卡「${tpl.name}」。`)
+      ? (tpl.builtin
+        ? `内置卡：跟着 roles/ 下的卡文件走，改卡重启即生效。`
+        : `自定义卡「${tpl.name}」：改正文后点「保存设置」会直接更新这张卡。`)
       : (hasText
         ? (templatesKnown ? '当前正文与内置模板不一致（按自定义处理，可在上面的卡库里点一张卡换回来）'
           : (state.personaTemplatesFailed ? '人设卡读取失败，刷新页面重试。' : '正在读取人设卡…'))
@@ -161,7 +173,7 @@ function applyPersonaDraft(tpl, id = '') {
   state.personaEditNote = '';
   // 记下"草稿是从哪张卡来的"：没保存之前 config 里还是旧绑定，
   // 「恢复本节 / 恢复整张卡」必须按草稿这张卡来，否则会把两张卡拼在一起。
-  personaDraftCardId = id || findPersonaTemplateId(tpl.text, tpl.behaviorProfile || 'legacy', tpl.customRules || '');
+  state.personaDraftCardId = id || findPersonaTemplateId(tpl.text, tpl.behaviorProfile || 'legacy', tpl.customRules || '');
   syncPersonaButtons();
 }
 
@@ -173,21 +185,20 @@ function personaBaseCardId() {
   const draft = personaDraftState();
   const exact = findPersonaTemplateId(draft.roleText, draft.behaviorProfile, draft.customRules);
   if (exact && state.personaTemplates[exact]?.builtin) return exact;
-  const picked = String(personaDraftCardId || '');
+  const picked = String(state.personaDraftCardId || '');
   return picked && state.personaTemplates[picked]?.builtin ? picked : '';
 }
 
-// personaCollapsedSections / personaEditingSection / personaEditNote 的初始化在 core/state.js：
-// 它们现在是 state 的属性，而顶层写 state 会在**模块求值期**读 `state` —— 本文件与
-// core/state.js 在同一个 import 环上，可能先求值，那样会踩 TDZ（见那边的注释与契约用例）。
+// personaCollapsedSections / personaEditingSection / personaEditNote / personaDraftCardId
+// 的初始化在 core/state.js：它们现在是 state 的属性，而顶层写 state 会在**模块求值期**
+// 读 `state` —— 本文件与 core/state.js 在同一个 import 环上，可能先求值，那样会踩 TDZ
+//（见那边的注释与契约用例）。
 
 let personaFoldKey = null;
 
 let personaViewKey = null;        // 上次画正文视图用的内容指纹（没变就跳过重画）
 
 let personaGridKey = null;        // 同上，卡库
-
-let personaDraftCardId = '';      // 草稿是从哪张卡来的（点卡时记下）
 
 /**
  * 默认折叠策略：只展开"你是谁"和"你的标志"，其余小节收起来。
@@ -575,13 +586,19 @@ function openPersonaCreateModal() {
     if (!name) { $('#persona-pick-hint').textContent = '人设名称不能为空'; return; }
     if (!text) { $('#persona-pick-hint').textContent = '角色设定不能为空'; return; }
     try {
-      await api('/api/persona-templates', {
+      const created = await api('/api/persona-templates', {
         method: 'POST',
         body: JSON.stringify({ name, text, customRules, behaviorProfile })
       });
       closeModelModal(overlay);
       await loadSettings();
-      applyPersonaDraft({ name, text, customRules, behaviorProfile });
+      // 新建后显式绑定到刚创建的那张卡：同文同名时按文本查找可能命中旧卡，
+      // 导致下一次保存改到别的卡上。POST 返回的 templates 就是 customPersonas 全量。
+      const createdIndex = Array.isArray(created?.templates) ? created.templates.length - 1 : -1;
+      applyPersonaDraft(
+        { name, text, customRules, behaviorProfile },
+        createdIndex >= 0 ? `custom_${createdIndex}` : ''
+      );
       $('#persona-pick-hint').textContent = `人设「${name}」已添加。记得点底部的「保存设置」使当前填写生效。`;
     } catch (e) {
       $('#persona-pick-hint').textContent = `添加失败：${e.message}`;

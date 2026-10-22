@@ -247,17 +247,17 @@ try {
   }
   document.querySelector('#cfg-roletext').value += '\nEdited';
   ctx.syncPersonaButtons();
-  // 匹配不上任何内置卡时：既不能错误标记成原模板，提示行也要说清"这是按自定义处理"，
-  // 否则升级后（模板改过、实例存的是旧正文）看起来像人设丢了。
-  // （旧的 #cfg-persona-pick 隐藏输入框已随人设页改版删除，这里改看提示行与绑定徽章。）
+  // 编辑的是自定义卡：正文不再与卡库原文完全一致，但仍应关联同一张卡，
+  // 提示行要说明保存会直接更新这张卡，而不是误报“与内置模板不一致/解绑”。
   if (ctx.currentPersonaId() === ''
-      && document.querySelector('#persona-pick-hint').textContent.includes('与内置模板不一致')
-      && document.querySelector('#persona-view-binding').textContent.includes('解绑')) {
+      && document.querySelector('#persona-pick-hint').textContent.includes('自定义卡「Grounded copy」')
+      && document.querySelector('#persona-pick-hint').textContent.includes('直接更新这张卡')
+      && document.querySelector('#persona-view-binding').textContent.includes('自定义卡')) {
     pass++;
-    console.log('  OK    修改人设后不错误标记为原模板');
+    console.log('  OK    修改自定义卡后仍关联同一张卡');
   } else {
     fail++;
-    console.log('  FAIL  修改人设后模板匹配未更新');
+    console.log('  FAIL  修改自定义卡后模板匹配未更新');
   }
   ctx.applyPersonaDraft(PERSONAS.xiaojingyu);
   if (ctx.currentPersonaId() === 'xiaojingyu'
@@ -3702,6 +3702,39 @@ try {
     console.log('  ' + (okBranch ? 'OK   ' : 'FAIL ')
       + '保存分支：asr→tts+imageGen / experiments→groupGame / moments→groupDigest / chat→10 键'
       + (okBranch ? '' : ' -> ' + JSON.stringify(results)));
+  }
+
+  // 编辑自定义卡保存：写回 customPersonas 同一张卡，不新增。
+  {
+    const posts = [];
+    sandbox.fetch = async (path, opts = {}) => {
+      if (String(path).includes('/api/config') && String(opts.method || '').toUpperCase() === 'POST') {
+        try { posts.push(JSON.parse(opts.body || '{}')); } catch { /* 忽略 */ }
+      }
+      const cfgNow = JSON.parse(vm.runInContext('JSON.stringify(state.config || {})', ctx));
+      return { ok: true, status: 200, json: async () => ({ ok: true, config: cfgNow }), text: async () => '{}' };
+    };
+    vm.runInContext(`
+      state.settingsSection = 'persona';
+      state.personaDraftCardId = 'custom_0';
+      state.config.customPersonas = [{ name: '我的卡', text: '旧正文', behaviorProfile: 'legacy', customRules: '旧规则' }];
+      document.querySelector('#cfg-roletext').value = '新正文';
+      document.querySelector('#cfg-customrules').value = '新规则';
+      document.querySelector('#cfg-behavior-profile').value = 'grounded';
+    `, ctx);
+    await vm.runInContext('saveConfig({ quiet: true })', ctx);
+    const body = posts.at(-1) || {};
+    const cards = Array.isArray(body.customPersonas) ? body.customPersonas : [];
+    const customSaveOk = cards.length === 1
+      && cards[0].name === '我的卡'
+      && cards[0].text === '新正文'
+      && cards[0].behaviorProfile === 'grounded'
+      && cards[0].customRules === '新规则'
+      && body.persona?.roleText === '新正文'
+      && body.persona?.templateId === '';
+    customSaveOk ? pass++ : fail++;
+    console.log('  ' + (customSaveOk ? 'OK   ' : 'FAIL ')
+      + '保存：编辑自定义卡写回同一张卡（不新增）');
   }
 
   // 收藏开关（2026-10-02 用户反馈）：一个开关管两个键 —— 关掉时 collectEnabled 与 autoCollect

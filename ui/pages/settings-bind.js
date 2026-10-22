@@ -1754,7 +1754,7 @@ function bindSettingsPersonaAndVision() {
   if (newPersonaBtn) newPersonaBtn.addEventListener('click', () => openPersonaCreateModal());
   const delPersonaBtn = $('#del-persona-btn');
   if (delPersonaBtn) delPersonaBtn.addEventListener('click', async () => {
-    const id = currentPersonaId();
+    const id = String(state.personaDraftCardId || currentPersonaId());
     if (!id.startsWith('custom_')) return;
     const tpl = state.personaTemplates[id];
     if (!tpl) return;
