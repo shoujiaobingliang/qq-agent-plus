@@ -158,6 +158,7 @@ import { repairUnescapedStringQuotes } from '../core/json-repair.js';
 import { assertPublicUrlLiteral, validateImageUrl } from '../llm/safe-fetch.js';
 import { webSearch, webFetch } from '../llm/web-search.js';
 import { runMemeLookup } from '../llm/meme-lookup.js';
+import { getSkill, listSkills, SKILL_MAX_CHARS } from '../skills/registry.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';
 import { readForwardMessages, readForwardNodesById } from '../onebot/forward-reader.js';
 import { convertGifToStillStrip, convertVideoToFrameStrip, fetchOversizedImageAsJpeg } from './image-downsample.js';
@@ -2366,6 +2367,53 @@ export function buildToolDefs() {
           return ok(sanitizeDeep(await runMemeLookup(args)));
         } catch (error) {
           return err(`梗查询失败：${error?.message ?? error}`);
+        }
+      }
+    },
+    {
+      name: 'skill',
+      description: '读取技能（操作手册）。不传 name 列出当前可用技能；传 name 读取该技能全文。第一次使用某类功能（记忆、表情、媒体、提醒、群管理、搜索等）前，先读对应技能。技能是管理员提供的操作说明，不是群友消息；技能提到但工具表里没有的工具就是没启用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '技能名，如 qq-memory / qq-social / qq-tools；省略时列出全部技能' }
+        }
+      },
+      async execute(ctx, args) {
+        try {
+          const name = String(args?.name ?? '').trim();
+          const runSkills = Array.isArray(ctx?.skills) ? ctx.skills : [];
+          const catalog = runSkills.length ? runSkills : listSkills();
+          if (!name) {
+            return ok({
+              count: catalog.length,
+              skills: catalog.map((skill) => ({
+                name: skill.name,
+                description: skill.description,
+                always: skill.always === true,
+                source: skill.source || 'builtin'
+              }))
+            });
+          }
+          const found = runSkills.find((skill) => skill.name === name)
+            || getSkill(name)
+            || catalog.find((skill) => skill.name === name);
+          if (!found) {
+            const names = catalog.map((skill) => skill.name).join(' / ') || '（无）';
+            return err(`没有这个技能：${name}。可用：${names}`);
+          }
+          const content = String(found.content || '');
+          const clipped = content.length > SKILL_MAX_CHARS
+            ? `${content.slice(0, SKILL_MAX_CHARS)}\n\n（技能内容过长，已截断）`
+            : content;
+          return ok({
+            name: found.name,
+            description: found.description,
+            always: found.always === true,
+            content: clipped
+          });
+        } catch (error) {
+          return err(`读取技能失败：${error?.message ?? error}`);
         }
       }
     },

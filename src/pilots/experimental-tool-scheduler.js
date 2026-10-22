@@ -41,7 +41,8 @@ export const EXPERIMENTAL_ORDERED_READ_TOOLS = new Set([
   'get_group_member_list',   // 走协议端的读，保持串行
   'generate_image',          // 按张计费的生成：串行 + 结果决定下一步
   'read_image_text',          // OCR：与 get_message_images/get_message_audio 同类的观察动作，不并发
-  'meme_lookup'               // 可能写候选库 + 外呼有每小时额度：保持串行，别和同批查询抢预算
+  'meme_lookup',              // 可能写候选库 + 外呼有每小时额度：保持串行，别和同批查询抢预算
+  'skill'                     // 读技能后通常决定下一步，保持串行
 ]);
 
 export const EXPERIMENTAL_TERMINAL_TOOL = 'finish';

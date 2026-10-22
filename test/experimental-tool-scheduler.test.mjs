@@ -53,6 +53,7 @@ test('current base tool inventory has an explicit scheduler classification', () 
   assert.equal(classes.get('get_sticker_image'), 'ordered-read');
   assert.equal(classes.get('read_forward'), 'ordered-read');
   assert.equal(classes.get('list_stickers'), 'ordered-read');
+  assert.equal(classes.get('skill'), 'ordered-read', '读技能后通常决定下一步，保持串行');
 
   assert.equal(classes.get('web_search'), 'parallel-read');
   assert.equal(classes.get('get_message_detail'), 'parallel-read');

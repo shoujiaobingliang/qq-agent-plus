@@ -23,8 +23,8 @@ export const DATA_DIR = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT, 'data')
 export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 export const DEFAULT_CONFIG = {
-  // 提示词布局：split = 系统机制与人设分成两条消息（推荐，人设不被平台块淹没）；
-  // combined = 全部拼在一条 system 里（旧行为）。
+  // 提示词布局：split = 精简 system + 人设/常驻技能初始化消息（推荐）；
+  // combined = 旧行为，全部拼在一条 system 里（不使用 skills，作为回滚路径）。
   prompt: {
     layout: 'split'
   },

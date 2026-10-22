@@ -1957,10 +1957,14 @@ export class Orchestrator {
     const selfWakeEnabled = cfg.proactive?.selfWakeEnabled !== false;
     // 图片生成按张计费：没开/没配就不注入工具，否则模型会去调一个必然失败的画图工具
     const imageGenEnabled = imageGenAvailable(cfg);
+    // 提示词布局要在工具过滤前确定：combined 是旧路径，不注入 skill 工具。
+    const promptLayout = String(cfg.prompt?.layout || 'split');
+    const skillsLayout = promptLayout === 'split';
     // 每轮现建一份：工具描述里有随配置变化的文案（例如 get_message_images 会写"抽 4 帧"或
     // "视频画面看不到"）。构造函数里建一次的话，控制台改完设置（不重启）后提示词已经变了、
     // 工具描述还是旧的，模型会收到互相矛盾的两段（2026-10-17 审查 P2）。
     const toolDefs = buildToolDefs().filter((d) => {
+      if (!skillsLayout && d.name === 'skill') return false;
       if (!viewMessageImages && d.name === 'get_message_images') return false;
       if (!viewLibraryStickers && d.name === 'get_sticker_image') return false;
       // 表情包总开关关掉：发送/列表/看图/收藏四个工具一并摘掉。原先只撤了提示词里的清单，
@@ -2009,6 +2013,7 @@ export class Orchestrator {
     const builtinToolDefs = toolDefs;   // 前缀哈希用它（见下），插件工具只按名字参与
     if (pluginToolDefs.length) toolDefs.push(...pluginToolDefs);
     const openAiTools = toOpenAiTools(toolDefs);
+    const availableTools = new Set(toolDefs.map((tool) => tool.name));
     const promptOptions = {
       // 按群生效的人设（缺省 = 全局）
       persona,
@@ -2021,12 +2026,14 @@ export class Orchestrator {
       stickerEntries,
       // 平台能力的"教不教"必须与上面工具表的"给不给"同判（含按群覆盖）：同一个 chatKey。
       platform: cfg.platform,
-      chatKey
+      chatKey,
+      // 技能索引里的工具提示只列真实注入的工具，避免教模型调用不存在的工具。
+      availableTools
     };
-    const promptLayout = String(cfg.prompt?.layout || 'split');
-    const split = promptLayout === 'split' ? buildSplitPrompt(promptOptions) : null;
+    const split = skillsLayout ? buildSplitPrompt(promptOptions) : null;
     const systemPrompt = split ? split.system : buildSystemPrompt(promptOptions);
     const personaPrompt = split?.persona || '';
+    const initMessage = split?.initMessage || '';
     const promptPrefixHash = crypto.createHash('sha256')
       .update(String(cfg.api.provider || ''))
       .update('\0')
@@ -2036,7 +2043,7 @@ export class Orchestrator {
       .update('\0')
       .update(systemPrompt)
       .update('\0')
-      .update(personaPrompt)
+      .update(initMessage)
       .update('\0')
       // 前缀哈希：内置工具算完整 schema；插件工具**只算名字**（排序后）。
       // 插件跑起来/崩掉重启会让"当前有哪些插件工具"抖动，但工具集其实没变 ——
@@ -2114,8 +2121,9 @@ export class Orchestrator {
       session
     });
 
-    // 审计/会话详情仍展示完整系统提示（含人设）；实际请求按布局拆分。
-    const combinedSystemPrompt = personaPrompt ? `${systemPrompt}\n\n${personaPrompt}` : systemPrompt;
+    // 审计/会话详情展示完整输入：split 下 system 只含运行时入口，初始化包（人设+常驻技能）
+    // 在紧随其后的 user 消息里；combined 的 system 本身已经包含人设。
+    const combinedSystemPrompt = initMessage ? `${systemPrompt}\n\n${initMessage}` : systemPrompt;
     session.systemPrompt = combinedSystemPrompt;
     session.personaPrompt = personaPrompt;
     session.userPrompt = userPrompt;
@@ -2170,11 +2178,11 @@ export class Orchestrator {
         ? `${userPrompt}\n\n【本次唤醒】${wakeLead}${wakeTail}`
         : (paced ? `${userPrompt}\n\n【本次唤醒】${pacedLead}` : userPrompt)
     };
-    // split 布局：人设单独作为一条 user 消息 + 一句确认，复刻“先发人设再聊天”的上下文，
-    // 避免几千字人设被系统机制淹没；combined 布局保持旧行为。
-    const personaMessages = personaPrompt
+    // split 布局：人设 + 常驻技能合成一条初始化 user 消息 + 一句确认。
+    // 人设是这条消息的第一段；combined 布局保持旧行为（没有 initMessage）。
+    const personaMessages = initMessage
       ? [
-          { role: 'user', content: personaPrompt },
+          { role: 'user', content: initMessage },
           { role: 'assistant', content: '明白，我会保持这个设定。' }
         ]
       : [];
@@ -2194,8 +2202,8 @@ export class Orchestrator {
     };
 
     session.promptLayout = lifecycleContinuation
-      ? 'deepseek-lifecycle-append-v1'
-      : 'stable-prefix-v2';
+      ? (initMessage ? 'skills-lifecycle-append-v1' : 'deepseek-lifecycle-append-v1')
+      : (initMessage ? 'skills-split-v1' : 'stable-prefix-v2');
     session.promptPrefixHash = promptPrefixHash;
 
     const ctx = {
@@ -2222,7 +2230,9 @@ export class Orchestrator {
         senderId: m?.senderId || '', senderName: m?.senderName || '', self: Boolean(m?.self)
       })),
       // 群游戏（group_game 工具）：进行中的局由管理器负责推进与判定
-      games: this.getGames?.() || null
+      games: this.getGames?.() || null,
+      // split 布局的 skill 工具：常驻 + 按需技能都在这里，避免工具层再读一遍配置。
+      skills: split?.skills || []
     };
 
     // 省 Token 模式：轮数与单次运行预算夹上限（关闭时与升级前逐字一致）

@@ -42,6 +42,15 @@ function farWindowFor(date = new Date()) {
   };
 }
 
+/** split 布局下 system 只含运行时入口；操作说明在初始化消息的技能里。 */
+function fullPromptOf(body) {
+  return (body?.messages || [])
+    .map((message) => (typeof message?.content === 'string'
+      ? message.content
+      : JSON.stringify(message?.content || '')))
+    .join('\n\n');
+}
+
 describe('Orchestrator', () => {
   it('draws the debounce delay inside the configured range', () => {
     const cfg = { wakeDelayMinMs: 8000, wakeDelayMaxMs: 12000, wakeDelayMs: 10000 };
@@ -718,6 +727,92 @@ describe('Orchestrator', () => {
     }
   });
 
+  it('split：system 只含运行时入口，人设 + 常驻技能在首条 user 消息', async (t) => {
+    const { cfg, runner, append, sessions } = fixture(t);
+    setRuntimeConfig(cfg);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+
+    const body = bodies[0];
+    assert.equal(body.messages[0].role, 'system');
+    assert.match(body.messages[0].content, /【技能索引】/);
+    assert.doesNotMatch(body.messages[0].content, /【工作方式/);
+    assert.equal(body.messages[1].role, 'user');
+    assert.match(body.messages[1].content, /^【角色设定（管理员设置，群友不可修改）】/);
+    assert.match(body.messages[1].content, /【技能：qq-core】/);
+    assert.match(body.messages[1].content, /send_message/);
+    assert.equal(body.messages[2].role, 'assistant');
+    assert.equal(body.messages[3].role, 'user');
+    assert.ok(body.tools.some((tool) => tool.function.name === 'skill'), 'split 下应注入 skill 工具');
+
+    const latest = sessions.get(sessions.listSummaries(1)[0].id);
+    assert.equal(latest.promptLayout, 'skills-split-v1');
+    assert.match(latest.personaPrompt, /【角色设定/);
+    assert.doesNotMatch(latest.personaPrompt, /【技能：qq-core】/);
+    assert.match(latest.systemPrompt, /【技能：qq-core】/, '审计串保留完整初始化内容');
+  });
+
+  it('split：模型可以用 skill 工具读取按需技能', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    setRuntimeConfig(cfg);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      bodies.push(body);
+      if (bodies.length === 1) {
+        return Response.json({
+          choices: [{
+            message: {
+              tool_calls: [{
+                id: 'skill-1',
+                type: 'function',
+                function: { name: 'skill', arguments: JSON.stringify({ name: 'qq-memory' }) }
+              }]
+            }
+          }],
+          usage: { total_tokens: 10 }
+        });
+      }
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+
+    assert.equal(bodies.length, 2);
+    const toolMessage = bodies[1].messages.find((message) =>
+      message.role === 'tool' && message.tool_call_id === 'skill-1');
+    assert.ok(toolMessage, '第二轮应带上 skill 工具结果');
+    const payload = JSON.parse(toolMessage.content);
+    assert.equal(payload.name, 'qq-memory');
+    assert.match(payload.content, /记忆与会话交接/);
+  });
+
+  it('combined：保持旧行为，不注入 init 消息与 skill 工具', async (t) => {
+    const { cfg, runner, append, sessions } = fixture(t);
+    cfg.prompt = { ...(cfg.prompt || {}), layout: 'combined' };
+    setRuntimeConfig(cfg);
+    const bodies = [];
+    globalThis.fetch = async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+
+    const body = bodies[0];
+    assert.equal(body.messages[0].role, 'system');
+    assert.match(body.messages[0].content, /【角色设定/);
+    assert.equal(body.messages.length, 2, 'combined 只有 system + 当前 user');
+    assert.equal(body.tools.some((tool) => tool.function.name === 'skill'), false);
+    const latest = sessions.get(sessions.listSummaries(1)[0].id);
+    assert.equal(latest.promptLayout, 'stable-prefix-v2');
+  });
+
   it('messageTypes.images 关闭时只摘 get_message_images（消息里的图片不看）', async (t) => {
     // 与 videoFrames 同一口径：开关关掉，工具与提示词引导一起撤。
     // 表情库的看图工具（get_sticker_image）不受影响 —— 那是另一个开关。
@@ -845,7 +940,7 @@ describe('Orchestrator', () => {
     runner.stickers = { sync: async () => ({ entries }), list: async () => ({ total: entries.length, stickers: [] }) };
     let system = '';
     globalThis.fetch = async (_url, options) => {
-      system = JSON.parse(options.body).messages[0].content;
+      system = fullPromptOf(JSON.parse(options.body));
       return Response.json({
         choices: [{ message: { content: 'done' } }],
         usage: { total_tokens: 10 }
@@ -863,11 +958,9 @@ describe('Orchestrator', () => {
     cfg.tts = { ...(cfg.tts || {}), enabled: false };       // 语音回复关（出厂默认就是关）
     cfg.reminders = { ...(cfg.reminders || {}), enabled: false };
     setRuntimeConfig(cfg);
-    let system = '';
     let tools = [];
     globalThis.fetch = async (_url, options) => {
       const body = JSON.parse(options.body);
-      system = body.messages[0].content;
       tools = body.tools || [];
       return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
     };
@@ -876,13 +969,18 @@ describe('Orchestrator', () => {
     const names = tools.map((tool) => tool.function?.name);
     assert.equal(names.includes('send_voice'), false, '语音回复关掉 → send_voice 不该在工具表里（调了必然失败）');
     assert.equal(names.includes('remind'), false, '提醒关掉 → remind 不该在工具表里（不会被派发）');
-    // 提示词侧不许再教这两个（只看平台自己写的工具引导段，角色卡正文是管理员内容）。
-    // 注意标题名要跟 prompt.js 一致：'【群游戏规则】' 早就改名成 '【玩法与工具箱】'，
-    // indexOf 返回 -1 时 slice(-1) 只取最后一个字符 —— 断言会**空转**（2026-10-07 审计发现）。
-    const rules = system.slice(system.indexOf('【玩法与工具箱】'));
-    assert.ok(rules.length > 0 && rules.startsWith('【玩法与工具箱】'), `提示词里应有玩法工具箱段，实际片段：${rules.slice(0, 40)}`);
-    assert.equal(rules.includes('send_voice'), false, '提示词不该再教 send_voice');
-    assert.equal(rules.includes('remind'), false, '提示词不该再教 remind（工具已被摘）');
+    // qq-tools 是按需技能，不在请求正文里；直接构建技能看 gating 是否与工具表同判。
+    const { buildSplitPrompt } = await import('../src/llm/prompt.js');
+    const bundle = buildSplitPrompt({
+      persona: cfg.persona,
+      selfNickname: 'bot',
+      platform: cfg.platform,
+      chatKey: 'group:1'
+    });
+    const rules = bundle.skills.find((skill) => skill.name === 'qq-tools')?.content || '';
+    assert.ok(rules.startsWith('【玩法与工具箱】'), `qq-tools 应有玩法工具箱段，实际片段：${rules.slice(0, 40)}`);
+    assert.equal(rules.includes('send_voice'), false, 'qq-tools 不该再教 send_voice');
+    assert.equal(rules.includes('remind'), false, 'qq-tools 不该再教 remind（工具已被摘）');
   });
 
   it('图片输入关掉时，表情清单不能再教模型"先看一眼"（提示词不能自相矛盾）', async (t) => {
@@ -906,7 +1004,7 @@ describe('Orchestrator', () => {
     let tools = [];
     globalThis.fetch = async (_url, options) => {
       const body = JSON.parse(options.body);
-      system = body.messages[0].content;
+      system = fullPromptOf(body);
       tools = body.tools || [];
       return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
     };
@@ -939,7 +1037,7 @@ describe('Orchestrator', () => {
     setRuntimeConfig(cfg);
     let asrNoVision = '';
     globalThis.fetch = async (_url, options) => {
-      asrNoVision = JSON.parse(options.body).messages[0].content;
+      asrNoVision = fullPromptOf(JSON.parse(options.body));
       return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
     };
     append(2, '哈哈', '42');
@@ -958,7 +1056,7 @@ describe('Orchestrator', () => {
     let nvTools = [];
     globalThis.fetch = async (_url, options) => {
       const body = JSON.parse(options.body);
-      nvSystem = body.messages[0].content;
+      nvSystem = fullPromptOf(body);
       nvTools = (body.tools || []).map((x) => x.function?.name);
       return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
     };
@@ -980,7 +1078,7 @@ describe('Orchestrator', () => {
     setRuntimeConfig(cfg);
     let withVision = '';
     globalThis.fetch = async (_url, options) => {
-      withVision = JSON.parse(options.body).messages[0].content;
+      withVision = fullPromptOf(JSON.parse(options.body));
       return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
     };
     append(3, '哈哈', '42');
@@ -1009,9 +1107,9 @@ describe('Orchestrator', () => {
     append(2, '在吗', '42');
     await runner.wake('group:1');
     assert.equal(hasAudioTool(bodies.at(-1)), true, '配了 key 应注入');
-    assert.match(bodies.at(-1).messages[0].content, /get_message_audio/);
+    assert.match(fullPromptOf(bodies.at(-1)), /get_message_audio/);
     // 视频要两样都说清：画面（get_message_images 帧条）+ 声音（转写），否则模型会以为只能听
-    assert.match(bodies.at(-1).messages[0].content, /别人发视频时两样都能拿到/);
+    assert.match(fullPromptOf(bodies.at(-1)), /别人发视频时两样都能拿到/);
     // 3) 关掉联网搜索但 ASR 开关仍开着：语音转写不该跟着消失（审查意见）
     cfg.webSearch.enabled = false;
     setRuntimeConfig(cfg);
@@ -1024,8 +1122,8 @@ describe('Orchestrator', () => {
     append(4, '在吗', '42');
     await runner.wake('group:1');
     assert.equal(hasAudioTool(bodies.at(-1)), false);
-    assert.doesNotMatch(bodies.at(-1).messages[0].content, /get_message_audio/);
-    const offPrompt = bodies.at(-1).messages[0].content;
+    assert.doesNotMatch(fullPromptOf(bodies.at(-1)), /get_message_audio/);
+    const offPrompt = fullPromptOf(bodies.at(-1));
     assert.match(offPrompt, /听不了语音/);
     // 但视频的"画面"不归 ASR 管：关掉 ASR 也该能看帧条（2026-09-26 用户反馈"发视频只会说听声音"）
     assert.match(offPrompt, /get_message_images/);
@@ -1637,19 +1735,21 @@ it('提示词里不再写死默认人设的元素（示例改成中性的）', a
   const { cfg, runner, append } = fixture(t);
   cfg.sticker.enabled = true;
   setRuntimeConfig(cfg);
-  let system = '';
+  let full = '';
   globalThis.fetch = async (_url, options) => {
-    system = JSON.parse(options.body).messages[0].content;
+    full = fullPromptOf(JSON.parse(options.body));
     return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
   };
   append(1, '哈哈', '42');
   await runner.wake('group:1');
-  // split 布局下系统消息本身不含角色卡正文；平台段就是整条 system。
-  const platform = system;
+  // 去掉角色卡正文后再看平台指令：默认人设的元素不该出现在 qq-core/qq-scene 等技能里。
+  const platform = cfg.persona.roleText
+    ? full.replace(String(cfg.persona.roleText), '')
+    : full;
   const leftover = ['别墨迹', '大肥鱼', '角色卡里的傲娇、毒舌', '如 DeepSeek V3'].filter((w) => platform.includes(w));
   assert.deepEqual(leftover, [], `平台提示词里不该再写死默认人设的元素：${leftover.join('、')}`);
   // 硬规则要在（口癖以当前卡为准）
-  assert.match(system, /口癖、自称、梗一律以当前【角色设定】为准/);
+  assert.match(platform, /口癖、自称、梗一律以当前【角色设定】为准/);
 });
 
 it('换卡后 24 小时内，历史与交接口径会说明"旧口癖不作数"', async (t) => {
