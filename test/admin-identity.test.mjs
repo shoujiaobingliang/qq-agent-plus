@@ -56,6 +56,39 @@ test('管理员身份要写进系统提示词（角色卡里的"管理员/主人
   assert.ok(fallback.includes('只让语气变软'), '无人设正文的兜底仍要写明语气可以更软');
 });
 
+test('管理员称呼唯一：addressAs 优先，不和角色卡称呼叠加', () => {
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.admin = { ...(cfg.admin || {}), ownerUin: '100000001', addressAs: '老大' };
+  cfg.memberNotes = { '100000001': '测试备注' };
+  cfg.persona = { ...cfg.persona, roleText: '你是女仆，称呼管理员为主人。' };
+  updateConfig(cfg);
+  const sp = buildSystemPrompt({ persona: cfg.persona });
+  assert.match(sp, /只用「老大」这一个称呼/);
+  assert.match(sp, /不要把两个称呼叠在一起/);
+  assert.match(sp, /主人/);
+  assert.match(sp, /亲密关系类照旧不接/);
+  assert.doesNotMatch(sp, /不叫"主人"/, '有角色正文时允许角色卡自己的称呼，只要求唯一');
+});
+
+test('没有 addressAs 时，角色卡可以自己决定管理员称呼，但只用一个', () => {
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.admin = { ...(cfg.admin || {}), ownerUin: '100000001', addressAs: '' };
+  cfg.persona = { ...cfg.persona, roleText: '你称呼管理员为主人。' };
+  updateConfig(cfg);
+  const sp = buildSystemPrompt({ persona: cfg.persona });
+  assert.match(sp, /从角色卡里选一个最自然的固定叫法/);
+  assert.match(sp, /同一个人只用一个/);
+  assert.doesNotMatch(sp, /不叫"主人"/);
+});
+
+test('群友称呼由人设/记忆决定，但同一个人保持唯一', () => {
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  updateConfig(cfg);
+  const sp = buildSystemPrompt({ persona: cfg.persona });
+  assert.match(sp, /群友优先用成员备注\/群名片或人设记忆里固定的别称/);
+  assert.match(sp, /选定后别在同一轮里叠加多个叫法/);
+});
+
 test('角色设定的优先级要写给模型看，且系统不再附加默认人格/发言频率', () => {
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.persona = { ...cfg.persona, roleText: '只认主人的服从版角色卡' };

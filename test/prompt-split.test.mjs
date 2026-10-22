@@ -95,6 +95,8 @@ test('split：管理员信息跟人设初始化消息走，不回到 system', ()
   const bundle = buildSplitPrompt({ persona: cfg.persona });
   assert.match(bundle.persona, /【管理员】/);
   assert.match(bundle.persona, /老大/);
+  assert.match(bundle.persona, /只用「老大」这一个称呼/);
+  assert.match(bundle.system, /同一个人只用一个称呼/);
   assert.equal(bundle.system.includes('【管理员】'), false, 'system 不重复管理员段');
   setRuntimeConfig(structuredClone(DEFAULT_CONFIG));
 });
