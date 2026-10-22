@@ -23,10 +23,13 @@ export const DATA_DIR = process.env.QQ_AGENT_DATA_DIR || path.join(ROOT, 'data')
 export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
 export const DEFAULT_CONFIG = {
-  // 提示词布局：split = 精简 system + 人设/常驻技能初始化消息（推荐）；
+  // 提示词布局：split = 精简 system + 人设轮/技能（推荐）；
   // combined = 旧行为，全部拼在一条 system 里（不使用 skills，作为回滚路径）。
   prompt: {
-    layout: 'split'
+    layout: 'split',
+    // 人设轮：启动/换人设时为每个生效人设生成一轮角色回复，缓存并私聊给管理员；
+    // 聊天运行只读缓存，不会因此多打模型。关掉后仍保留人设消息，只是没有模型回复那一轮。
+    personaIntro: true
   },
   // OpenAI 兼容 API（必填才能跑）
   api: {

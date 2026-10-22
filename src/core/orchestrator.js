@@ -117,9 +117,10 @@ import {
 } from './attention.js';import { vendorOfConfig, vendorOfBaseUrl } from '../pricing/model-prices.js';
 import { budgetStatus } from './budget.js';
 import { readOwnerUin } from './notify-owner.js';
+import { getPersonaIntro, savePersonaIntro } from './persona-intro-store.js';
 import { buildReminderNote, reminderNoteCost } from './reminders.js';
 import { ZONE_OFFSET_MS, minuteOfDayInZone, randInt, createEventBus, todayKey } from './util.js';
-import { buildSystemPrompt, buildSplitPrompt, buildUserPrompt, isAtMe, resolveContextTier } from '../llm/prompt.js';
+import { buildSystemPrompt, buildSplitPrompt, buildUserPrompt, buildPersonaPrompt, buildPersonaIntroSystemPrompt, isAtMe, resolveContextTier } from '../llm/prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, emptyUsage, isRetryableError } from '../llm/llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool, platformToolAllowed } from '../tools/tools.js';
 import { normalizeMid } from '../tools/tools-core.js';
@@ -170,6 +171,30 @@ function lastSentText(session) {
     .filter(Boolean)
     .join('；')
     .slice(0, 600);
+}
+
+/** 人设初始化轮缓存键：人设文本 + 渠道 + 模型；换人设/换模型才重新生成。 */
+function personaIntroHash(personaPrompt, cfg) {
+  return crypto.createHash('sha256')
+    .update(String(personaPrompt || ''))
+    .update('\0')
+    .update(String(cfg?.api?.provider || ''))
+    .update('\0')
+    .update(String(cfg?.api?.model || ''))
+    .digest('hex');
+}
+
+/** chatCompletion 的 message.content 可能是字符串或多模态数组，这里只取文本。 */
+function responseText(response) {
+  const content = response?.message?.content;
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
+      .join('')
+      .trim();
+  }
+  return '';
 }
 
 function hasInlineImage(messages) {
@@ -438,6 +463,10 @@ export class Orchestrator {
       : (() => null);
     this.emit = typeof emit === 'function' ? emit : ((b) => b.emit.bind(b))(createEventBus());
     this.toolDefs = buildToolDefs();
+    // 人设初始化轮正在生成中的 hash：启动与配置保存可能同时触发，避免重复外呼。
+    this.personaIntroInFlight = new Set();
+    // 人设回复私聊通知的节流：发送失败时不要每轮都重试。
+    this.personaIntroNotifyAt = new Map();
 
     this.chatNameCache = new Map();    // groupId -> name
     this.wakeTimers = new Map();       // chatKey -> timer
@@ -558,6 +587,100 @@ export class Orchestrator {
     // 判成"会丢"，提醒被无谓顺延 24 小时（#wake 其实照常派发）—— 2026-10-05 复审实测。
     const pending = this.store.peekUnread(chatKey, this.#unreadScanLimit()) || [];
     return !pending.some((m) => m?.mentionsSelf === true);
+  }
+
+  /**
+   * 人设初始化：为当前全局人设和按群覆盖人设生成一轮“角色回复”，缓存并私聊发给管理员。
+   * 只生成一次（按 personaPrompt + 渠道/模型哈希）；不阻塞聊天，失败只记日志。
+   * 聊天运行只读缓存，不会因为人设轮多打一次模型。
+   */
+  async warmPersonaIntro({ signal = null } = {}) {
+    const cfg = getConfig();
+    if (String(cfg.prompt?.layout || 'split') !== 'split') return { generated: 0, skipped: 'layout' };
+    if (cfg.prompt?.personaIntro === false) return { generated: 0, skipped: 'disabled' };
+    // 没有管理员就没有“发给管理员”这一步；没有可用模型也无法生成，别白打请求。
+    if (!/^\d{5,15}$/.test(readOwnerUin(cfg))) return { generated: 0, skipped: 'no-owner' };
+    if (!String(cfg.api?.baseUrl || '').trim() || !String(cfg.api?.model || '').trim()) {
+      return { generated: 0, skipped: 'no-model' };
+    }
+    const personas = [];
+    const seen = new Set();
+    const addPersona = (chatKey) => {
+      const persona = resolvePersona(cfg, chatKey);
+      const roleText = String(persona?.roleText || '').trim();
+      const personaPrompt = buildPersonaPrompt(persona, {
+        includeCustomRules: true,
+        includeFallbackStyle: !roleText
+      });
+      if (!personaPrompt) return;
+      const hash = personaIntroHash(personaPrompt, cfg);
+      if (seen.has(hash)) return;
+      seen.add(hash);
+      personas.push({ persona, personaPrompt, hash });
+    };
+    addPersona('');
+    for (const chatKey of Object.keys(cfg.personaPerChat || {})) addPersona(chatKey);
+
+    let generated = 0;
+    for (const item of personas) {
+      const cached = getPersonaIntro(item.hash);
+      if (cached?.text) {
+        if (!cached.notifiedAt) this.#notifyPersonaIntro(cached.text, item.hash);
+        continue;
+      }
+      if (this.personaIntroInFlight.has(item.hash)) continue;
+      this.personaIntroInFlight.add(item.hash);
+      try {
+        const response = await chatCompletion({
+          messages: [
+            { role: 'system', content: buildPersonaIntroSystemPrompt() },
+            { role: 'user', content: item.personaPrompt }
+          ],
+          tools: null,
+          temperature: Number(cfg.api.temperature ?? 0.8),
+          ...(signal ? { signal } : {})
+        });
+        this.#recordExternalUsage(response);
+        const text = responseText(response).slice(0, 2000);
+        if (!text) {
+          log.warn('[persona-intro] 模型没有返回可用的角色回复，跳过');
+          continue;
+        }
+        savePersonaIntro(item.hash, {
+          text,
+          personaName: String(item.persona?.botName || ''),
+          createdAt: Date.now()
+        });
+        generated += 1;
+        this.#notifyPersonaIntro(text, item.hash);
+        log.info(`[persona-intro] 已生成并缓存（${text.length} 字）`);
+      } catch (error) {
+        log.warn('[persona-intro] 生成失败：', error?.message ?? error);
+      } finally {
+        this.personaIntroInFlight.delete(item.hash);
+      }
+    }
+    return { generated, total: personas.length };
+  }
+
+  /** 把人设初始化回复私聊给管理员；发送成功才记 notifiedAt，失败下次再试。 */
+  #notifyPersonaIntro(text, hash) {
+    const owner = readOwnerUin(getConfig());
+    if (!/^\d{5,15}$/.test(owner)) return;
+    const key = String(hash || '').trim();
+    if (!key) return;
+    const now = Date.now();
+    const last = Number(this.personaIntroNotifyAt.get(key)) || 0;
+    if (now - last < 10 * 60 * 1000) return;
+    this.personaIntroNotifyAt.set(key, now);
+    const body = `【人设初始化】\n${String(text || '').trim()}`;
+    Promise.resolve(this.sender?.sendTextBatch?.(`private:${owner}`, [body], {}))
+      .then((result) => {
+        const failure = Array.isArray(result?.failed) ? result.failed[0] : null;
+        if (failure) throw new Error(failure.error || '发送失败');
+        savePersonaIntro(key, { notifiedAt: Date.now() });
+      })
+      .catch((error) => log.warn('[persona-intro] 私聊管理员失败：', error?.message ?? error));
   }
 
   startRecoveryLoop() {
@@ -2028,6 +2151,11 @@ export class Orchestrator {
     if (pluginToolDefs.length) toolDefs.push(...pluginToolDefs);
     const openAiTools = toOpenAiTools(toolDefs);
     const availableTools = new Set(toolDefs.map((tool) => tool.name));
+    const personaDriven = Boolean(String(persona?.roleText || '').trim());
+    // split 的人设消息要在构建 system 前算出来：人设初始化轮缓存按它做键。
+    const personaPromptForRun = skillsLayout
+      ? buildPersonaPrompt(persona, { includeCustomRules: true, includeFallbackStyle: !personaDriven })
+      : '';
     const promptOptions = {
       // 按群生效的人设（缺省 = 全局）
       persona,
@@ -2042,12 +2170,20 @@ export class Orchestrator {
       platform: cfg.platform,
       chatKey,
       // 技能索引里的工具提示只列真实注入的工具，避免教模型调用不存在的工具。
-      availableTools
+      availableTools,
+      personaPrompt: personaPromptForRun
     };
     const split = skillsLayout ? buildSplitPrompt(promptOptions) : null;
     const systemPrompt = split ? split.system : buildSystemPrompt(promptOptions);
     const personaPrompt = split?.persona || '';
-    const initMessage = split?.initMessage || '';
+    // 人设初始化回复只在 warmPersonaIntro 里生成；聊天运行只读缓存，不额外打模型。
+    // 启动时私聊可能还没连上：如果缓存已有回复但还没通知成功，这里补一次（10 分钟节流）。
+    const personaIntroHashValue = split && personaPrompt ? personaIntroHash(personaPrompt, cfg) : '';
+    const personaIntroEntry = personaIntroHashValue ? getPersonaIntro(personaIntroHashValue) : null;
+    const personaIntro = personaIntroEntry?.text || '';
+    if (personaIntroEntry?.text && !personaIntroEntry.notifiedAt) {
+      this.#notifyPersonaIntro(personaIntroEntry.text, personaIntroHashValue);
+    }
     const promptPrefixHash = crypto.createHash('sha256')
       .update(String(cfg.api.provider || ''))
       .update('\0')
@@ -2057,7 +2193,9 @@ export class Orchestrator {
       .update('\0')
       .update(systemPrompt)
       .update('\0')
-      .update(initMessage)
+      .update(personaPrompt)
+      .update('\0')
+      .update(personaIntro)
       .update('\0')
       // 前缀哈希：内置工具算完整 schema；插件工具**只算名字**（排序后）。
       // 插件跑起来/崩掉重启会让"当前有哪些插件工具"抖动，但工具集其实没变 ——
@@ -2135,14 +2273,15 @@ export class Orchestrator {
       session
     });
 
-    // 审计/会话详情展示完整输入：split 下 system 只含运行时入口，初始化包（人设+常驻技能）
-    // 在紧随其后的 user 消息里；combined 的 system 本身已经包含人设。
-    const combinedSystemPrompt = initMessage ? `${systemPrompt}\n\n${initMessage}` : systemPrompt;
-    session.systemPrompt = combinedSystemPrompt;
+    // 审计/会话详情：system 含常驻技能；人设单独作为 user 消息，但审计串仍把两者拼在一起，
+    // 控制台的“这次用了哪张卡”靠 personaLabelOfPrompt(systemPrompt) 识别。
+    const auditSystemPrompt = personaPrompt ? `${systemPrompt}\n\n${personaPrompt}` : systemPrompt;
+    session.systemPrompt = auditSystemPrompt;
     session.personaPrompt = personaPrompt;
+    session.personaIntro = personaIntro;
     session.userPrompt = userPrompt;
-    session.promptChars = combinedSystemPrompt.length + userPrompt.length
-      + JSON.stringify(priorProviderMessages).length;
+    session.promptChars = auditSystemPrompt.length + personaIntro.length
+      + userPrompt.length + JSON.stringify(priorProviderMessages).length;
     session.model = cfg.api.model;
     session.conversationMode = conversationCfg.mode;
     session.lifecycleContinuation = lifecycleContinuation;
@@ -2192,19 +2331,21 @@ export class Orchestrator {
         ? `${userPrompt}\n\n【本次唤醒】${wakeLead}${wakeTail}`
         : (paced ? `${userPrompt}\n\n【本次唤醒】${pacedLead}` : userPrompt)
     };
-    // split 布局：人设 + 常驻技能合成一条初始化 user 消息，不插入假的 assistant 确认。
-    // 那句确认会让模型把自己当成"已接受设定的助手"，而不是直接以角色身份处理后面的聊天；
-    // 人设是这条消息的第一段，当前聊天上下文紧跟在它后面。
-    const personaMessages = initMessage
-      ? [{ role: 'user', content: initMessage }]
+    // split 布局：人设是独立的一轮 user 消息；模型对这一轮的回复（warmPersonaIntro 生成并缓存）
+    // 作为 assistant 消息紧随其后。这样人设轮是完整的一问一答，不会被常驻技能/工具消息淹没。
+    const personaExchangeMessages = personaPrompt
+      ? [
+          { role: 'user', content: personaPrompt },
+          ...(personaIntro ? [{ role: 'assistant', content: personaIntro }] : [])
+        ]
       : [];
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...personaMessages,
+      ...personaExchangeMessages,
       ...structuredClone(priorProviderMessages),
       currentUserMessage
     ];
-    const transcriptStart = 1 + personaMessages.length + priorProviderMessages.length;
+    const transcriptStart = 1 + personaExchangeMessages.length + priorProviderMessages.length;
     session.injectedMessages = modelMessagesForAudit(priorProviderMessages);
     session.injectedMessageChars = JSON.stringify(priorProviderMessages).length;
     session.inputTools = structuredClone(openAiTools);
@@ -2214,8 +2355,8 @@ export class Orchestrator {
     };
 
     session.promptLayout = lifecycleContinuation
-      ? (initMessage ? 'skills-lifecycle-append-v1' : 'deepseek-lifecycle-append-v1')
-      : (initMessage ? 'skills-split-v1' : 'stable-prefix-v2');
+      ? (split ? 'skills-lifecycle-append-v1' : 'deepseek-lifecycle-append-v1')
+      : (split ? 'skills-split-v1' : 'stable-prefix-v2');
     session.promptPrefixHash = promptPrefixHash;
 
     const ctx = {

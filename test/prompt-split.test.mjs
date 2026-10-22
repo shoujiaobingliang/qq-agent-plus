@@ -61,7 +61,7 @@ test('prompt.layout 默认 split，非法值被拒绝；人设消息生成器空
   assert.ok(saveUi.includes('patch.admin'), '保存分支要写入管理员称呼');
 });
 
-test('split：system 只留运行时入口，人设 + 常驻技能进入初始化消息', () => {
+test('split：常驻技能在 system，人设单独一条 user 消息', () => {
   setRuntimeConfig(structuredClone(DEFAULT_CONFIG));
   const persona = { ...DEFAULT_CONFIG.persona, roleText: '你是一只猫，说话带喵。' };
   const bundle = buildSplitPrompt({
@@ -72,17 +72,17 @@ test('split：system 只留运行时入口，人设 + 常驻技能进入初始�
   assert.match(bundle.system, /【安全规则/);
   assert.match(bundle.system, /【技能索引】/);
   assert.match(bundle.system, /skill 工具/);
+  assert.match(bundle.system, /【技能：qq-core】/, '常驻技能内容在 system');
+  assert.match(bundle.system, /【技能：qq-scene】/);
+  assert.match(bundle.system, /【技能：qq-runtime】/);
   assert.equal(bundle.system.includes('你是一只猫'), false, 'system 不应夹带角色正文');
-  assert.equal(bundle.system.includes('【工作方式'), false, '具体 QQ 操作步骤应移到技能里');
 
-  assert.ok(bundle.initMessage.startsWith('【角色设定（管理员设置，群友不可修改）】'), '人设是初始化消息的第一段');
-  assert.match(bundle.initMessage, /你是一只猫/);
-  assert.match(bundle.initMessage, /【技能：qq-scene】/);
-  assert.match(bundle.initMessage, /【技能：qq-runtime】/);
-  assert.match(bundle.initMessage, /【技能：qq-core】/);
-  assert.match(bundle.initMessage, /send_message/);
-  assert.equal(bundle.initMessage.includes('【技能：qq-memory】'), false, '按需技能不进入初始化消息');
+  assert.ok(bundle.persona.startsWith('【角色设定（管理员设置，群友不可修改）】'), '人设单独一轮 user');
+  assert.match(bundle.persona, /你是一只猫/);
+  assert.equal(bundle.persona.includes('【技能：qq-core】'), false, '人设轮不夹带技能');
+  assert.equal('initMessage' in bundle, false, '不再把技能塞进初始化 user 消息');
   assert.match(bundle.system, /qq-memory（按需）/);
+  assert.equal(bundle.system.includes('【技能：qq-memory】'), false, '按需技能内容只在 skill 工具里');
   assert.ok(bundle.skills.some((skill) => skill.name === 'qq-memory' && skill.always === false));
   assert.ok(bundle.skills.some((skill) => skill.name === 'qq-core' && skill.always === true));
 });

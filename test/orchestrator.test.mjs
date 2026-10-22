@@ -51,6 +51,14 @@ function fullPromptOf(body) {
     .join('\n\n');
 }
 
+/** 从某个技能小节头开始，截到下一个【技能：…】之前，避免把后面的角色卡/用户消息算进来。 */
+function blockUntilNextSkill(text, header) {
+  const start = String(text || '').indexOf(header);
+  if (start < 0) return '';
+  const next = String(text).indexOf('【技能：', start + 1);
+  return String(text).slice(start, next > start ? next : undefined);
+}
+
 describe('Orchestrator', () => {
   it('draws the debounce delay inside the configured range', () => {
     const cfg = { wakeDelayMinMs: 8000, wakeDelayMaxMs: 12000, wakeDelayMs: 10000 };
@@ -727,7 +735,7 @@ describe('Orchestrator', () => {
     }
   });
 
-  it('split：system 只含运行时入口，人设 + 常驻技能在首条 user 消息', async (t) => {
+  it('split：常驻技能在 system，人设单独一轮 user 消息', async (t) => {
     const { cfg, runner, append, sessions } = fixture(t);
     setRuntimeConfig(cfg);
     const bodies = [];
@@ -741,12 +749,12 @@ describe('Orchestrator', () => {
     const body = bodies[0];
     assert.equal(body.messages[0].role, 'system');
     assert.match(body.messages[0].content, /【技能索引】/);
-    assert.doesNotMatch(body.messages[0].content, /【工作方式/);
+    assert.match(body.messages[0].content, /【技能：qq-core】/, '常驻技能在 system，不在会话消息里');
+    assert.match(body.messages[0].content, /【工作方式/, '常驻 qq-core 的完整内容在 system');
     assert.equal(body.messages[1].role, 'user');
     assert.match(body.messages[1].content, /^【角色设定（管理员设置，群友不可修改）】/);
-    assert.match(body.messages[1].content, /【技能：qq-core】/);
-    assert.match(body.messages[1].content, /send_message/);
-    assert.equal(body.messages.length, 3, 'split 是 system + 初始化 user + 当前 user，不插入假的 assistant 确认');
+    assert.doesNotMatch(body.messages[1].content, /【技能：qq-core】/, '人设轮不夹带技能');
+    assert.equal(body.messages.length, 3, '没有缓存的人设回复时：system + 人设 user + 当前 user');
     assert.equal(body.messages[2].role, 'user');
     assert.ok(body.tools.some((tool) => tool.function.name === 'skill'), 'split 下应注入 skill 工具');
 
@@ -754,7 +762,8 @@ describe('Orchestrator', () => {
     assert.equal(latest.promptLayout, 'skills-split-v1');
     assert.match(latest.personaPrompt, /【角色设定/);
     assert.doesNotMatch(latest.personaPrompt, /【技能：qq-core】/);
-    assert.match(latest.systemPrompt, /【技能：qq-core】/, '审计串保留完整初始化内容');
+    assert.match(latest.systemPrompt, /【技能：qq-core】/, '审计串保留完整 system + 技能');
+    assert.equal(latest.personaIntro, '', '缓存为空时没有额外 assistant 轮');
   });
 
   it('split：模型可以用 skill 工具读取按需技能', async (t) => {
@@ -811,6 +820,70 @@ describe('Orchestrator', () => {
     assert.equal(body.tools.some((tool) => tool.function.name === 'skill'), false);
     const latest = sessions.get(sessions.listSummaries(1)[0].id);
     assert.equal(latest.promptLayout, 'stable-prefix-v2');
+  });
+
+  it('split：人设初始化轮不挂工具，回复私聊管理员并进入后续多轮', async (t) => {
+    const { cfg, runner, append } = fixture(t);
+    fs.rmSync(path.join(root, 'persona-intros.json'), { force: true });
+    cfg.admin = { ...(cfg.admin || {}), ownerUin: '100000001' };
+    cfg.allow.private = [...new Set([...(cfg.allow.private || []), '100000001'])];
+    cfg.prompt = { ...(cfg.prompt || {}), layout: 'split', personaIntro: true };
+    cfg.api.baseUrl = 'https://model.invalid';
+    cfg.api.model = 'mock-model';
+    setRuntimeConfig(cfg);
+
+    const warmBodies = [];
+    const sends = [];
+    runner.sender = {
+      sendTextBatch: async (chatKey, messages) => {
+        sends.push({ chatKey, messages });
+        return { sent: messages.map((text, i) => ({ text, at: Date.now(), messageId: i + 1 })), failed: [] };
+      }
+    };
+    globalThis.fetch = async (_url, options) => {
+      warmBodies.push(JSON.parse(options.body));
+      return Response.json({
+        choices: [{ message: { content: '（尾巴摇摇）主人好呀' } }],
+        usage: { total_tokens: 10 }
+      });
+    };
+    const warm = await runner.warmPersonaIntro();
+    assert.equal(warm.generated, 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const warmBody = warmBodies[0];
+    assert.equal(warmBody.tools, undefined, '人设轮不挂工具');
+    assert.equal(warmBody.messages.length, 2);
+    assert.equal(warmBody.messages[0].role, 'system');
+    assert.match(warmBody.messages[0].content, /角色设定/);
+    assert.equal(warmBody.messages[1].role, 'user');
+    assert.match(warmBody.messages[1].content, /【角色设定/);
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].chatKey, 'private:100000001');
+    assert.match(sends[0].messages[0], /【人设初始化】/);
+    assert.match(sends[0].messages[0], /主人好呀/);
+
+    // 缓存命中：不重复外呼，也不重复私聊。
+    await runner.warmPersonaIntro();
+    assert.equal(warmBodies.length, 1);
+    assert.equal(sends.length, 1);
+
+    // 后续群聊请求：system + 人设 user + 人设回复 assistant + 当前 user。
+    const groupBodies = [];
+    globalThis.fetch = async (_url, options) => {
+      groupBodies.push(JSON.parse(options.body));
+      return Response.json({ choices: [{ message: { content: 'done' } }], usage: { total_tokens: 10 } });
+    };
+    append(1, '在吗', '42');
+    await runner.wake('group:1');
+    const body = groupBodies[0];
+    assert.equal(body.messages[0].role, 'system');
+    assert.equal(body.messages[1].role, 'user');
+    assert.match(body.messages[1].content, /【角色设定/);
+    assert.equal(body.messages[2].role, 'assistant');
+    assert.match(body.messages[2].content, /主人好呀/);
+    assert.equal(body.messages[3].role, 'user');
+    assert.ok(body.tools.some((tool) => tool.function.name === 'skill'));
   });
 
   it('messageTypes.images 关闭时只摘 get_message_images（消息里的图片不看）', async (t) => {
@@ -1013,7 +1086,7 @@ describe('Orchestrator', () => {
     assert.equal(tools.some((tool) => tool.function?.name === 'get_sticker_image'), false, '工具已摘掉');
     // 只看【可用表情包】那一段（角色卡正文是管理员内容，可能仍提到这个工具，不归这里管）：
     // 清单不能再说"可以先 get_sticker_image 看一眼"——那句话指向一个不存在的工具
-    const listBlock = system.slice(system.indexOf('【可用表情包】'));
+    const listBlock = blockUntilNextSkill(system, '【可用表情包】');
     assert.ok(listBlock.includes('stickerId：'), '清单段要在');
     // 只断言"教它去看"的那句不在；工具名本身会出现在后面的机制说明里
     //（"get_sticker_image 不在工具表里"），那是刻意保留的覆盖说明
@@ -1024,7 +1097,7 @@ describe('Orchestrator', () => {
     // 视频那条引导也要跟着 vision 走：关掉图片输入时 get_message_images 不在工具表里，
     // 不能教模型"用 get_message_images 看画面"（2026-09-26 审查：同类问题在贴纸清单上修过一次）
     // 断言只看平台自己那几段（角色卡正文是管理员内容，里面本来就写着"用 get_message_images 看图"）
-    const sceneBlock = system.slice(system.indexOf('【QQ 场景规则】'));
+    const sceneBlock = blockUntilNextSkill(system, '【QQ 场景规则】');
     assert.ok(sceneBlock.length > 100, '要能定位到场景规则段');
     assert.equal(sceneBlock.includes('先看画面再听声音'), false, 'vision 关了不能再说"用 get_message_images 看画面"');
     // 这一轮 ASR 没配（fixture 默认），走的是"听不了语音"那条分支：
@@ -1065,7 +1138,7 @@ describe('Orchestrator', () => {
     nvSystem = nvSystem || '';
     assert.equal(nvTools.includes('get_message_images'), false, 'no-vision 模型要摘掉看图工具');
     assert.equal(nvTools.includes('get_sticker_image'), false);
-    const nvScene = nvSystem.slice(nvSystem.indexOf('【QQ 场景规则】'));
+    const nvScene = blockUntilNextSkill(nvSystem, '【QQ 场景规则】');
     assert.equal(nvScene.includes('用 get_message_images 看'), false, '工具摘了就不能再教它用（只读 api.vision 会漏掉这一半）');
     assert.equal(nvScene.includes('先看画面再听声音'), false);
     // 自安排唤醒的引导只跟 selfWakeEnabled 走：vision 关掉不该把它一起吞了

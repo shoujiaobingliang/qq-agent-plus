@@ -4228,6 +4228,8 @@ export function createApp({
     const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
     const previousPlugins = JSON.stringify(cfgNow.plugins || {});
     const previousPersona = JSON.stringify(cfgNow.persona || {});
+    const previousPersonaPerChat = JSON.stringify(cfgNow.personaPerChat || {});
+    const previousPromptConfig = JSON.stringify(cfgNow.prompt || {});
     const previousSlangPilot = JSON.stringify(cfgNow.slangPilot || {});
     const previousIncidentPilot = JSON.stringify(cfgNow.incidentPilot || {});
     const previousIdentitySources = JSON.stringify({
@@ -4345,6 +4347,15 @@ export function createApp({
       blocklist: next.blocklist || {}
     }) !== previousIdentitySources;
     const personaChanged = JSON.stringify(next.persona || {}) !== previousPersona;
+    // 人设轮：人设/按群人设/提示词布局变化后，后台补生成（缓存命中时不外呼）。
+    if (
+      personaChanged
+      || JSON.stringify(next.personaPerChat || {}) !== previousPersonaPerChat
+      || JSON.stringify(next.prompt || {}) !== previousPromptConfig
+    ) {
+      Promise.resolve(orchestrator.warmPersonaIntro())
+        .catch((error) => log(`[persona-intro] 配置变更后生成失败：${error?.message ?? error}`));
+    }
     if (
       identityChanged
       || (identityPilotEnabled(next) && (identitySourcesChanged || personaChanged))
@@ -5000,6 +5011,10 @@ export function createApp({
     groupGame.startLoop();   // 内部按配置判断是否推进；重启后从磁盘恢复进行中的局
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     orchestrator.startScheduledWakeTicker();
+    // 人设轮：启动后后台生成（按 personaPrompt 哈希缓存，换人设/换模型才重新生成）。
+    // 不 await：模型调用可能慢，不能挡住服务启动；失败只记日志。
+    void orchestrator.warmPersonaIntro()
+      .catch((error) => log(`[persona-intro] 启动生成失败：${error?.message ?? error}`));
     // 插件宿主：起插件子进程（隔离不可用时按配置**拒绝加载**，理由写进日志与巡检）。
     // 放在最后、且失败只记日志：插件是第三方扩展，它起不来不该影响控制台与机器人本体。
     // 先取一次索引（只为撤回名单）：加载前拿到，才能保证"重启后没人打开插件页也挡得住"。
