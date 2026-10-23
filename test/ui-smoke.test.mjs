@@ -128,6 +128,8 @@ test('插件页骨架：标签分面在左栏里、且真的渲染出来', { ski
     assert.ok((html.match(/plugin-facet-group/g) || []).length >= 2, '分组结构要渲染进去');
     assert.equal(doc.getElementById('plugins-tags'), null,
       '标签不许再从骨架里单开一个容器横铺在列表上方');
+    assert.ok(doc.querySelector('[data-plugin-action="manage-sources"]'), '目录面要有「管理来源」入口');
+    assert.ok(doc.getElementById('plugins-sources-panel'), '来源管理面板要渲染进骨架');
     assert.deepEqual(errors, [], `切到插件页出现未捕获错误：${errors.join(' | ')}`);
   } finally { window.happyDOM?.abort?.(); }
 });

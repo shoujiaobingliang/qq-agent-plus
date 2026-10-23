@@ -134,6 +134,8 @@ let pluginDetailId = '';
  * "标签放在插件上面对吗"就是这个形态）。宽屏不看这个值。
  */
 let filtersOpen = false;
+/** 「索引来源」管理面板是否展开（目录面内联面板，不弹窗）。 */
+let sourcesOpen = false;
 let pendingPluginFile = null;   // 用户在「手动安装」里选好、还没提交的那个包
 let lastIndex = { plugins: [], skipped: [], sources: [] };
 let lastState = null;
@@ -276,6 +278,7 @@ function renderPluginsPage() {
              那里回答"哪个源出问题了"。用户 2026-10-17 反馈"索引都没了"，就是它被挪到列表底部后
              第一眼看不到。 -->
         <div class="hint plugin-source-chip" id="plugins-source-chip"></div>
+        <button type="button" class="btn btn-small plugin-source-manage" data-plugin-action="manage-sources">管理来源</button>
       </div>
     </div>
 
@@ -315,6 +318,7 @@ function renderPluginsPage() {
         <!-- 索引拉取失败的告警留在顶部：它说明的是"你看到的整份目录不可信"，
              压到列表底部会被错过。正常状态的来源说明挪到列表尾部（见下面的 .plugin-index-foot）。 -->
         <div class="plugin-index-warn" id="plugins-index-warn" hidden></div>
+        <div class="plugin-sources-panel" id="plugins-sources-panel" hidden></div>
         <div id="plugins-index" class="plugin-grid"><div class="plugin-empty">正在读取…</div></div>
         <div class="plugin-index-foot" id="plugins-sources"></div>
       </div>
@@ -831,6 +835,68 @@ function indexFootHtml(index) {
   }).join(' · ')}`;
 }
 
+/** 把配置里的来源统一成 { url, name }；字符串与对象两种旧形状都认。 */
+function sourceItems(value) {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => (typeof item === 'string'
+      ? { url: String(item || '').trim(), name: '' }
+      : { url: String(item?.url || '').trim(), name: String(item?.name || '').trim() }))
+    .filter((item) => item.url);
+}
+
+/**
+ * 自定义索引来源面板（目录面内联展开）。
+ * 官方源固定展示、不可移除；自定义源可增删。状态直接复用 /api/plugins/index 的逐源结果，
+ * 不额外发请求 —— 面板打开时如果索引刚好在加载，会显示"未拉取"，刷新后自动补上。
+ */
+function renderSourcesPanel() {
+  const panel = $('#plugins-sources-panel');
+  if (!panel) return;
+  panel.hidden = !sourcesOpen;
+  if (!sourcesOpen) { panel.innerHTML = ''; return; }
+  const state = lastState || {};
+  const officialUrl = String(state.indexUrl || '').trim();
+  const custom = sourceItems(state.indexUrls);
+  const maxSources = Number(state.maxCustomSources) || 8;
+  const atLimit = custom.length >= maxSources;
+  const report = new Map((Array.isArray(lastIndex?.sources) ? lastIndex.sources : [])
+    .map((item) => [String(item.url || ''), item]));
+  const statusOf = (url) => {
+    const hit = report.get(url);
+    if (!hit) return '<span class="plugin-source-status">未拉取</span>';
+    if (hit.ok) return `<span class="plugin-source-status ok">${Number(hit.count) || 0} 条</span>`;
+    return `<span class="plugin-source-status bad">失败：${esc(hit.error || '未知原因')}</span>`;
+  };
+  const row = (url, name, { locked = false, index = -1 } = {}) => `
+    <div class="plugin-source-row${locked ? ' is-locked' : ''}">
+      <span class="plugin-source-badge">${locked ? '官方' : '自定义'}</span>
+      <div class="plugin-source-main">
+        <b>${esc(name || url)}</b>
+        <code>${esc(url)}</code>
+        ${statusOf(url)}
+      </div>
+      ${locked ? '' : `<button type="button" class="btn btn-small" data-plugin-action="source-remove" data-source-index="${index}">移除</button>`}
+    </div>`;
+  panel.innerHTML = `
+    <div class="plugin-sources-head">
+      <b>索引来源</b>
+      <span>官方索引固定保留、作为最后兜底；自定义来源按添加顺序优先，同 id 以靠前来源为准。</span>
+      <button type="button" class="btn btn-small" data-plugin-action="manage-sources">收起</button>
+    </div>
+    ${custom.map((item, index) => row(item.url, item.name, { index })).join('')}
+    ${officialUrl
+      ? row(officialUrl, '官方索引', { locked: true })
+      : '<div class="hint">当前没有配置官方索引地址（plugins.indexUrl 为空）。</div>'}
+    <div class="plugin-source-add">
+      <input type="text" id="plugins-source-url" placeholder="https://github.com/owner/repo 或 https://…/index.json" />
+      <input type="text" id="plugins-source-name" placeholder="显示名称（可选）" maxlength="60" />
+      <button type="button" class="btn btn-small btn-primary" data-plugin-action="source-add"${atLimit ? ' disabled' : ''}>添加</button>
+    </div>
+    <div class="hint plugin-source-tip">索引决定“市场里能装什么”，是信任根：只添加你信得过的来源。
+      最多 ${maxSources} 个自定义来源；地址必须是 http(s)；填 GitHub 仓库时，会自动尝试
+      <code>plugins/index.json</code> 与根目录 <code>index.json</code>。</div>`;
+}
+
 /**
  * 窄屏筛选面板的展开状态同步到 DOM（宽屏本来就没有这个面板，类名挂着也不影响）。
  * 单独一个函数是因为它要被两处调用：渲染时（页面重建后类名会丢，得重新挂）与点击时。
@@ -1205,6 +1271,7 @@ async function refreshPlugins() {
     renderPane();
     renderInstalled(state);
     renderIndex(lastIndex, state);
+    renderSourcesPanel();
 
     let index = { plugins: [], skipped: [], sources: [] };
     try {
@@ -1220,6 +1287,7 @@ async function refreshPlugins() {
     renderTabCounts(state);
     renderInstalled(state);       // 台账里的"有更新"提示要等索引到了才出得准
     renderIndex(index, state);
+    renderSourcesPanel();
     return state;
   } catch (error) {
     setStatus(`读取插件状态失败：${error?.message || error}`);
@@ -1230,6 +1298,23 @@ async function refreshPlugins() {
 
 async function post(path, body) {
   return api(path, { method: 'POST', body: JSON.stringify(body) });
+}
+
+async function put(path, body) {
+  return api(path, { method: 'PUT', body: JSON.stringify(body) });
+}
+
+/**
+ * 保存整份自定义来源列表。服务端会逐条探测，全部通过才落盘（原子语义）；
+ * 失败时旧的来源仍然有效，界面只报错、不清空。
+ */
+async function saveSources(sources) {
+  setStatus('正在校验索引来源（会实际拉取一次）…');
+  const result = await put('/api/plugins/sources', { sources });
+  sourcesOpen = true;
+  setStatus(`已保存 ${Array.isArray(result?.sources) ? result.sources.length : 0} 个自定义来源`);
+  await refreshPlugins();
+  return result;
 }
 
 let delegationBound = false;
@@ -1455,6 +1540,48 @@ function bindPluginsSection() {
     if (!$('#plugins-page')) return;   // 只在插件页生效
     const action = button.dataset.pluginAction;
     const id = button.dataset.pluginId || '';
+    // 索引来源管理：内联面板展开/收起 + 增删自定义来源。
+    // 这些动作不属于单个插件，必须在下面的 install/enable/... 分支之前处理。
+    if (action === 'manage-sources') {
+      // 入口在页头（任何面都看得见），面板却在目录面里：从「已装/手动安装」点时先切回目录，
+      // 否则点了像没反应。
+      if (!sourcesOpen && pluginPane !== 'catalog') {
+        pluginPane = 'catalog';
+        renderPane();
+      }
+      sourcesOpen = !sourcesOpen;
+      renderSourcesPanel();
+      return;
+    }
+    if (action === 'source-remove') {
+      const index = Number(button.dataset.sourceIndex);
+      const current = sourceItems(lastState?.indexUrls);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) return;
+      current.splice(index, 1);
+      try {
+        await saveSources(current);
+      } catch (error) {
+        setStatus(`保存来源失败：${error?.message || error}`);
+      }
+      return;
+    }
+    if (action === 'source-add') {
+      const url = String($('#plugins-source-url')?.value || '').trim();
+      const name = String($('#plugins-source-name')?.value || '').trim();
+      if (!url) { setStatus('先填一个来源地址'); return; }
+      const current = sourceItems(lastState?.indexUrls);
+      const maxSources = Number(lastState?.maxCustomSources) || 8;
+      if (current.length >= maxSources) {
+        setStatus(`最多只能添加 ${maxSources} 个自定义来源`);
+        return;
+      }
+      try {
+        await saveSources([...current, { url, name }]);
+      } catch (error) {
+        setStatus(`保存来源失败：${error?.message || error}`);
+      }
+      return;
+    }
     if (action === 'uninstall') {
       const ok = await askForConfirmation(`确定卸载插件「${id}」？代码会被移走（插件自己的数据保留，重装后还在）。`);
       if (!ok) return;

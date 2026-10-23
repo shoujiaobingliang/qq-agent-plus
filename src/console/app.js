@@ -62,6 +62,7 @@ import { safeFetch, safeFetchBinary } from '../llm/safe-fetch.js';
 import { DEFAULT_CONFIG } from '../core/config.js';
 import { uiBuildStamp } from './ui-build.js';
 import { installPlugin, uninstallPlugin, fetchPluginIndexes, sha256Of, MAX_PLUGIN_ARCHIVE_BYTES, rollbackPlugin, createIndexRevokedCache, indexResultForDisplay, bundledPluginIndex } from '../plugins/install.js';
+import { MAX_CUSTOM_INDEX_SOURCES, resolveIndexSources } from '../plugins/sources.js';
 import { DEFAULT_MIRROR_PREFIXES, fetchBinaryWithMirrors } from '../plugins/mirrors.js';
 // 平台能力门控的元数据（键→标签/工具/默认取向/配额默认）：控制台不手抄第二份，防漂移
 import {
@@ -2593,6 +2594,13 @@ export function createApp({
     return { prefixes: Array.isArray(configured) ? configured : DEFAULT_MIRROR_PREFIXES };
   };
 
+  // 索引与「自定义来源」探测共用同一套抓取限制：4MB 体积上限、总截止 25 秒
+  //（不是空闲超时：索引源可以慢，但不能靠"每 19 秒吐一个字节"把请求吊住）。
+  const fetchPluginIndexText = (url) => safeFetch(url, {
+    maxBytes: 4 * 1024 * 1024,
+    signal: AbortSignal.timeout(25_000)
+  });
+
   const loadPluginIndex = async ({ applyRevocation = true } = {}) => {
     const sources = pluginIndexSources();
     const key = sources.map((item) => `${item.name}|${item.url}`).join(' ');
@@ -2610,7 +2618,7 @@ export function createApp({
     const fresh = await fetchPluginIndexes({
       sources,
       // 总截止 25 秒（不是空闲超时）：索引源可以慢，但不能靠"每 19 秒吐一个字节"把请求吊住
-      fetchText: (url) => safeFetch(url, { maxBytes: 4 * 1024 * 1024, signal: AbortSignal.timeout(25_000) }),
+      fetchText: fetchPluginIndexText,
       log: moduleLog('plugins'), hostVersion: PKG.version
     });
     // 拉不到就用上次成功读到的（见 indexResultForDisplay）：索引挂在第三方托管上，偶发超时是常态，
@@ -2695,9 +2703,41 @@ export function createApp({
       ...pluginRegistry.list(),
       indexUrl: String(getConfig().plugins?.indexUrl || ''),
       indexUrls: Array.isArray(getConfig().plugins?.indexUrls) ? getConfig().plugins.indexUrls : [],
+      maxCustomSources: MAX_CUSTOM_INDEX_SOURCES,
       lazy: getConfig().plugins?.lazy !== false,
       idleMinutes: Math.max(0, Number(getConfig().plugins?.idleMinutes) || 0)
     }));
+
+  // 自定义索引来源：整份列表原子保存 —— 全部探测通过才写配置。
+  // 官方源仍由 plugins.indexUrl 承载、固定保留；这里只管理 indexUrls。
+  router.add('PUT', '/api/plugins/sources', async (req, res) => {
+    const body = await readBody(req).catch(() => ({}));
+    try {
+      const sources = await resolveIndexSources({
+        inputs: body?.sources,
+        fetchText: fetchPluginIndexText,
+        log: moduleLog('plugins'),
+        hostVersion: PKG.version
+      });
+      const current = getConfig().plugins || {};
+      const before = (Array.isArray(current.indexUrls) ? current.indexUrls : [])
+        .map((item) => String(item?.name || '').trim() || '未命名');
+      updateConfig({ plugins: { indexUrls: sources } });
+      // 来源变了就必须丢掉旧缓存：否则页面还会拿上一份来源的 10 分钟缓存，
+      // 用户会以为"保存了但没生效"。
+      pluginIndexCache = { key: '', at: 0, result: null };
+      lastGoodPluginIndex = null;
+      // 审计只记名称与数量：地址可能带查询串里的私有令牌，不该原样落进审计日志。
+      auditWrite('plugins.sources', 'plugins.indexUrls', {
+        req,
+        before: { count: before.length, names: before },
+        after: { count: sources.length, names: sources.map((item) => item.name) }
+      });
+      return json(res, 200, { ok: true, sources });
+    } catch (error) {
+      return pluginError(res, error, 400);
+    }
+  });
 
   router.add('GET', '/api/plugins/index', async (_req, res) => {
     try {

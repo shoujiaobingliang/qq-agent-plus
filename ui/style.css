@@ -5129,6 +5129,46 @@ html[data-motion='off'] .chat-item.leaving { animation: none; }
 }
 .plugin-index-foot code { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
 
+/* ── 索引来源管理（自定义市场源）──
+   内联面板而不是弹窗：它属于「这份目录从哪来」的一部分，展开后仍能看到下面的插件列表。 */
+.plugin-source-manage { margin-top: 7px; }
+.plugin-sources-panel {
+  margin-bottom: 12px; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.plugin-sources-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.plugin-sources-head b { font-size: var(--fs-md); }
+.plugin-sources-head > span { flex: 1; min-width: 0; font-size: var(--fs-2xs); color: var(--faint); line-height: 1.6; }
+.plugin-source-row {
+  display: flex; align-items: flex-start; gap: 9px; padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.plugin-source-row:first-of-type { border-top: 0; }
+.plugin-source-row.is-locked { opacity: .9; }
+.plugin-source-badge {
+  flex: 0 0 auto; margin-top: 1px; padding: 1px 6px; border-radius: var(--r-pill);
+  font-size: var(--fs-2xs); color: var(--faint); border: 1px solid var(--border);
+}
+.plugin-source-row.is-locked .plugin-source-badge { color: var(--accent); border-color: var(--accent-border); }
+.plugin-source-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.plugin-source-main b { font-size: var(--fs-sm); font-weight: 600; }
+.plugin-source-main code {
+  font-family: var(--mono); font-size: var(--fs-2xs); color: var(--faint);
+  overflow-wrap: anywhere; line-height: 1.5;
+}
+.plugin-source-status { font-size: var(--fs-2xs); color: var(--faint); }
+.plugin-source-status.ok { color: var(--green); }
+.plugin-source-status.bad { color: var(--orange); }
+.plugin-source-add { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.plugin-source-add input { flex: 1 1 220px; min-width: 160px; }
+.plugin-source-tip { margin-top: 8px; font-size: var(--fs-2xs); line-height: 1.65; }
+
+/* 窄屏：地址与名称各占一整行，按钮不跟输入框抢宽度 */
+@media (max-width: 620px) {
+  .plugin-source-add input { flex-basis: 100%; }
+}
+
 /* ── 图标块：按 id 生成的色相（这一版没变）── */
 .plugin-mono {
   flex: 0 0 auto; width: 38px; height: 38px; display: inline-flex; align-items: center; justify-content: center;

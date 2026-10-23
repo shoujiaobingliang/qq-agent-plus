@@ -89,6 +89,21 @@ sha256 校验，但快照可能不是最新版本。远端能拉到时永远优�
 （从哪个索引/地址装的、哪一份 sha256、什么版本、什么时候），控制台「已装」里能看到。
 卸载只挪走代码目录，`plugin-data/<id>/` 里的数据与来源记录都保留。
 
+### 自己加市场源（控制台）
+
+「插件 → 目录」右上角的「管理来源」可以添加自定义索引，不用手改 `config.json`：
+
+- **直接填索引地址**：`https://example.com/plugins/index.json`，原样使用；
+- **填 GitHub 仓库**：`https://github.com/owner/repo`，会依次尝试
+  `raw.githubusercontent.com/owner/repo/HEAD/plugins/index.json` 和根目录 `index.json`。
+
+保存前会**实际拉取一次**并确认是本项目的索引格式（必须有 `plugins` 数组）。任一来源探测失败
+就整体不保存，旧来源继续有效；最多 8 个自定义来源。官方索引固定保留（`plugins.indexUrl`），
+自定义来源写入 `plugins.indexUrls`。
+
+来源顺序即优先级：**自定义来源在前、官方索引最后兜底**，同一个插件 id 以靠前来源为准
+（与现有 `indexUrls` 合并规则一致）。索引是信任根 —— 它决定“市场里能装什么”，只添加你信得过的来源。
+
 ## 这是什么
 
 让别人（或你自己）用一份 `plugin.json` + 一个入口 JS 给机器人加能力：暴露只读工具给模型、
