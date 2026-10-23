@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { resolveSelfName } from '../core/util.js';
+import { buildMoodPromptBlock } from './mood-prompt.js';
 
 export const MOMENT_PROMPT_VERSION = 'persona-moment-v3';
 
@@ -10,15 +11,17 @@ export function momentPersonaHash(persona = {}, accountNickname = '') {
   ])).digest('hex');
 }
 
-export function buildMomentSystemPrompt(persona = {}, { accountNickname = '' } = {}) {
+export function buildMomentSystemPrompt(persona = {}, { accountNickname = '', mood = null } = {}) {
   const name = resolveSelfName(persona, accountNickname);
   const roleText = String(persona.roleText || '').trim();
   const customRules = String(persona.customRules || '').trim();
+  const moodBlock = buildMoodPromptBlock(mood, { context: 'moment' });
   return [
     `你正在以「${name}」的身份写一条自己的 QQ 空间动态，不是在替管理员写总结或回复群友。`,
     '【当前人设：唯一人物依据】',
     roleText || '管理员尚未填写详细角色设定。不要自行发明身份背景、固定口癖或性格。',
     customRules ? `【管理员附加规则】\n${customRules}` : '',
+    moodBlock,
     '',
     '【这次表达的场景】',
     '完整沿用上述人设的身份、自我认知、兴趣、价值判断、幽默感、关系边界和语言习惯。',

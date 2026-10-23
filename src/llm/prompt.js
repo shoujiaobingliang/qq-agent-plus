@@ -13,6 +13,7 @@
 import { asrAvailable, getConfig, imageGenAvailable } from '../core/config.js';
 import { platformGateAllowed, platformQuotaLimit } from '../core/platform-gates.js';
 import { visionEnabled, stickerVisionEnabled } from './vision-scan.js';
+import { buildMoodPromptBlock } from './mood-prompt.js';
 // 与 orchestrator 摘 send_voice 的条件同源（enabled && baseUrl 都齐才算能用）：
 // 只看 enabled 会在"勾了启用但没填地址"时教一个不存在的工具（2026-10-07 审计 P0）
 import { ttsConfigured } from './tts-openai.js';
@@ -1161,10 +1162,15 @@ export function hitKeyword(text, keywords = []) {
  * @returns {{tier:number, count:number, reason:string, shouldRespond:boolean}}
  *          tier 是"命中的档位"（触发原因所属档），不是"当前设置档位"
  */
-export function resolveContextTier({ triggerEntries = [], selfNickname = '', botName = '', selfId = '', cfg = null, roll = null } = {}) {
+export function resolveContextTier({ triggerEntries = [], selfNickname = '', botName = '', selfId = '', cfg = null, roll = null, probabilityMultiplier = 1 } = {}) {
   const c = cfg || getConfig().store || {};
   // 滑条上的数字就是概率（0~100），存在 randomPercent 里；老配置由 config 层迁移过。
-  const probability = clampProbability(c.randomPercent, 100);
+  // 精力系数只作用于概率档：必回项（@/关键词）在下面先返回，不受影响。
+  const multiplier = Number(probabilityMultiplier);
+  const safeMultiplier = Number.isFinite(multiplier)
+    ? Math.min(1.5, Math.max(0.5, multiplier))
+    : 1;
+  const probability = Math.min(100, Math.max(0, clampProbability(c.randomPercent, 100) * safeMultiplier));
 
   const entries = Array.isArray(triggerEntries) ? triggerEntries : [];
   // 「自动展开」关掉时，转发消息既不能被展开，也不能只靠自己触发回复：
@@ -1425,6 +1431,11 @@ export function buildUserPrompt(ctx) {
     stateLines.push('你最近没有发过言');
   }
   parts.push(`【此刻状态】\n${stateLines.join('\n')}`);
+
+  // 心情是逐轮变化的动态状态：只放 user prompt，不进 system/persona ——
+  // prefix hash 包含 system/persona，放那里会关掉 lifecycle 线程并破坏前缀缓存。
+  const moodBlock = buildMoodPromptBlock(ctx.mood, { context: 'chat' });
+  if (moodBlock) parts.push(moodBlock);
 
   // 【角色设定】刚换过的那段时间，历史/交接里留着上一张卡的口癖与自称：
   // 不加说明的话模型会照着自己上一条的口气继续说（实测换卡 26 小时后仍在用旧卡的口癖）。

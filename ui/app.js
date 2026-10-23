@@ -17,7 +17,7 @@ import {
 import {
   afterRender, askForConfirmation, bindPeekToggle, closeDialog, hideLoading, initSessionScrollLoader,
   pollUntilReady, revealLoadingIfSlow, scheduleChatsRefresh, scheduleSessionRender, setBoxError,
-  setLoadingStatus, syncGraduatedFeatureNavigation
+  setLoadingStatus, syncGraduatedFeatureNavigation, updateMoodStatus
 } from './core/dom-util.js';
 import { $, $$, esc } from './core/dom.js';
 import {
@@ -989,6 +989,9 @@ function connectSSE() {
     if (state.tab === 'control') loadControlHub({ force: true });
   });
   es.addEventListener('status', () => refreshStatus());
+  es.addEventListener('mood-update', (ev) => {
+    try { updateMoodStatus(JSON.parse(ev.data)); } catch { /* 坏载荷不影响其它监听器 */ }
+  });
   es.addEventListener('feedback', (ev) => {
     // 与上面几个事件同一道守卫：载荷坏了不能把监听器抛出去（其它事件都有 try/catch，
     // 这里原来是裸的 —— 2026-10-01 审查）

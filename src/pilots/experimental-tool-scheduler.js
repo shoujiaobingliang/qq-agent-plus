@@ -60,6 +60,7 @@ export const EXPERIMENTAL_SAME_ROUND_ACTION_TOOLS = new Set([
   'collect_sticker',
   'sticker_note',
   'report_feedback',
+  'take_break',      // 本地状态写入：进入睡觉/摸鱼，不影响本轮已确定的动作
   'friend_request_propose',
   'remind',        // 本地持久化写入
   'group_game',    // 开局/结束：本地状态 + 对外公告

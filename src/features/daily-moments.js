@@ -339,6 +339,7 @@ export class DailyMomentsManager {
     now = () => Date.now(),
     random = Math.random,
     log = console.log,
+    getMood = () => null,
     stateFile = STATE_FILE
   }) {
     this.store = store;
@@ -357,6 +358,7 @@ export class DailyMomentsManager {
     this.now = now;
     this.random = random;
     this.log = log;
+    this.getMood = typeof getMood === 'function' ? getMood : () => null;
     this.stateFile = stateFile;
     this.state = readJson(this.stateFile, { version: 1, records: [] });
     if (!Array.isArray(this.state.records)) this.state.records = [];
@@ -1136,7 +1138,10 @@ export class DailyMomentsManager {
   async #decide(snapshot, cfg, session, signal) {
     const rootConfig = getConfig();
     const style = STYLE_SEEDS[Math.floor(this.random() * STYLE_SEEDS.length)] || STYLE_SEEDS[0];
-    const systemPrompt = buildMomentSystemPrompt(rootConfig.persona, { accountNickname: this.onebot?.selfNickname || '' });
+    const systemPrompt = buildMomentSystemPrompt(rootConfig.persona, {
+      accountNickname: this.onebot?.selfNickname || '',
+      mood: this.getMood()
+    });
     const personaHash = momentPersonaHash(rootConfig.persona, this.onebot?.selfNickname || '');
     const recentPosts = this.state.records.filter((record) => record.status === 'published')
       .slice(0, 5).map((record) => ({ day: record.dayKey, content: record.content }));

@@ -13,7 +13,7 @@ import {
   renderBanner
 } from './app.js';
 import { api } from './core/api.js';
-import { setStatusLabel, updateOnebotStatusLine } from './core/dom-util.js';
+import { setStatusLabel, updateMoodStatus, updateOnebotStatusLine } from './core/dom-util.js';
 import { $, esc } from './core/dom.js';
 import { fmtTokens, mulOf, onebotIssueText } from './core/format.js';
 import { lifecycleStateOf } from './core/lifecycle-labels.js';
@@ -57,6 +57,7 @@ QARegistry.override('refreshStatus', async function refreshStatus() {
       ? `OneBot 已连接${s.onebot.self ? `（${s.onebot.self.nickname}）` : ''}`
       : 'OneBot 未连接';
     setStatusLabel('#model-label', `模型：${s.orchestrator.model || '未设置'}`);
+    updateMoodStatus(s.mood || s.orchestrator?.mood);
     const u = s.usage;
     const c = s.cost;
     const costTxt = c && c.cost > 0 ? ` · ¥${c.cost.toFixed(3)}` : '';

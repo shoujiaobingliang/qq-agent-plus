@@ -335,6 +335,7 @@ export class QzoneInteractionManager {
     now = () => Date.now(),
     random = Math.random,
     log = console.log,
+    getMood = () => null,
     stateFile = STATE_FILE
   }) {
     this.onebot = onebot;
@@ -347,6 +348,7 @@ export class QzoneInteractionManager {
     this.now = now;
     this.random = random;
     this.log = log;
+    this.getMood = typeof getMood === 'function' ? getMood : () => null;
     this.stateFile = stateFile;
     this.state = normalizeState(readJson(stateFile, defaultState()));
     this.timer = null;
@@ -800,7 +802,10 @@ export class QzoneInteractionManager {
       ...feeds.map((item) => ({ type: 'feed', item }))
     ].slice(0, cfg.maxBatchItems);
     const root = getConfig();
-    const systemPrompt = buildQzoneInteractionPrompt(root.persona, { accountNickname: this.onebot?.selfNickname || '' });
+    const systemPrompt = buildQzoneInteractionPrompt(root.persona, {
+      accountNickname: this.onebot?.selfNickname || '',
+      mood: this.getMood()
+    });
     const tools = openAiTools([this.#submitToolDef([], [], cfg)]);
     // 与主运行同口径：省 Token 模式夹住单次预算上限
     const hardLimit = Math.min(
@@ -878,7 +883,10 @@ export class QzoneInteractionManager {
 
   async #decide(batch, cfg, session, signal) {
     const root = getConfig();
-    const systemPrompt = buildQzoneInteractionPrompt(root.persona, { accountNickname: this.onebot?.selfNickname || '' });
+    const systemPrompt = buildQzoneInteractionPrompt(root.persona, {
+      accountNickname: this.onebot?.selfNickname || '',
+      mood: this.getMood()
+    });
     const defs = [this.#submitToolDef(batch.feeds, batch.replies, cfg)];
     const tools = openAiTools(defs);
     const userPrompt = [

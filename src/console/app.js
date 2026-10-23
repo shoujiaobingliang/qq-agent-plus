@@ -614,7 +614,9 @@ export function createApp({
     getPlugins: () => pluginRegistry,
     emit,
     getIdentityPilot: () => identityPilot,
-    getIncidentPilot: () => incidentPilot
+    getIncidentPilot: () => incidentPilot,
+    // 生产环境才启用“每轮模型评审”；测试/脚本构造 Orchestrator 时默认不额外发请求。
+    judgeMood: true
   });
   const dailyMoments = new DailyMomentsManager({
     store,
@@ -625,6 +627,7 @@ export function createApp({
     resolveChatName: (groupId) => orchestrator.getChatName(groupId),
     setProactiveSuppressed: (suppressed) =>
       orchestrator.setProactiveSuppressed('daily-moments', suppressed),
+    getMood: () => orchestrator.moodSnapshot(),
     emit,
     log: moduleLog('daily-moments')
   });
@@ -633,6 +636,7 @@ export function createApp({
     sessions,
     setProactiveSuppressed: (suppressed) =>
       orchestrator.setProactiveSuppressed('qzone-interactions', suppressed),
+    getMood: () => orchestrator.moodSnapshot(),
     emit,
     log: moduleLog('qzone-interactions')
   });
@@ -1225,6 +1229,8 @@ export function createApp({
       recordOnly: arrivedInactive || !isTimeActive(chatKey)
     });
     if (stored.duplicate) return;
+    // 睡觉是硬暂停：消息只入库，不触发观察/插件/命令/唤醒；醒来后统一补看。
+    if (orchestrator.mood?.sleeping?.()) return;
     if (!isSelf) identityPilot?.observeMessage(chatKey, stored);
     if (!isSelf) slangPilot?.observeMessage(chatKey, stored);
     // 插件只读观察：给的是**已去重、已过 sanitizeUserText** 的正文与最小元信息（不给 media 等内部字段），
@@ -2022,6 +2028,31 @@ export function createApp({
   router.add('GET', '/api/model-prices', async (req, res, params, url) => json(res, 200, modelPricesPayload(url.searchParams.get('model'))));
   router.add('GET', '/api/vision/results', async (req, res) => json(res, 200, { results: { ...builtinVisionResults(currentProviders()), ...visionResults() }, scanning: visionScan.running }));
   router.add('GET', '/api/daily-moments/status', async (req, res) => json(res, 200, dailyMoments.status()));
+  // 心情：当前快照 + 最近变化流水 + 最近 7 天汇总。顶部栏走 /api/status，设置页走这里。
+  router.add('GET', '/api/mood', async (_req, res) => json(res, 200, {
+    ok: true,
+    ...(orchestrator.moodSnapshot() || {}),
+    history: orchestrator.mood?.recentHistory?.(50) || [],
+    daily: orchestrator.mood?.recentDays?.(7) || []
+  }));
+  router.add('POST', '/api/mood/reset', async (req, res) => {
+    const body = await readBody(req).catch(() => ({}));
+    if (body?.confirm !== true) {
+      return json(res, 409, { ok: false, error: '恢复到基线需要确认：请带 confirm=true' });
+    }
+    const mood = orchestrator.resetMood();
+    auditWrite('mood.reset', 'mood', { req, after: mood });
+    return json(res, 200, { ok: true, mood });
+  });
+  router.add('POST', '/api/mood/wake', async (req, res) => {
+    const body = await readBody(req).catch(() => ({}));
+    if (body?.confirm !== true) {
+      return json(res, 409, { ok: false, error: '叫醒需要确认：请带 confirm=true' });
+    }
+    const mood = orchestrator.wakeFromRest();
+    auditWrite('mood.wake', 'mood', { req, after: mood });
+    return json(res, 200, { ok: true, mood });
+  });
   router.add('GET', '/api/qzone-interactions/status', async (req, res) => json(res, 200, qzoneInteractions.status()));
   router.add('GET', '/api/group-game/status', async (req, res) => json(res, 200, groupGame.status()));
   router.add('GET', '/api/group-digest/status', async (req, res) => json(res, 200, groupDigest.status()));
@@ -5055,6 +5086,7 @@ export function createApp({
     groupGame.startLoop();   // 内部按配置判断是否推进；重启后从磁盘恢复进行中的局
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     orchestrator.startScheduledWakeTicker();
+    orchestrator.startRestTicker();
     // 人设轮：启动后后台生成（按 personaPrompt 哈希缓存，换人设/换模型才重新生成）。
     // 不 await：模型调用可能慢，不能挡住服务启动；失败只记日志。
     void orchestrator.warmPersonaIntro()

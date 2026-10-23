@@ -178,6 +178,59 @@ async function saveConfig({ quiet = false } = {}) {
     patch.reminders = { enabled: chk('#cfg-reminders-enabled', c.reminders?.enabled !== false) };
   }
 
+  if (sec === 'mood') {
+    const bounded = (raw, min, max, fallback) => {
+      const n = Number(raw);
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const baseline = c.mood?.baseline || {};
+    patch.mood = {
+      enabled: chk('#cfg-mood-enabled', c.mood?.enabled !== false),
+      baseline: {
+        mood: clampInt(val('#cfg-mood-baseline-mood', baseline.mood ?? 55), 0, 100, 55),
+        energy: clampInt(val('#cfg-mood-baseline-energy', baseline.energy ?? 55), 0, 100, 55)
+      },
+      frequencyInfluence: bounded(val('#cfg-mood-frequency', c.mood?.frequencyInfluence ?? 0.2), 0, 0.5, 0.2),
+      toneInfluence: bounded(val('#cfg-mood-tone', c.mood?.toneInfluence ?? 0.6), 0, 1, 0.6),
+      decayHalfLifeHours: clampInt(val('#cfg-mood-half-life', c.mood?.decayHalfLifeHours ?? 12), 1, 168, 12),
+      followUpMinEnergy: clampInt(val('#cfg-mood-followup-energy', c.mood?.followUpMinEnergy ?? 25), 0, 100, 25),
+      judge: {
+        ...(c.mood?.judge || {}),
+        enabled: chk('#cfg-mood-judge-enabled', c.mood?.judge?.enabled !== false),
+        maxCallsPerDay: clampInt(
+          val('#cfg-mood-judge-max-calls', c.mood?.judge?.maxCallsPerDay ?? 100), 0, 1000, 100
+        )
+      },
+      rest: {
+        ...(c.mood?.rest || {}),
+        enabled: chk('#cfg-mood-rest-enabled', c.mood?.rest?.enabled !== false),
+        sleepMinutes: clampInt(val('#cfg-mood-sleep-minutes', c.mood?.rest?.sleepMinutes ?? 90), 30, 180, 90),
+        slackMinutes: clampInt(val('#cfg-mood-slack-minutes', c.mood?.rest?.slackMinutes ?? 30), 10, 60, 30),
+        sleepMoodGain: clampInt(
+          val('#cfg-mood-sleep-mood-gain', c.mood?.rest?.sleepMoodGain ?? 12), 0, 50, 12
+        ),
+        sleepEnergyGain: clampInt(
+          val('#cfg-mood-sleep-energy-gain', c.mood?.rest?.sleepEnergyGain ?? 20), 0, 50, 20
+        ),
+        slackMoodGain: clampInt(
+          val('#cfg-mood-slack-mood-gain', c.mood?.rest?.slackMoodGain ?? 6), 0, 50, 6
+        ),
+        slackEnergyGain: clampInt(
+          val('#cfg-mood-slack-energy-gain', c.mood?.rest?.slackEnergyGain ?? 8), 0, 50, 8
+        ),
+        maxMoodForRest: clampInt(
+          val('#cfg-mood-rest-max-mood', c.mood?.rest?.maxMoodForRest ?? 45), 0, 100, 45
+        ),
+        maxEnergyForRest: clampInt(
+          val('#cfg-mood-rest-max-energy', c.mood?.rest?.maxEnergyForRest ?? 40), 0, 100, 40
+        ),
+        slackReplyFactor: bounded(
+          val('#cfg-mood-slack-reply-factor', c.mood?.rest?.slackReplyFactor ?? 0.35), 0.05, 1, 0.35
+        )
+      }
+    };
+  }
+
   if (sec === 'moments') {
     patch.groupDigest = {
       ...(c.groupDigest || {}),

@@ -55,7 +55,7 @@ export function resetPlatformQuotasForTest() {
 // 平台能力开关（控制台「平台能力」页）：映射表、默认取向、按群覆盖、配额上限都在
 // core/platform-gates.js（零依赖，prompt/orchestrator/控制台共用一份，防两边各写一遍漂掉）。
 // 这里重导出，保持既有 `from '../tools/tools-core.js'` 的引用路径不变。
-import { platformQuotaLimit } from '../core/platform-gates.js';
+import { platformQuotaLimit, platformToolAllowed } from '../core/platform-gates.js';
 export {
   PLATFORM_DEFAULT_OFF, PLATFORM_GATE_KEYS, PLATFORM_GATE_LABELS, PLATFORM_QUOTA_DEFAULTS,
   PLATFORM_QUOTA_KEYS, PLATFORM_TOOL_GATES, platformGateAllowed, platformGroupIdOf,
@@ -1849,6 +1849,81 @@ export function buildToolDefs() {
         const max = Math.trunc(Number(args.max) || 100);
         if (max <= min) return err('max 必须大于 min');
         return ok({ kind: 'number', min, max, result: min + roll(max - min + 1) });
+      }
+    },
+    {
+      name: 'take_break',
+      description: '心情或精力很低时给自己放个假：睡觉或摸鱼。'
+        + ' sleep = 硬暂停：休息期间收到的消息全部保持未读，醒来后统一补看，期间不回复任何消息；'
+        + ' slack = 软暂停：仍然会看消息，但只选择性回一些，不主动开新话题（以后摸鱼时可能会刷小黑盒）。'
+        + ' 只有确实很低落/很累时才用；状态还好时系统会拒绝。休息结束（或被管理员叫醒）后心情和精力会恢复一些。'
+        + ' 睡前可选做几件事（都可以不填）：status 改 QQ 在线状态、signature 改个性签名、adminMessage 私聊管理员一句短话。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['sleep', 'slack'], description: 'sleep=睡觉（硬暂停）；slack=摸鱼（选择性回复）' },
+          minutes: { type: 'integer', description: '休息多少分钟（睡觉 30~180，摸鱼 10~60；不填用配置默认值）' },
+          reason: { type: 'string', description: '一句很短的内部理由（可选，不直接发到群里）' },
+          status: { type: 'string', description: '睡前可选：QQ 自定义在线状态（≤16 字，如“睡觉中”）' },
+          signature: { type: 'string', description: '睡前可选：个性签名（≤40 字，如“晚安，明天见”）' },
+          adminMessage: { type: 'string', description: '睡前可选：私聊管理员一句简短消息（≤120 字）' }
+        },
+        required: ['kind']
+      },
+      async execute(ctx, args) {
+        const mood = ctx.mood;
+        if (!mood?.startRest) return err('心情系统未启用，不能休息');
+        const kind = args.kind === 'slack' ? 'slack' : 'sleep';
+        const snapshot = mood.startRest({ kind, minutes: args.minutes, reason: args.reason });
+        if (!snapshot) {
+          return err('现在还不能休息：心情/精力还没有低到需要休息，或者已经在休息中');
+        }
+        ctx.emit?.('mood-update', snapshot);
+
+        // 睡前可选动作：都失败也不影响休息本身；逐项留一条结果，方便模型如实转述。
+        const announcements = [];
+        const statusText = safeSlice(String(args.status ?? '').trim(), 16);
+        if (statusText) {
+          if (!platformToolAllowed('set_my_status', getConfig().platform, ctx.chatKey)) {
+            announcements.push('在线状态：平台设置未开启，未修改');
+          } else {
+            const def = buildToolDefs().find((tool) => tool.name === 'set_my_status');
+            const result = await def.execute(ctx, { wording: statusText });
+            announcements.push(result?.isError ? `在线状态修改失败：${result.content}` : `在线状态：${statusText}`);
+          }
+        }
+        const signature = safeSlice(String(args.signature ?? '').trim(), 40);
+        if (signature) {
+          if (!platformToolAllowed('set_my_signature', getConfig().platform, ctx.chatKey)) {
+            announcements.push('个性签名：平台设置未开启，未修改');
+          } else {
+            const def = buildToolDefs().find((tool) => tool.name === 'set_my_signature');
+            const result = await def.execute(ctx, { signature });
+            announcements.push(result?.isError ? `个性签名修改失败：${result.content}` : `个性签名：${signature}`);
+          }
+        }
+        const adminMessage = safeSlice(String(args.adminMessage ?? '').trim(), 120);
+        if (adminMessage) {
+          if (typeof ctx.notifyAdmin !== 'function') {
+            announcements.push('私聊管理员失败：当前环境不支持');
+          } else {
+            try {
+              await ctx.notifyAdmin(adminMessage);
+              announcements.push('已私聊管理员');
+            } catch (error) {
+              announcements.push(`私聊管理员失败：${String(error?.message ?? error).slice(0, 80)}`);
+            }
+          }
+        }
+
+        return ok({
+          kind,
+          rest: snapshot.rest,
+          announcements,
+          note: kind === 'sleep'
+            ? '你开始睡觉了。本轮结束后不再处理任何消息，醒来后系统会把积压的消息补给你。'
+            : '你开始摸鱼了。仍然会看消息，但只选择性回复，不主动开新话题。'
+        });
       }
     },
     {

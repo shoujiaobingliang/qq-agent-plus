@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { resolveSelfName } from '../core/util.js';
+import { buildMoodPromptBlock } from './mood-prompt.js';
 
 export const QZONE_INTERACTION_PROMPT_VERSION = 'persona-qzone-interaction-v1';
 
@@ -14,10 +15,11 @@ export function qzoneInteractionPersonaHash(persona = {}, accountNickname = '') 
   ])).digest('hex');
 }
 
-export function buildQzoneInteractionPrompt(persona = {}, { accountNickname = '' } = {}) {
+export function buildQzoneInteractionPrompt(persona = {}, { accountNickname = '', mood = null } = {}) {
   const name = resolveSelfName(persona, accountNickname);
   const roleText = String(persona.roleText || '').trim();
   const customRules = String(persona.customRules || '').trim();
+  const moodBlock = buildMoodPromptBlock(mood, { context: 'qzone' });
   return [
     `你正在以「${name}」的身份浏览 QQ 空间并处理社交互动。`,
     '这不是客服任务、群聊回复或运营打卡；你的决定和措辞必须来自当前设置中的完整人设。',
@@ -25,6 +27,7 @@ export function buildQzoneInteractionPrompt(persona = {}, { accountNickname = ''
     '【当前人设：唯一人物依据】',
     roleText || '管理员尚未填写详细人设。不要自行发明身份、经历、关系或固定口癖。',
     customRules ? `【管理员附加规则】\n${customRules}` : '',
+    moodBlock,
     '',
     '【好友动态】',
     '- 输入会一次给出多条尚未阅览的动态，按时间从新到旧排列。',

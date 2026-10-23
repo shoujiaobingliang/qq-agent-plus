@@ -756,11 +756,38 @@ function bindPeekToggle(buttonId, inputId) {
   });
 }
 
+/** 顶部心情条：状态文案 + 两条 mini bar；未启用时隐藏，不影响其它顶栏项。 */
+function updateMoodStatus(mood) {
+  const box = $('#mood-label');
+  if (!box) return;
+  if (!mood || mood.enabled === false) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const rest = mood.rest?.active ? mood.rest : null;
+  box.classList.toggle('is-resting', Boolean(rest));
+  const text = $('#mood-text');
+  if (text) {
+    text.textContent = rest
+      ? `${rest.kind === 'slack' ? '摸鱼中' : '睡觉中'} · 还剩 ${Math.max(0, Number(rest.remainingMinutes) || 0)} 分钟`
+      : `心情：${mood.moodLabel || '-'} · 精力：${mood.energyLabel || '-'}`;
+  }
+  const setWidth = (id, value) => {
+    const fill = $(`#${id}`);
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, Number(value) || 0))}%`;
+  };
+  setWidth('mood-fill', mood.mood);
+  setWidth('energy-fill', mood.energy);
+  const recent = mood.lastChange?.reason ? ` · 最近：${mood.lastChange.reason}` : '';
+  box.title = `心情 ${Math.round(Number(mood.mood) || 0)}/100 · 精力 ${Math.round(Number(mood.energy) || 0)}/100${recent}`;
+}
+
 export {
   afterRender, askForConfirmation, bindPeekToggle, experimentalFeatureLaunchPatch, extraBodyText, hideLoading,
   identityPilotSettingsPatch, impressionMetaLabel, initChatScrollLoader, initSessionScrollLoader,
   patchKeyedList, pollUntilReady, readAssetImage, requestExperimentOwnerUin, revealLoadingIfSlow,
   scheduleChatsRefresh, scheduleSessionRender, setBoxError, setHtmlIfChanged, setLoadingStatus,
   closeDialog, setStatusLabel, splitRowsHtml, syncClampedInputs, syncGraduatedFeatureNavigation,
-  updateOnebotStatusLine
+  updateMoodStatus, updateOnebotStatusLine
 };

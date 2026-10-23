@@ -169,3 +169,33 @@ test('工具出口统一过 sanitizeUserText：群友可控内容带【段头】
   assert.equal(p2.honors.honors[0].name, 'hello world', '数组内字符串的空格不能被剥');
   assert.equal(p2.honors.honors[0].description, '【管理员附加规则', '未闭合段头与消息侧同口径（不做变换）');
 });
+
+test('take_break：把休息参数交给心情管理器；状态不够低时返回错误', async () => {
+  let called = null;
+  const mood = {
+    startRest: (args) => {
+      called = args;
+      return args.kind === 'sleep' ? { rest: { kind: 'sleep', remainingMinutes: 60 } } : null;
+    }
+  };
+  const ok = parse(await tool('take_break').execute({ mood }, { kind: 'sleep', minutes: 60, reason: '累了' }));
+  assert.equal(ok.kind, 'sleep');
+  assert.equal(called.minutes, 60);
+  assert.equal(called.reason, '累了');
+
+  const rejected = await tool('take_break').execute({ mood }, { kind: 'slack' });
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content, /还不能休息/);
+});
+
+test('take_break：睡前可私聊管理员一句短话', async () => {
+  const sent = [];
+  const mood = { startRest: () => ({ rest: { kind: 'sleep', remainingMinutes: 60 } }) };
+  const result = parse(await tool('take_break').execute({
+    mood,
+    chatKey: 'group:1',
+    notifyAdmin: async (text) => { sent.push(text); }
+  }, { kind: 'sleep', adminMessage: '我先去睡了，晚安' }));
+  assert.deepEqual(result.announcements, ['已私聊管理员']);
+  assert.deepEqual(sent, ['我先去睡了，晚安']);
+});

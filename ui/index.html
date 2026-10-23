@@ -168,6 +168,13 @@
           <span id="onebot-dot" class="dot dot-wait" title="OneBot 连接状态" data-page-node-id="kZj99OAhFFri832S3xi5AY"></span>
           <span id="onebot-label" class="muted" data-page-node-id="fFZerwgFQ1Y2b5Ypm3z9jJ">OneBot 连接中…</span>
           <span id="model-label" class="muted" data-page-node-id="mxYqKFiIVWYn1SDTF1HQvJ">模型：-</span>
+          <span id="mood-label" class="muted top-mood" title="当前心情 / 精力" hidden>
+            <span id="mood-text">心情：-</span>
+            <span class="top-mood-bars">
+              <span class="meter top-meter" title="心情"><span class="meter-fill" id="mood-fill"></span></span>
+              <span class="meter top-meter is-energy" title="精力"><span class="meter-fill" id="energy-fill"></span></span>
+            </span>
+          </span>
           <span id="usage-label" class="muted" data-page-node-id="ASGoXILEnFSWWqgmj2pS4B">今日：-</span>
           <span id="search-count-label" class="muted" title="今日联网搜索次数（web_search / web_fetch）" data-page-node-id="OLNka4FykNQRaxEpBoEK6t">搜索：-</span>
         </div>
@@ -412,6 +419,7 @@
   <script type="module" src="/pages/snowluma.js"></script>
   <!-- 设置域（第二轮拆出；app.js 的 loadSettings/bindSettingsEvents/saveConfig 链全靠它们） -->
   <script type="module" src="/pages/settings-appearance.js"></script>
+  <script type="module" src="/pages/settings-mood.js"></script>
   <script type="module" src="/pages/settings.js"></script>
   <script type="module" src="/pages/settings-voice.js"></script>
   <script type="module" src="/pages/key-toggles.js"></script>

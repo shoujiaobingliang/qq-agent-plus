@@ -319,6 +319,41 @@ export const DEFAULT_CONFIG = {
   // personaSpeechCutoffs 是按会话覆盖（一般不用；留给按群人设分别换卡的场景）。
   personaSpeechCutoffAt: 0,
   personaSpeechCutoffs: {},
+  // 心情与精力（全局一份）：模型评审 + 客观事件；精力影响回复/主动频率，心情影响语气。
+  // 运行时当前值不在这里 —— 它们是 data/mood.json 里的运行状态，这里只放策略。
+  mood: {
+    enabled: true,
+    baseline: { mood: 55, energy: 55 },
+    frequencyInfluence: 0.2,   // 0-0.5：精力对回复/主动概率的最大偏移
+    toneInfluence: 0.6,        // 0-1：心情对语气提示的强度
+    decayHalfLifeHours: 12,    // 1-168：向 baseline 回归的半衰期
+    followUpMinEnergy: 25,     // 低于此值不安排补话
+    historyLimit: 200,         // 20-1000
+    dailyKeepDays: 90,         // 7-365
+    // 心情变化由一个小模型每轮评审决定；provider/model 留空 = 跟随聊天模型。
+    judge: {
+      enabled: true,
+      provider: '',
+      model: '',
+      maxCallsPerDay: 100,
+      timeoutMs: 8000,
+      maxInputChars: 6000
+    },
+    // 休息：模型在心情/精力低时可调用 take_break。
+    // sleep = 硬暂停（消息全都不处理，醒来补）；slack = 软暂停（选择性回复，不主动开话题）。
+    rest: {
+      enabled: true,
+      sleepMinutes: 90,
+      slackMinutes: 30,
+      sleepMoodGain: 12,
+      sleepEnergyGain: 20,
+      slackMoodGain: 6,
+      slackEnergyGain: 8,
+      maxMoodForRest: 45,
+      maxEnergyForRest: 40,
+      slackReplyFactor: 0.35
+    }
+  },
   // 接入白名单
   allow: { groups: [], private: [] },
   deny: { groups: [], private: [] },
@@ -1867,6 +1902,69 @@ export function updateConfig(patch) {
     ? 'FULL'
     : 'NORMAL';
   next.timeControl = normalizeTimeControl(next.timeControl);
+  // 心情配置：数值一律夹到安全区间，坏值回退默认；enabled 只有显式 false 才关闭。
+  {
+    const moodCfg = next.mood && typeof next.mood === 'object' && !Array.isArray(next.mood) ? next.mood : {};
+    const moodBase = moodCfg.baseline && typeof moodCfg.baseline === 'object' && !Array.isArray(moodCfg.baseline)
+      ? moodCfg.baseline
+      : {};
+    const score = (value, fallback) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : fallback;
+    };
+    const bounded = (value, fallback, min, max) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const defaults = DEFAULT_CONFIG.mood;
+    const judgeCfg = moodCfg.judge && typeof moodCfg.judge === 'object' && !Array.isArray(moodCfg.judge)
+      ? moodCfg.judge
+      : {};
+    const restCfg = moodCfg.rest && typeof moodCfg.rest === 'object' && !Array.isArray(moodCfg.rest)
+      ? moodCfg.rest
+      : {};
+    next.mood = {
+      enabled: moodCfg.enabled !== false,
+      baseline: {
+        mood: score(moodBase.mood, defaults.baseline.mood),
+        energy: score(moodBase.energy, defaults.baseline.energy)
+      },
+      frequencyInfluence: bounded(moodCfg.frequencyInfluence, defaults.frequencyInfluence, 0, 0.5),
+      toneInfluence: bounded(moodCfg.toneInfluence, defaults.toneInfluence, 0, 1),
+      decayHalfLifeHours: bounded(moodCfg.decayHalfLifeHours, defaults.decayHalfLifeHours, 1, 168),
+      followUpMinEnergy: score(moodCfg.followUpMinEnergy, defaults.followUpMinEnergy),
+      historyLimit: Math.round(bounded(moodCfg.historyLimit, defaults.historyLimit, 20, 1000)),
+      dailyKeepDays: Math.round(bounded(moodCfg.dailyKeepDays, defaults.dailyKeepDays, 7, 365)),
+      judge: {
+        enabled: judgeCfg.enabled !== false,
+        provider: String(judgeCfg.provider || '').trim(),
+        model: String(judgeCfg.model || '').trim(),
+        maxCallsPerDay: Math.round(bounded(
+          judgeCfg.maxCallsPerDay, defaults.judge.maxCallsPerDay, 0, 1000
+        )),
+        timeoutMs: Math.round(bounded(judgeCfg.timeoutMs, defaults.judge.timeoutMs, 500, 60000)),
+        maxInputChars: Math.round(bounded(
+          judgeCfg.maxInputChars, defaults.judge.maxInputChars, 1000, 20000
+        ))
+      },
+      rest: {
+        enabled: restCfg.enabled !== false,
+        sleepMinutes: Math.round(bounded(
+          restCfg.sleepMinutes, defaults.rest.sleepMinutes, 30, 180
+        )),
+        slackMinutes: Math.round(bounded(
+          restCfg.slackMinutes, defaults.rest.slackMinutes, 10, 60
+        )),
+        sleepMoodGain: bounded(restCfg.sleepMoodGain, defaults.rest.sleepMoodGain, 0, 50),
+        sleepEnergyGain: bounded(restCfg.sleepEnergyGain, defaults.rest.sleepEnergyGain, 0, 50),
+        slackMoodGain: bounded(restCfg.slackMoodGain, defaults.rest.slackMoodGain, 0, 50),
+        slackEnergyGain: bounded(restCfg.slackEnergyGain, defaults.rest.slackEnergyGain, 0, 50),
+        maxMoodForRest: score(restCfg.maxMoodForRest, defaults.rest.maxMoodForRest),
+        maxEnergyForRest: score(restCfg.maxEnergyForRest, defaults.rest.maxEnergyForRest),
+        slackReplyFactor: bounded(restCfg.slackReplyFactor, defaults.rest.slackReplyFactor, 0.05, 1)
+      }
+    };
+  }
   next.dailyMoments.scheduleWindows = normalizeMomentWindows(next.dailyMoments.scheduleWindows);
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
   if (!['legacy', 'threaded', 'lifecycle'].includes(next.conversation?.mode)) {

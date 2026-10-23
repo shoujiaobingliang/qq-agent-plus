@@ -5129,6 +5129,47 @@ html[data-motion='off'] .chat-item.leaving { animation: none; }
 }
 .plugin-index-foot code { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--muted); }
 
+/* ── 顶部心情条：文案 + 两条 4px mini bar；宽度很窄时整块隐藏，不挤压 OneBot/模型状态 ── */
+.top-mood { display: inline-flex; align-items: center; gap: 6px; }
+.top-mood[hidden] { display: none; }
+.top-mood.is-resting #mood-text { color: var(--accent); }
+.top-mood-bars { display: inline-flex; align-items: center; gap: 4px; }
+.top-meter { display: block; width: 34px; height: 4px; margin-top: 0; }
+.top-meter .meter-fill { display: block; }
+.top-meter.is-energy .meter-fill { background: var(--green); }
+@media (max-width: 900px) {
+  .top-mood { display: none; }
+}
+
+/* ── 设置页·心情分区 ── */
+.mood-panel {
+  margin: 10px 0 16px; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-2);
+}
+.mood-current { display: flex; flex-direction: column; gap: 9px; }
+.mood-rest {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-top: 10px; padding: 8px 10px; border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid var(--accent-border); font-size: var(--fs-sm);
+}
+.mood-line { display: flex; flex-direction: column; gap: 5px; font-size: var(--fs-sm); color: var(--muted); }
+.mood-line .meter { margin-top: 0; }
+.mood-line .meter.is-energy .meter-fill { background: var(--green); }
+.mood-history, .mood-daily { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.mood-history > b, .mood-daily > b { display: block; margin-bottom: 5px; font-size: var(--fs-sm); color: var(--text); }
+.mood-history-row, .mood-day-row {
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  padding: 3px 0; font-size: var(--fs-2xs); color: var(--faint);
+}
+.mood-history-row .mood-delta { font-family: var(--mono); color: var(--muted); }
+.mood-form h4 { margin: 14px 0 7px; font-size: var(--fs-sm); color: var(--muted); }
+.mood-form .gm-row { flex-wrap: wrap; }
+.mood-form label { font-size: var(--fs-sm); color: var(--muted); }
+.mood-form input[type="number"] { width: 92px; margin-left: 6px; }
+.mood-form .tier-slider { width: 100%; margin: 5px 0 11px; }
+.mood-form .slider-now { font-family: var(--mono); color: var(--accent); }
+
 /* ── 索引来源管理（自定义市场源）──
    内联面板而不是弹窗：它属于「这份目录从哪来」的一部分，展开后仍能看到下面的插件列表。 */
 .plugin-source-manage { margin-top: 7px; }

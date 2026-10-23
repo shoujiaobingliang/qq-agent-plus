@@ -35,6 +35,7 @@ import { bindAppearanceControls, renderAppearanceBlock } from './settings-appear
 import { loadSessions } from './sessions.js';
 import { bindCrossSectionControls, bindSettingsEvents, isSplitThinking } from './settings-bind.js';
 import { renderAsrSection } from './settings-voice.js';
+import { renderMoodSection } from './settings-mood.js';
 import { refreshAutoUpdateStatus, timeControlTargetOptions } from './status.js';
 import { loadUsageView } from './usage.js';
 /** 把设置解析成实际要应用的主题名。 */
@@ -70,7 +71,7 @@ function renderSettingsSidebar() {
   // 系统"五组归位，每组一个小标题。分组只影响侧栏观感，分区 id 与行为一个都没动
   // （ui-smoke 断言 .settings-menu-item[data-section=...] 仍在，锚点不受影响）。
   const menu = [
-    ['对话与人格', [['persona', '人设'], ['chat', '聊天设置'], ['messageTypes', '消息类型'], ['allow', '聊天白名单'], ['memory', '记忆']]],
+    ['对话与人格', [['persona', '人设'], ['mood', '心情'], ['chat', '聊天设置'], ['messageTypes', '消息类型'], ['allow', '聊天白名单'], ['memory', '记忆']]],
     ['模型与服务', [['api', '模型 API'], ['search', '搜索服务'], ['asr', '语音转文字'], ['token-saver', '省 Token']]],
     ['自动行为', [['moments', '每日动态'], ['qzone-interactions', '动态互动'], ['reminders', '定时提醒'], ['groupGame', '群游戏'], ['time-control', '时间控制'], ['experiments', '实验功能']]],
     ['平台', [['platform', '平台能力'], ['onebot', 'OneBot']]],
@@ -198,6 +199,7 @@ function renderSettingsSection(c) {
     'time-control': () => renderTimeControlSection(c),
     'token-saver': () => renderTokenSaverSection(c),
     persona: () => renderPersonaSection(c),
+    mood: () => renderMoodSection(c),
     allow: () => renderAllowSection(c),
     chat: () => renderChatSection(c),
     messageTypes: () => renderMessageTypesSection(c),

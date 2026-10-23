@@ -76,6 +76,26 @@ function loadPage() {
     if (urlStr.includes('/api/usage/stats')) {
       return { ok: true, status: 200, json: async () => usageStatsStub };
     }
+    if (urlStr.includes('/api/status')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          onebot: { connected: false, everConnected: false },
+          orchestrator: {
+            model: 'mock',
+            mode: 'observe',
+            mood: {
+              enabled: true, mood: 62, energy: 48,
+              moodLabel: '开心', energyLabel: '正常',
+              lastChange: { reason: '收到正向互动' }
+            }
+          },
+          usage: { runs: 0, totalTokens: 0 },
+          cost: {}
+        })
+      };
+    }
     return {
       ok: true,
       status: 200,
@@ -131,6 +151,29 @@ test('插件页骨架：标签分面在左栏里、且真的渲染出来', { ski
     assert.ok(doc.querySelector('[data-plugin-action="manage-sources"]'), '目录面要有「管理来源」入口');
     assert.ok(doc.getElementById('plugins-sources-panel'), '来源管理面板要渲染进骨架');
     assert.deepEqual(errors, [], `切到插件页出现未捕获错误：${errors.join(' | ')}`);
+  } finally { window.happyDOM?.abort?.(); }
+});
+
+test('顶部心情条：/api/status 的 mood 落到文案与两条进度条', { skip: SKIP }, async () => {
+  const { window, errors } = loadPage();
+  try {
+    await settle(60);
+    await window.refreshStatus();
+    const doc = window.document;
+    const box = doc.getElementById('mood-label');
+    assert.ok(box, '顶栏要有 #mood-label');
+    assert.equal(box.hidden, false, '有心情数据时不应隐藏');
+    assert.match(String(doc.getElementById('mood-text')?.textContent || ''), /心情：开心 · 精力：正常/);
+    assert.equal(doc.getElementById('mood-fill')?.style.width, '62%');
+    assert.equal(doc.getElementById('energy-fill')?.style.width, '48%');
+    assert.match(String(box.title || ''), /最近：收到正向互动/);
+    assert.equal(typeof window.updateMoodStatus, 'function', '顶部心情条更新函数应对 UI 可见');
+    window.updateMoodStatus({
+      enabled: true, mood: 30, energy: 20, moodLabel: '低落', energyLabel: '没精神',
+      rest: { active: true, kind: 'sleep', remainingMinutes: 25 }, lastChange: null
+    });
+    assert.match(String(doc.getElementById('mood-text')?.textContent || ''), /睡觉中 · 还剩 25 分钟/);
+    assert.deepEqual(errors, [], `心情条更新出现未捕获错误：${errors.join(' | ')}`);
   } finally { window.happyDOM?.abort?.(); }
 });
 

@@ -25,6 +25,8 @@ import {
   updateConfig
 } from './config.js';
 import { cappedByTokenSaver, effectiveRunLimits, tokenSaverCapsOf } from './token-saver.js';
+import { MoodManager } from './mood-manager.js';
+import { buildMoodJudgeMessages, parseMoodJudgeOutput } from '../llm/mood-judge-prompt.js';
 import { redactText } from './redact.js';
 // ── 主动开话题的时间段：窗口外不主动开口（聊天回复不受影响）──
 
@@ -52,11 +54,13 @@ function readProactiveLastAttempt() {
  */
 export function followUpPlan({
   sentCount = 0, unread = 0, lastFollowUpAt = 0, hasScheduledWake = false,
-  windowActive = true, followUpEnabled = true, now = Date.now(), random = Math.random
+  windowActive = true, followUpEnabled = true, energy = 50, minEnergy = 25,
+  now = Date.now(), random = Math.random
 } = {}) {
   if (!followUpEnabled) return { schedule: false, reason: '补话开关已关闭' };
   if (!sentCount) return { schedule: false, reason: '本轮没发言' };
   if (unread > 0) return { schedule: false, reason: '有人刚说话，走正常回复' };
+  if (Number(energy) < Number(minEnergy)) return { schedule: false, reason: '精力不足' };
   if (hasScheduledWake) return { schedule: false, reason: '已有唤醒安排' };
   if (!windowActive) return { schedule: false, reason: '不在可主动发言的时段' };
   if (now - Number(lastFollowUpAt || 0) < 20 * 60 * 1000) return { schedule: false, reason: '20 分钟内已经给过机会' };
@@ -445,7 +449,9 @@ export class Orchestrator {
     random = Math.random,
     getIdentityPilot = null,
     getIncidentPilot = null,
-    getPlugins = null
+    getPlugins = null,
+    mood = null,
+    judgeMood = false
   }) {
     this.store = store;
     this.memory = memory;
@@ -462,6 +468,14 @@ export class Orchestrator {
       ? getIncidentPilot
       : (() => null);
     this.emit = typeof emit === 'function' ? emit : ((b) => b.emit.bind(b))(createEventBus());
+    // 心情状态：全局一份，规则驱动；不传时用默认落盘实现（测试可注入假实现）。
+    this.mood = mood && typeof mood === 'object' ? mood : new MoodManager({ dataDir: DATA_DIR, log });
+    // 模型评审默认关闭，由 app.js 显式打开：测试/脚本构造编排器时不会偷偷多发模型请求。
+    this.moodJudgeEnabled = judgeMood === true;
+    this.moodEmitAt = 0;
+    this.moodJudgeDayKey = '';
+    this.moodJudgeCallsToday = 0;
+    this.moodJudgedIds = new Set();
     this.toolDefs = buildToolDefs();
     // 人设初始化轮正在生成中的 hash：启动与配置保存可能同时触发，避免重复外呼。
     this.personaIntroInFlight = new Set();
@@ -499,6 +513,7 @@ export class Orchestrator {
     // 模型自己安排的「稍后主动发言」：chatKey -> { at, note, timer }
     this.scheduledWakes = new Map();
     this.scheduledWakeTicker = null;
+    this.restTimer = null;
     this.aborted = false;
   }
 
@@ -506,6 +521,109 @@ export class Orchestrator {
     const key = String(reason || 'background-task');
     if (suppressed) this.proactiveSuppressions.add(key);
     else this.proactiveSuppressions.delete(key);
+  }
+
+  /**
+   * 心情评审：每轮机器人参与的对话结束后异步调用一次小模型。
+   * 不阻塞回复；失败/超时/超每日上限只记日志，本轮不加不减。
+   */
+  async #judgeMoodTurn({ chatKey, triggerEntries, session, manual }) {
+    if (!this.moodJudgeEnabled || manual || this.aborted || this.mood?.sleeping?.()) return;
+    const cfg = getConfig();
+    if (cfg.mood?.enabled === false || cfg.mood?.judge?.enabled === false) return;
+    const entries = Array.isArray(triggerEntries) ? triggerEntries : [];
+    if (!entries.length) return;
+    const selfId = String(cfg.onebot?.selfId || this.onebot?.selfId || '');
+    const incoming = entries
+      .filter((item) => item && (!selfId || String(item.senderId || '') !== selfId))
+      .map((item) => ({
+        id: String(item.id ?? item.mid ?? ''),
+        senderName: item.senderName || '',
+        text: item.text || ''
+      }))
+      .filter((item) => item.text && (!item.id || !this.moodJudgedIds.has(item.id)));
+    if (!incoming.length) return;
+    const sent = (Array.isArray(session?.sent) ? session.sent : [])
+      .map((item) => String(item?.text || ''))
+      .filter(Boolean);
+    const persona = resolvePersona(cfg, chatKey);
+    const botName = persona.selfNickname || persona.botName || this.onebot?.selfNickname || '机器人';
+    const messages = buildMoodJudgeMessages({
+      botName,
+      personaExcerpt: String(persona.roleText || '').slice(0, 500),
+      incoming,
+      sent,
+      outcome: sent.length ? `角色回复了 ${sent.length} 条` : '角色选择了不回复',
+      maxInputChars: Math.max(1000, Number(cfg.mood?.judge?.maxInputChars) || 6000)
+    });
+    const response = await this.#moodJudgeChat(messages);
+    if (!response) return;
+    const decision = parseMoodJudgeOutput(responseText(response));
+    if (!decision) {
+      log.warn('[mood] 评审输出无法解析，本轮跳过');
+      return;
+    }
+    // 解析成功才把这些消息记为“已评审”：失败/超时下轮仍可重试，但重试批次不会重复计分。
+    for (const item of incoming) {
+      if (item.id) this.moodJudgedIds.add(item.id);
+    }
+    if (this.moodJudgedIds.size > 1000) this.moodJudgedIds.clear();
+    log.debug(`[mood] 模型判断：心情 ${decision.moodDelta}、精力 ${decision.energyDelta}（${decision.reason}）`);
+    this.#emitMood(this.mood.applyJudge(decision));
+  }
+
+  /** 评审模型调用：默认跟随聊天模型，可用 mood.judge.provider/model 指向专用小模型。 */
+  async #moodJudgeChat(messages) {
+    const cfg = getConfig();
+    const judge = cfg.mood?.judge || {};
+    const day = todayKey();
+    if (this.moodJudgeDayKey !== day) {
+      this.moodJudgeDayKey = day;
+      this.moodJudgeCallsToday = 0;
+    }
+    const maxCalls = judge.maxCallsPerDay === undefined
+      ? 100
+      : Math.max(0, Number(judge.maxCallsPerDay) || 0);
+    if (maxCalls <= 0 || this.moodJudgeCallsToday >= maxCalls) return null;
+    const budget = budgetStatus(cfg, this.sessions?.todayUsage?.(day) || {});
+    if (budget.enabled && budget.exceeded) return null;
+    let model = String(judge.model || cfg.api?.model || '').trim();
+    if (!model) return null;
+    let overrides = null;
+    if (judge.provider) {
+      const p = currentProviders().find((item) => item.id === judge.provider);
+      if (!p?.baseURL || !judge.model) return null;
+      overrides = {
+        baseUrl: p.baseURL,
+        apiKey: p.apiKey,
+        model: judge.model,
+        timeoutMs: Math.max(500, Number(judge.timeoutMs) || 8000)
+      };
+      model = judge.model;
+    }
+    const timeoutSignal = AbortSignal.timeout(Math.max(500, Number(judge.timeoutMs) || 8000));
+    this.moodJudgeCallsToday += 1;
+    const response = await chatCompletion({
+      messages,
+      temperature: 0,
+      purpose: 'judge',
+      maxTokens: 200,
+      signal: timeoutSignal,
+      ...(overrides ? { overrides } : {})
+    });
+    this.#recordExternalUsage(response, model);
+    return response;
+  }
+
+  /** 心情变化广播：2 秒节流，顶部栏仍有 /api/status 轮询兜底。 */
+  #emitMood(snapshot) {
+    if (!snapshot) return;
+    const now = Date.now();
+    if (now - this.moodEmitAt < 2000) return;
+    this.moodEmitAt = now;
+    try { this.emit('mood-update', snapshot); } catch (error) {
+      log.warn('[mood] 广播失败：', error?.message ?? error);
+    }
   }
 
   #chatRuntimeDecision(chatKey) {
@@ -708,6 +826,7 @@ export class Orchestrator {
             || this.store.hasLeasedRun(key)
             || !this.#chatRuntimeDecision(key).allowed
             || this.store.unreadCount(key) <= 0) continue;
+          if (this.mood?.sleeping?.()) continue;
           if (this.#budgetWouldDrop(key)) continue;
           this.scheduleWake(key);
         }
@@ -729,9 +848,15 @@ export class Orchestrator {
     try {
       const cfgNow = getConfig();
       const window = proactiveWindowState(cfgNow.proactive?.activeHours, Date.now());
+      const sentCount = Array.isArray(session?.sent) ? session.sent.length : 0;
+      const unread = this.store.unreadCount(chatKey);
+      const moodState = this.mood.snapshot?.();
+      const energyRaw = moodState?.enabled === false ? 50 : Number(moodState?.energy);
       const plan = followUpPlan({
-        sentCount: Array.isArray(session?.sent) ? session.sent.length : 0,
-        unread: this.store.unreadCount(chatKey),
+        sentCount,
+        unread,
+        energy: Number.isFinite(energyRaw) ? energyRaw : 50,
+        minEnergy: cfgNow.mood?.followUpMinEnergy ?? 25,
         lastFollowUpAt: this.followUpAt?.get(chatKey) || 0,
         hasScheduledWake: this.scheduledWakes?.has(chatKey) === true,
         windowActive: window.active === true,
@@ -740,6 +865,7 @@ export class Orchestrator {
       });
       if (!plan.schedule) {
         if (plan.reason === '补话开关已关闭') log.info(`[follow-up] ${chatKey} 跳过：补话开关已关闭`);
+        else if (plan.reason === '精力不足') log.info(`[follow-up] ${chatKey} 跳过：精力不足`);
         return;
       }
       if (!this.followUpAt) this.followUpAt = new Map();
@@ -754,6 +880,8 @@ export class Orchestrator {
   /** 收到新消息（已通过白名单校验并写入 store）。 */
   onIncoming(chatKey) {
     if (this.paused || this.aborted || !canRun(chatKey)) return;
+    // 睡觉是硬暂停：消息照常入库，但不建唤醒；醒来后由 rest ticker 统一补。
+    if (this.mood?.sleeping?.()) return;
     if (!this.#chatRuntimeDecision(chatKey).allowed) return;
     if (this.runningChats.has(chatKey)) return;   // 运行结束后 drain 会接管
     // 自主节奏：不即时唤醒，攒着等"自己安排的醒来"统一处理；被 @ 时例外
@@ -844,7 +972,8 @@ export class Orchestrator {
       botName: persona.botName || '',
       selfId: cfg.onebot?.selfId || this.onebot.selfId || '',
       cfg: storeConfigForChat(chatKey),  // 按会话取档位：统一开关关闭时各群可以有独立滑条
-      roll                                // 传入已固定的骰子：预判与实跑必须用同一次
+      roll,                               // 传入已固定的骰子：预判与实跑必须用同一次
+      probabilityMultiplier: this.mood.frequencyFactor()   // 精力只缩放宽/松概率档
     });
     // 没有未读就不算"需要响应"（防抖窗口刚建立时的空转）
     if (entries.length === 0) {
@@ -1047,6 +1176,8 @@ export class Orchestrator {
 
   scheduleWake(chatKey, delay = null) {
     if (this.paused || this.aborted || !canRun(chatKey)) return;
+    // 睡觉期间不建新唤醒；醒来后 rest ticker 会统一重排未读。
+    if (this.mood?.sleeping?.()) return;
     if (!this.#chatRuntimeDecision(chatKey).allowed) return;
     const now = Date.now();
     if (!this.firstPendingAt.has(chatKey)) this.firstPendingAt.set(chatKey, now);
@@ -1276,6 +1407,10 @@ export class Orchestrator {
    * 这次把 add 之前的这一段也圈进来（2026-10-08 审查）。
    */
   #wakePreflight(chatKey, waitingSessionId) {
+    if (this.mood?.sleeping?.()) {
+      if (waitingSessionId) this.#discardWaiting(waitingSessionId);
+      return false;
+    }
     if (!canRun(chatKey)) { if (waitingSessionId) this.#discardWaiting(waitingSessionId); return false; }
     if (!this.#chatRuntimeDecision(chatKey).allowed) {
       if (waitingSessionId) this.#discardWaiting(waitingSessionId);
@@ -1428,7 +1563,9 @@ export class Orchestrator {
           persona: resolvePersona(cfgNow, chatKey)
         });
         const minConfidence = Number(att.minConfidence);
-        const confident = Number.isFinite(minConfidence) ? minConfidence : 0.55;
+        const confident = this.mood.attentionMinConfidence(
+          Number.isFinite(minConfidence) ? minConfidence : 0.55
+        );
         if (decision && attentionShouldReply(decision, confident)) {
           tierResult = {
             ...tierResult0,
@@ -1514,7 +1651,8 @@ export class Orchestrator {
       selfNickname: resolvePersona(cfgNow, chatKey).selfNickname || this.onebot.selfNickname || '',
       botName: resolvePersona(cfgNow, chatKey).botName || '',
       selfId: cfgNow.onebot?.selfId || this.onebot.selfId || '',
-      cfg: storeConfigForChat(chatKey)   // 与 #predictTier 同一来源，保证预判/实跑一致
+      cfg: storeConfigForChat(chatKey),  // 与 #predictTier 同一来源，保证预判/实跑一致
+      probabilityMultiplier: this.mood.frequencyFactor()
     });
     } catch (error) {
       // 前置区答案：会话落终态（否则永远等待中），原样上抛让调用方照旧记日志/告警。
@@ -1626,9 +1764,19 @@ export class Orchestrator {
       // 各端未读数不再堆积；默认关是因为它会改变"你自己打开机器人 QQ 时的未读观感"。
       if (getConfig().platform?.readReceipts === true) this.#markBatchRead(chatKey, triggerEntries);
       const status = session.sent.length > 0 ? 'done' : 'noreply';
+      if (session.sent.length > 0) {
+        try { this.#emitMood(this.mood.observeReplied()); } catch (error) {
+          log.warn('[mood] 成功回复记录失败：', error?.message ?? error);
+        }
+      }
       this.sessions.finish(session.id, status);
       this.emit('session-end', { sessionId: session.id, chatKey, status,
         sent: session.sent.length, finishReason: session.finishReason, usage: session.usage });
+      // 心情评审：异步跑，不阻塞本轮结束；失败/超时只记日志。
+      if (!manual) {
+        void this.#judgeMoodTurn({ chatKey, triggerEntries, session, manual })
+          .catch((error) => log.warn('[mood] 评审失败：', error?.message ?? error));
+      }
       // 主动好友候选已整体退役（Issue #10，见 docs/KNOWN-ISSUES.md）：
       // 不再把成功回合喂给身份试点的提案管线，否则每个回合都会白烧一次模型评估、
       // 建出永远不会被派发的提案、还给管理员发一条"回复同意好友"的死信。
@@ -2128,6 +2276,9 @@ export class Orchestrator {
       // 只在开启时教"主持小游戏"，工具表却恒在，模型仍会去调一个必然报错的工具
       //（group-game.js 对 enabled=false 直接拒），白花一轮（2026-10-10 审查 D3）。
       if (cfg.groupGame?.enabled !== true && d.name === 'group_game') return false;
+      // 心情休息：关掉心情或休息开关时，工具与提示词一起撤。
+      if ((cfg.mood?.enabled === false || cfg.mood?.rest?.enabled === false)
+        && d.name === 'take_break') return false;
       // ASR 按量计费：开关关掉或没配 key 就不注入，避免模型调用必失败；也防误配置导致意外计费
       if (!asrEnabled && d.name === 'get_message_audio') return false;
       // 生图的唯一发送路径是"进表情库 → send_sticker"；表情包功能关掉时那条路也没了，
@@ -2248,6 +2399,8 @@ export class Orchestrator {
       slangContext,
       incidentContext,
       selfNickname,
+      // 当前心情/精力：只进 user prompt（不碰 system/persona 的 prefix hash）
+      mood: this.mood.promptSnapshot(),
       // 按群人设：点名标签与"刚换过卡"的提醒都用这个群生效的那份
       botName: persona.botName,
       personaChangedAt: Number(persona.changedAt) || 0,
@@ -2371,6 +2524,19 @@ export class Orchestrator {
       identityPilot,
       stickers: this.stickers,
       sender: this.sender,
+      // 心情休息：take_break 工具通过它进入睡觉/摸鱼。
+      mood: this.mood,
+      // 睡前可选：私聊管理员一句短话（只给 take_break 用，不暴露成通用工具）。
+      notifyAdmin: async (text) => {
+        const owner = readOwnerUin(getConfig());
+        if (!/^\d{5,15}$/.test(owner)) throw new Error('未配置管理员 QQ');
+        const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        if (!body) throw new Error('消息为空');
+        const result = await this.sender.sendTextBatch(`private:${owner}`, [body], {});
+        const failure = Array.isArray(result?.failed) ? result.failed[0] : null;
+        if (failure) throw new Error(failure.error || '发送失败');
+        return { ok: true };
+      },
       session,
       signal,
       emit: (type, payload) => this.emit(type, payload),
@@ -2726,7 +2892,65 @@ export class Orchestrator {
     if (this.scheduledWakeTicker.unref) this.scheduledWakeTicker.unref();
   }
 
+  /**
+   * 休息 ticker：每 30 秒检查一次到期的睡觉/摸鱼。自然到期就结算恢复、广播，
+   * 然后补处理睡觉期间积压的未读与到点的提醒/自安排唤醒。
+   */
+  startRestTicker() {
+    if (this.restTimer) return;
+    this.restTimer = setInterval(() => {
+      try { this.#tickRest(); } catch (error) {
+        log.error('[mood] 休息调度出错（不影响下一轮）:', error?.message ?? error);
+      }
+    }, 30000);
+    this.restTimer.unref?.();
+    this.#tickRest();
+  }
+
+  #tickRest() {
+    const result = this.mood?.finishDueRest?.();
+    if (!result?.finished) return;
+    this.#emitMood(result.snapshot);
+    log.info(`[mood] ${result.kind === 'slack' ? '摸鱼' : '睡觉'}结束，恢复处理消息`);
+    this.#drainAfterRest();
+    // 睡觉期间没派发的提醒与自安排唤醒，醒来后再走一次。
+    try { this.fireDueScheduledWakes(); } catch (error) {
+      log.warn('[mood] 休息结束后派发自安排唤醒失败：', error?.message ?? error);
+    }
+    try { this.fireDueReminders(); } catch (error) {
+      log.warn('[mood] 休息结束后派发提醒失败：', error?.message ?? error);
+    }
+  }
+
+  /** 休息结束后补处理积压：只负责重排未读，真正的回复仍走正常 wake 链路。 */
+  #drainAfterRest() {
+    let chats = [];
+    try { chats = this.store.listChats(); } catch { return; }
+    for (const chatKey of chats) {
+      try {
+        if (this.store.unreadCount(chatKey) <= 0) continue;
+        if (!canRun(chatKey) || this.runningChats.has(chatKey) || this.pendingWake.has(chatKey)) continue;
+        if (!this.#chatRuntimeDecision(chatKey).allowed) continue;
+        this.scheduleWake(chatKey);
+      } catch { /* 单个会话出错不影响其它会话补课 */ }
+    }
+  }
+
+  /** 管理员强制叫醒/结束摸鱼：按已休息比例结算恢复，然后补处理积压。 */
+  wakeFromRest() {
+    const result = this.mood?.wakeFromRest?.();
+    if (result?.finished) {
+      this.#emitMood(result.snapshot);
+      this.#drainAfterRest();
+      try { this.fireDueScheduledWakes(); } catch { /* 忽略 */ }
+      try { this.fireDueReminders(); } catch { /* 忽略 */ }
+    }
+    return result?.snapshot || this.moodSnapshot();
+  }
+
   fireDueScheduledWakes() {
+    // 睡觉硬暂停：安排原样留在表里，醒来后 rest ticker 再统一派发（留言不丢）。
+    if (this.mood?.sleeping?.()) return;
     const now = Date.now();
     const cfgNow = getConfig();
     for (const [chatKey, item] of [...this.scheduledWakes.entries()]) {
@@ -2784,6 +3008,13 @@ export class Orchestrator {
         this.scheduledWakes.set(chatKey, { ...item, at: Date.now() + WAKE_RETRY_MS, timer });
         continue;
       }
+      // 到点仍没人接、且这次补话真的要兑现，才算“被无视”：扣一点心情/精力。
+      // 私聊不记（对话自然结束很常见）；顺延/阻塞/窗口外都不扣，避免把正常节奏当成冷落。
+      if (kind === 'followUp') {
+        try { this.#emitMood(this.mood.observeIgnored(chatKey)); } catch (error) {
+          log.warn('[mood] 被无视记录失败：', error?.message ?? error);
+        }
+      }
       this.wake(chatKey, item.paced
         ? { manual: true, paced: true, wakeNote: item.note }
         : { proactive: true, wakeNote: item.note })
@@ -2798,6 +3029,7 @@ export class Orchestrator {
    */
   #wakeBlockedNow(chatKey, cfg = getConfig()) {
     if (this.aborted || this.paused) return true;
+    if (this.mood?.sleeping?.()) return true;
     if (this.runningChats.has(chatKey)) return true;
     if (!this.#chatRuntimeDecision(chatKey).allowed) return true;
     if (!String(cfg.api?.model || '').trim()) return true;
@@ -2814,6 +3046,8 @@ export class Orchestrator {
 
   /** 安排一次稍后的主动发言（模型调用 schedule_wake / 补话 / 自主节奏唤醒共用）。 */
   scheduleInitiativeWake(chatKey, delayMs, note = '', { paced = false, kind = '', noteLimit = 200 } = {}) {
+    // 睡觉期间不安排主动开口（含补话、自安排唤醒、提醒派发）；摸鱼仍允许提醒等硬承诺。
+    if (this.mood?.sleeping?.()) return 0;
     const minMs = 60 * 1000;
     const maxMs = 4 * 60 * 60 * 1000;
     const wait = Math.max(minMs, Math.min(Number(delayMs) || minMs, maxMs));
@@ -2846,6 +3080,8 @@ export class Orchestrator {
 
   fireDueReminders() {
     if (!this.reminders) return;
+    // 睡觉硬暂停：提醒保留 pending，醒来后 rest ticker 再派发。
+    if (this.mood?.sleeping?.()) return;
     // 控制台开关（设置 → 定时提醒）：关掉后不派发，已存数据保留，重新打开继续用
     if (getConfig().reminders?.enabled === false) return;
     const now = Date.now();
@@ -2935,19 +3171,22 @@ export class Orchestrator {
       const cfg = getConfig();
       const nowTick = Date.now();
       const window = proactiveWindowState(cfg.proactive?.activeHours, nowTick);
+      const intervalFactor = this.mood.proactiveIntervalFactor();
       // 窗口外：下一次直接排到窗口开始，不白白消耗一个间隔
       const next = window.active
-        ? randInt(
+        ? Math.max(60000, Math.round(randInt(
           Math.max(60000, Number(cfg.proactive?.checkIntervalMinMs) || 1800000),
           Math.max(120000, Number(cfg.proactive?.checkIntervalMaxMs) || 5400000)
-        )
+        ) * intervalFactor))
         : Math.max(60000, window.nextActiveAt - nowTick + 1000);
       this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, next);
       this.proactiveTimer.unref?.();
       if (this.aborted || this.paused || cfg.proactive?.enabled !== true) return;
+      // 睡觉/摸鱼期间不主动开话题；下一次 tick 已排好，休息结束后自然恢复。
+      if (this.mood?.resting?.()) return;
       if (!window.active) return;
       // 距上次判定不足一个间隔（例如刚重启过）就跳过：重启不额外换来一次开话题的机会
-      const minGapMs = Math.max(60000, Number(cfg.proactive?.checkIntervalMinMs) || 1800000);
+      const minGapMs = Math.max(60000, (Number(cfg.proactive?.checkIntervalMinMs) || 1800000) * intervalFactor);
       if (nowTick - readProactiveLastAttempt() < minGapMs * 0.8) {
         log.info('[proactive] 跳过：距上次判定不足一个间隔');
         return;
@@ -2960,7 +3199,7 @@ export class Orchestrator {
         log.info('[proactive] 跳过：并发任务已满');
         return;
       }
-      if (this.random() > proactiveProbability(cfg.proactive?.probability)) {
+      if (this.random() > this.mood.proactiveProbability(proactiveProbability(cfg.proactive?.probability))) {
         log.info('[proactive] 跳过：这次摇到了不发言');
         // 摇了不发言也算把这一轮用掉
         writeProactiveLastAttempt(nowTick);
@@ -3661,9 +3900,21 @@ export class Orchestrator {
     this.stopReminderLoop();
     if (this.scheduledWakeTicker) clearInterval(this.scheduledWakeTicker);
     this.scheduledWakeTicker = null;
+    if (this.restTimer) clearInterval(this.restTimer);
+    this.restTimer = null;
     for (const item of this.scheduledWakes.values()) item?.timer && clearTimeout(item.timer);
     this.scheduledWakes.clear();
     await Promise.allSettled([...this.runTasks]);
+  }
+
+  moodSnapshot() {
+    return this.mood?.snapshot?.() ?? null;
+  }
+
+  resetMood() {
+    const snapshot = this.mood?.reset?.() ?? null;
+    this.#emitMood(snapshot);
+    return snapshot;
   }
 
   statusSummary() {
@@ -3677,7 +3928,8 @@ export class Orchestrator {
       consolidating: [...this.consolidating],
       onebotConnected: this.onebot.connected,
       model: cfg.api.model,
-      maxConcurrentRuns: cfg.maxConcurrentRuns
+      maxConcurrentRuns: cfg.maxConcurrentRuns,
+      mood: this.moodSnapshot()
     };
   }
 }
