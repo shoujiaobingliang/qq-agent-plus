@@ -199,3 +199,15 @@ test('take_break：睡前可私聊管理员一句短话', async () => {
   assert.deepEqual(result.announcements, ['已私聊管理员']);
   assert.deepEqual(sent, ['我先去睡了，晚安']);
 });
+
+test('vice_persona：有资格时返回副人格文本，没资格时报错', async () => {
+  const ok = parse(await tool('vice_persona').execute({
+    viceReply: async () => '你急什么，先把话说明白',
+    viceMaxContext: 2000
+  }, { context: 'A：你真菜' }));
+  assert.equal(ok.text, '你急什么，先把话说明白');
+
+  const bad = await tool('vice_persona').execute({ viceReply: null }, { context: 'x' });
+  assert.equal(bad.isError, true);
+  assert.match(bad.content, /没有可用/);
+});

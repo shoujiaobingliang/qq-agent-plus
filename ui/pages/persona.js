@@ -455,6 +455,64 @@ function renderPersonaLibrary(c) {
     <span id="persona-pick-hint" class="muted" style="font-size: var(--fs-sm)"></span>`;
 }
 
+/** 副人格：主人设上的一个指针 + 同一块人设区域里的副人格卡。默认 tieba 是空白卡。 */
+function renderVicePersonaSection(c) {
+  const persona = c?.persona || {};
+  const primarySet = Boolean(
+    String(persona.roleText || '').trim()
+    || String(persona.templateId || '').trim()
+    || Object.values(c?.personaPerChat && typeof c.personaPerChat === 'object' ? c.personaPerChat : {})
+      .some((item) => item && typeof item === 'object'
+        && (String(item.roleText || '').trim() || String(item.templateId || '').trim()))
+  );
+  const cards = Array.isArray(persona.vicePersonas) ? persona.vicePersonas.map((item) => ({ ...item })) : [];
+  if (!cards.some((card) => card.id === 'tieba')) cards.unshift({ id: 'tieba', name: 'tieba', roleText: '' });
+  const selectedId = String(persona.vicePersonaId || 'tieba');
+  const selected = cards.find((card) => card.id === selectedId) || cards[0];
+  return `
+    <div class="persona-vice">
+      <div class="persona-lib-head"><span class="pl-title">副人格（可选）</span></div>
+      <div class="hint" style="margin:2px 0 8px">
+        主、副人设是两套独立角色，但都在人设这一块：主人设用右侧指针选择副人格卡。
+        调用时 subagent 只拿副人格卡正文和选中上下文，不拿主人设正文，发送仍由主模型完成。
+        默认卡 tieba 是空白卡，正文可在这里补齐；旧“毒舌/嘴臭”会映射到 tieba。
+      </div>
+      ${primarySet ? '' : '<div class="hint" style="color:var(--orange);margin-bottom:8px">先设置并保存主人格正文，才能配置副人格。</div>'}
+      <fieldset ${primarySet ? '' : 'disabled'} style="border:0;padding:0;margin:0;min-width:0">
+        <div class="gm-row">
+          <label>主人设指向的副人格
+            <select id="cfg-vice-persona-id">
+              ${cards.map((card) => `<option value="${esc(card.id)}"${card.id === selected.id ? ' selected' : ''}>${esc(card.name || card.id)}${card.id === 'tieba' ? '（默认）' : ''}</option>`).join('')}
+            </select>
+          </label>
+          <label>名称
+            <input type="text" id="cfg-vice-persona-name" maxlength="40" value="${esc(selected.name || selected.id)}" />
+          </label>
+        </div>
+        <div class="field">
+          <label>副人格正文（留空即空白卡）</label>
+          <textarea id="cfg-vice-persona-role" style="min-height:140px" placeholder="例如：一个嘴毒但有分寸的贴吧姐姐……">${esc(selected.roleText || '')}</textarea>
+        </div>
+      </fieldset>
+    </div>`;
+}
+
+function bindVicePersonaEvents() {
+  const select = $('#cfg-vice-persona-id');
+  if (!select) return;
+  select.addEventListener('change', () => {
+    const persona = state.config?.persona || {};
+    const cards = Array.isArray(persona.vicePersonas) ? persona.vicePersonas : [];
+    if (!cards.some((card) => card.id === 'tieba')) cards.unshift({ id: 'tieba', name: 'tieba', roleText: '' });
+    const card = cards.find((item) => item.id === select.value);
+    if (!card) return;
+    const nameInput = $('#cfg-vice-persona-name');
+    const roleInput = $('#cfg-vice-persona-role');
+    if (nameInput) nameInput.value = card.name || card.id;
+    if (roleInput) roleInput.value = card.roleText || '';
+  });
+}
+
 function renderPersonaSection(c) {
   const roleText = c.persona.roleText || '';
   refreshPersonaFold(roleText);
@@ -478,6 +536,7 @@ function renderPersonaSection(c) {
       </div>
     </div>
     ${renderPersonaLibrary(c)}
+    ${renderVicePersonaSection(c)}
     <div class="persona-detail">
       <div class="pd-head">
         <span class="pd-title" id="persona-view-title"></span>
@@ -645,7 +704,7 @@ async function runMaskOldSpeech({ flushDraft, confirm, button }) {
 }
 
 export {
-  applyPersonaDraft, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
+  applyPersonaDraft, bindVicePersonaEvents, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
   personaBaseCardId, personaDraftDirty, personaSectionBody, renderPersonaSection, runMaskOldSpeech,
   savedPersonaId, syncPersonaButtons
 };

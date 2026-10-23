@@ -144,6 +144,30 @@ export class MemoryStore {
     return this.people.append(chatKey, userId, target || userId, content, Date.now(), String(extra.origin || '').trim() || 'model');
   }
   members(chatKey = '') { return this.people.members(chatKey); }
+  /** 印象分快照（按人） */
+  impressionOf(userId, options = {}) { return this.people.impressionOf(userId, options); }
+  /** 评审返回的按人印象变化 */
+  adjustImpressions(list, options = {}) { return this.people.adjustImpressions(list, options); }
+  impressionFactorForChat(chatKey, options = {}) { return this.people.impressionFactorForChat(chatKey, options); }
+  replyFactorForUserIds(userIds, options = {}) { return this.people.replyFactorForUserIds(userIds, options); }
+  markViceTriggered(userId, options = {}) { return this.people.markViceTriggered(userId, options); }
+  viceCooldownOk(userId, minutes, now) { return this.people.viceCooldownOk(userId, minutes, now); }
+  /** 给提示词用的低/高印象快照；只返回有分数记录的人。 */
+  impressionScores({ chatKey = '', userIds = null, now = Date.now(), limit = 10 } = {}) {
+    const ids = userIds
+      ? [...new Set([...userIds].map(String).filter((id) => /^\d{1,15}$/.test(id)))]
+      : this.people.members(chatKey).map((m) => m.userId).filter((id) => /^\d{1,15}$/.test(id));
+    const notes = getConfig().memberNotes || {};
+    return ids.slice(0, Math.max(1, limit)).map((uid) => {
+      const snap = this.people.impressionOf(uid, { now });
+      return {
+        userId: uid,
+        name: sanitizeUserText(notes[uid] || snap.name || uid),
+        score: snap.score,
+        lastViceAt: snap.lastViceAt
+      };
+    });
+  }
   getMember(chatKey, userId) { return this.people.get(userId); }
   query(chatKey, category = '') {
     if (category && category !== 'memberImpression') return { [category]: [] };

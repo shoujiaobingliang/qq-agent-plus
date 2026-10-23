@@ -1168,7 +1168,7 @@ export function resolveContextTier({ triggerEntries = [], selfNickname = '', bot
   // 精力系数只作用于概率档：必回项（@/关键词）在下面先返回，不受影响。
   const multiplier = Number(probabilityMultiplier);
   const safeMultiplier = Number.isFinite(multiplier)
-    ? Math.min(1.5, Math.max(0.5, multiplier))
+    ? Math.min(1.5, Math.max(0.2, multiplier))
     : 1;
   const probability = Math.min(100, Math.max(0, clampProbability(c.randomPercent, 100) * safeMultiplier));
 
@@ -1436,6 +1436,7 @@ export function buildUserPrompt(ctx) {
   // prefix hash 包含 system/persona，放那里会关掉 lifecycle 线程并破坏前缀缓存。
   const moodBlock = buildMoodPromptBlock(ctx.mood, { context: 'chat' });
   if (moodBlock) parts.push(moodBlock);
+  if (ctx.impressionBlock) parts.push(String(ctx.impressionBlock));
 
   // 【角色设定】刚换过的那段时间，历史/交接里留着上一张卡的口癖与自称：
   // 不加说明的话模型会照着自己上一条的口气继续说（实测换卡 26 小时后仍在用旧卡的口癖）。

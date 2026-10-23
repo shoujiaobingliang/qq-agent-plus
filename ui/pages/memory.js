@@ -152,9 +152,10 @@ async function loadMemoryDetail(chatKey) {
     const rows = members.map((m) => {
       const who = notes[String(m.userId)] || m.name || m.userId || '某人';
       const qq = m.userId ? ` <span class="muted">(QQ ${esc(m.userId)})</span>` : '';
+      const score = Number.isFinite(Number(m.impressionScore)) ? Math.round(Number(m.impressionScore)) : 50;
       const imps = m.impressions.map((e) => `- ${impressionMetaLabel(e)}${e.content}`).join('\n');
       return `<div class="collapsible" open>
-        <summary>${esc(who)}${qq}（${m.impressions.length} 条）
+        <summary>${esc(who)}${qq}（${m.impressions.length} 条 · 印象 ${score}）
           <button class="btn btn-small mem-edit-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:8px">编辑</button>
           <button class="btn btn-small mem-refresh-imp" data-qq="${esc(m.userId)}" data-name="${esc(m.name)}" style="margin-left:6px" title="让模型重新分析这个人：有印象则整理合并，没印象则从聊天记录里提炼">更新记忆</button>
         </summary>

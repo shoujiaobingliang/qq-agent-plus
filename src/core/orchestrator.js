@@ -27,6 +27,10 @@ import {
 import { cappedByTokenSaver, effectiveRunLimits, tokenSaverCapsOf } from './token-saver.js';
 import { MoodManager } from './mood-manager.js';
 import { buildMoodJudgeMessages, parseMoodJudgeOutput } from '../llm/mood-judge-prompt.js';
+import { buildImpressionPromptBlock } from '../llm/impression-prompt.js';
+import { VicePersona } from '../llm/vice-persona.js';
+import { resolveVicePersona } from '../llm/vice-personas.js';
+import { viceChance, viceEligible } from './impression-vice.js';
 import { redactText } from './redact.js';
 // ── 主动开话题的时间段：窗口外不主动开口（聊天回复不受影响）──
 
@@ -476,6 +480,9 @@ export class Orchestrator {
     this.moodJudgeDayKey = '';
     this.moodJudgeCallsToday = 0;
     this.moodJudgedIds = new Set();
+    this.viceBurst = new Map();
+    this.vicePersona = null;
+    this.vicePersonaKey = '';
     this.toolDefs = buildToolDefs();
     // 人设初始化轮正在生成中的 hash：启动与配置保存可能同时触发，避免重复外呼。
     this.personaIntroInFlight = new Set();
@@ -538,6 +545,7 @@ export class Orchestrator {
       .filter((item) => item && (!selfId || String(item.senderId || '') !== selfId))
       .map((item) => ({
         id: String(item.id ?? item.mid ?? ''),
+        uid: String(item.senderId || ''),
         senderName: item.senderName || '',
         text: item.text || ''
       }))
@@ -568,6 +576,28 @@ export class Orchestrator {
       if (item.id) this.moodJudgedIds.add(item.id);
     }
     if (this.moodJudgedIds.size > 1000) this.moodJudgedIds.clear();
+    // 按人印象分：只接受本轮确实出现过的 QQ，避免模型编造用户。
+    const allowedUids = new Set(incoming.map((item) => item.uid).filter(Boolean));
+    const impressions = (Array.isArray(decision.impressions) ? decision.impressions : [])
+      .filter((item) => allowedUids.has(String(item.uid || '')));
+    if (impressions.length && this.memory?.adjustImpressions) {
+      try {
+        const changed = this.memory.adjustImpressions(impressions, { chatKey, source: 'judge' });
+        const vice = getConfig().impression?.vice || {};
+        const burstDelta = Number(vice.burstDelta) || -4;
+        const burstBelow = Number(vice.burstBelow) || 25;
+        for (const snap of changed) {
+          const last = snap.history?.at(-1);
+          if (last && Number(last.delta) <= burstDelta && Number(snap.score) <= burstBelow) {
+            // 单次大跌：给下一次运行留一个“立刻想怼”的爆点窗口。
+            this.viceBurst.set(snap.userId, Date.now() + 15 * 60 * 1000);
+          }
+        }
+        if (changed.length) this.emit('memory-update', { chatKey, phase: 'impression-update', userIds: changed.map((s) => s.userId) });
+      } catch (error) {
+        log.warn('[mood] 印象分写入失败：', error?.message ?? error);
+      }
+    }
     log.debug(`[mood] 模型判断：心情 ${decision.moodDelta}、精力 ${decision.energyDelta}（${decision.reason}）`);
     this.#emitMood(this.mood.applyJudge(decision));
   }
@@ -613,6 +643,81 @@ export class Orchestrator {
     });
     this.#recordExternalUsage(response, model);
     return response;
+  }
+
+  /** 本轮是否具备“嘴臭副人格”触发资格：梯度概率 + 大跌爆点 + 冷却。 */
+  #viceForRun(triggerEntries = []) {
+    const cfg = getConfig();
+    const imp = cfg.impression || {};
+    const vice = imp.vice || {};
+    if (imp.enabled === false || vice.enabled === false) return { eligible: false };
+    // 必须先设置主人格，且副人格卡可解析、正文非空（默认 tieba 是空白卡）。
+    const card = resolveVicePersona(cfg);
+    if (!card || !String(card.roleText || '').trim()) return { eligible: false };
+    const ids = [...new Set((Array.isArray(triggerEntries) ? triggerEntries : [])
+      .map((item) => String(item?.senderId || ''))
+      .filter((id) => /^\d{1,15}$/.test(id)))];
+    if (!ids.length) return { eligible: false };
+    const now = Date.now();
+    const low = Math.min(100, Math.max(1, Number(imp.lowThreshold) || 30));
+    let target = null;
+    for (const uid of ids) {
+      const snap = this.memory?.impressionOf?.(uid, { now });
+      if (!snap || Number(snap.score) >= low) continue;
+      if (!target || Number(snap.score) < Number(target.score)) target = { ...snap, userId: uid };
+    }
+    if (!target) return { eligible: false };
+    const burst = Number(this.viceBurst.get(target.userId) || 0) > now;
+    const cooldownOk = this.memory?.viceCooldownOk?.(target.userId, vice.cooldownMinutes ?? 30, now) !== false;
+    const chance = viceChance(target.score, imp);
+    const eligible = cooldownOk && (burst
+      ? true
+      : viceEligible({ score: target.score, cfg: imp, cooldownOk, random: this.random() }));
+    const notes = cfg.memberNotes || {};
+    return {
+      eligible,
+      userId: target.userId,
+      name: notes[target.userId] || target.name || target.userId,
+      score: target.score,
+      chance,
+      burst
+    };
+  }
+
+  /** 副人格回复：独立 LLM 会话，按需送上下文；不直接发送，文本交回主模型。 */
+  async #viceReply(context, vice, { signal = null } = {}) {
+    const cfg = getConfig();
+    const setting = cfg.impression?.vice || {};
+    const card = resolveVicePersona(cfg);
+    if (!card || !String(card.roleText || '').trim()) throw new Error('副人格卡正文为空：请先在「设置 → 人设」补充');
+    const roleText = card.roleText;
+    let overrides = null;
+    let model = String(setting.model || cfg.api?.model || '');
+    if (setting.provider) {
+      const p = currentProviders().find((item) => item.id === setting.provider);
+      if (!p?.baseURL || !setting.model) throw new Error('副人格模型未配置');
+      overrides = { baseUrl: p.baseURL, apiKey: p.apiKey, model: setting.model, timeoutMs: 12000 };
+      model = setting.model;
+    }
+    const key = `${card.id}|${card.name}|${roleText}|${setting.provider || ''}|${setting.model || ''}|${setting.maxHistoryMessages || 12}|${setting.maxContextChars || 2000}`;
+    if (!this.vicePersona || this.vicePersonaKey !== key) {
+      this.vicePersona = new VicePersona({
+        name: card.name,
+        roleText,
+        overrides,
+        maxHistoryMessages: setting.maxHistoryMessages ?? 12,
+        maxContextChars: setting.maxContextChars ?? 2000,
+        log
+      });
+      this.vicePersonaKey = key;
+    }
+    const result = await this.vicePersona.reply(context, { signal });
+    this.#recordExternalUsage(result.response, model);
+    if (vice?.userId) {
+      try { this.memory?.markViceTriggered?.(vice.userId); } catch { /* 冷却记录失败不影响回复 */ }
+      this.viceBurst.delete(vice.userId);
+    }
+    return result.text;
   }
 
   /** 心情变化广播：2 秒节流，顶部栏仍有 /api/status 轮询兜底。 */
@@ -973,7 +1078,8 @@ export class Orchestrator {
       selfId: cfg.onebot?.selfId || this.onebot.selfId || '',
       cfg: storeConfigForChat(chatKey),  // 按会话取档位：统一开关关闭时各群可以有独立滑条
       roll,                               // 传入已固定的骰子：预判与实跑必须用同一次
-      probabilityMultiplier: this.mood.frequencyFactor()   // 精力只缩放宽/松概率档
+      probabilityMultiplier: this.mood.frequencyFactor()
+        * (this.memory?.replyFactorForUserIds?.(entries.map((m) => m?.senderId)) ?? 1)
     });
     // 没有未读就不算"需要响应"（防抖窗口刚建立时的空转）
     if (entries.length === 0) {
@@ -1653,6 +1759,7 @@ export class Orchestrator {
       selfId: cfgNow.onebot?.selfId || this.onebot.selfId || '',
       cfg: storeConfigForChat(chatKey),  // 与 #predictTier 同一来源，保证预判/实跑一致
       probabilityMultiplier: this.mood.frequencyFactor()
+        * (this.memory?.replyFactorForUserIds?.(triggerEntries.map((m) => m?.senderId)) ?? 1)
     });
     } catch (error) {
       // 前置区答案：会话落终态（否则永远等待中），原样上抛让调用方照旧记日志/告警。
@@ -2245,6 +2352,7 @@ export class Orchestrator {
     // 每轮现建一份：工具描述里有随配置变化的文案（例如 get_message_images 会写"抽 4 帧"或
     // "视频画面看不到"）。构造函数里建一次的话，控制台改完设置（不重启）后提示词已经变了、
     // 工具描述还是旧的，模型会收到互相矛盾的两段（2026-10-17 审查 P2）。
+    const vice = this.#viceForRun(triggerEntries);
     const toolDefs = buildToolDefs().filter((d) => {
       if (!skillsLayout && d.name === 'skill') return false;
       if (!viewMessageImages && d.name === 'get_message_images') return false;
@@ -2279,6 +2387,12 @@ export class Orchestrator {
       // 心情休息：关掉心情或休息开关时，工具与提示词一起撤。
       if ((cfg.mood?.enabled === false || cfg.mood?.rest?.enabled === false)
         && d.name === 'take_break') return false;
+      // 嘴臭副人格：只有印象分/副人格开关都开着、且主人格+副人格卡可用时才提供工具。
+      if (d.name === 'vice_persona'
+        && (cfg.impression?.enabled === false
+          || cfg.impression?.vice?.enabled === false
+          || !resolveVicePersona(cfg)
+          || !String(resolveVicePersona(cfg)?.roleText || '').trim())) return false;
       // ASR 按量计费：开关关掉或没配 key 就不注入，避免模型调用必失败；也防误配置导致意外计费
       if (!asrEnabled && d.name === 'get_message_audio') return false;
       // 生图的唯一发送路径是"进表情库 → send_sticker"；表情包功能关掉时那条路也没了，
@@ -2390,6 +2504,15 @@ export class Orchestrator {
     const lifecycleContinuation = priorProviderMessages.length > 0;
 
     // 首轮带完整上下文；生命周期后续轮只附加增量，旧消息保持字节级稳定以命中 DeepSeek 前缀缓存。
+    const impressionScores = cfg.impression?.enabled === false ? [] : (this.memory?.impressionScores?.({
+      chatKey,
+      userIds: (triggerEntries || []).map((m) => m?.senderId),
+      now: Date.now(),
+      limit: 10
+    }) || []);
+    const impressionBlock = cfg.impression?.enabled === false
+      ? ''
+      : buildImpressionPromptBlock({ scores: impressionScores, cfg: cfg.impression || {}, vice });
     const userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       triggerEntries,
@@ -2401,6 +2524,8 @@ export class Orchestrator {
       selfNickname,
       // 当前心情/精力：只进 user prompt（不碰 system/persona 的 prefix hash）
       mood: this.mood.promptSnapshot(),
+      // 印象分/副人格态度：同样只进 user prompt
+      impressionBlock,
       // 按群人设：点名标签与"刚换过卡"的提醒都用这个群生效的那份
       botName: persona.botName,
       personaChangedAt: Number(persona.changedAt) || 0,
@@ -2526,6 +2651,9 @@ export class Orchestrator {
       sender: this.sender,
       // 心情休息：take_break 工具通过它进入睡觉/摸鱼。
       mood: this.mood,
+      // 嘴臭副人格：只有本轮具备触发资格时才提供入口。
+      viceReply: vice.eligible ? (context, opts) => this.#viceReply(context, vice, opts) : null,
+      viceMaxContext: Math.max(200, Number(cfg.impression?.vice?.maxContextChars) || 2000),
       // 睡前可选：私聊管理员一句短话（只给 take_break 用，不暴露成通用工具）。
       notifyAdmin: async (text) => {
         const owner = readOwnerUin(getConfig());
@@ -3199,13 +3327,7 @@ export class Orchestrator {
         log.info('[proactive] 跳过：并发任务已满');
         return;
       }
-      if (this.random() > this.mood.proactiveProbability(proactiveProbability(cfg.proactive?.probability))) {
-        log.info('[proactive] 跳过：这次摇到了不发言');
-        // 摇了不发言也算把这一轮用掉
-        writeProactiveLastAttempt(nowTick);
-        return;
-      }
-      // 挑一个"安静且允许"的群
+      // 先挑出安静且允许的群：高印象群给主动分享加权，但不改变“只在这些群里选”。
       const candidates = this.#proactiveCandidates(cfg);
       if (!candidates.length) {
         // 群里正热闹、或都在忙：这不算消耗，45 分钟后再看，别白瞎一个间隔
@@ -3215,9 +3337,28 @@ export class Orchestrator {
         this.proactiveTimer.unref?.();
         return;
       }
+      const shareFactors = candidates.map((key) => (
+        this.memory?.impressionFactorForChat?.(key) ?? 1
+      ));
+      const shareAvg = shareFactors.reduce((n, v) => n + v, 0) / shareFactors.length;
+      if (this.random() > this.mood.proactiveProbability(
+        proactiveProbability(cfg.proactive?.probability) * shareAvg
+      )) {
+        log.info('[proactive] 跳过：这次摇到了不发言');
+        // 摇了不发言也算把这一轮用掉
+        writeProactiveLastAttempt(nowTick);
+        return;
+      }
       // 真要开口了，才把这一轮用掉（本间隔内不再判定）
       writeProactiveLastAttempt(nowTick);
-      const chatKey = candidates[Math.floor(this.random() * candidates.length)];
+      let pick = candidates[0];
+      let total = shareFactors.reduce((n, v) => n + v, 0);
+      let roll = this.random() * total;
+      for (let i = 0; i < candidates.length; i += 1) {
+        roll -= shareFactors[i];
+        if (roll <= 0) { pick = candidates[i]; break; }
+      }
+      const chatKey = pick;
       log.info('[proactive] 主动开话题 → ' + chatKey);
       this.wake(chatKey, { proactive: true }).catch((error) => log.error('[orchestrator] proactive 出错:', error));
     };

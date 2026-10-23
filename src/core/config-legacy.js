@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERSONAS, normalizeBehaviorProfile, applyPersonaTemplate, applyPersonaPerChatTemplates } from '../personas.js';
+import { normalizeVicePersonaId } from '../llm/vice-personas.js';
 import {
   clampProbability,
   legacySliderToProbability,
@@ -306,7 +307,11 @@ export const DEFAULT_CONFIG = {
     // 选中的内置卡 id（roles/*.md 的登记名）。非空表示"正文跟着卡文件走"：
     // 载入配置时若正文与文件不一致就按文件刷新，改了卡不用再去控制台重选一次。
     // 手改正文、或用自定义卡时是空串（正文不受文件影响）。
-    templateId: 'xiaojingyu'
+    templateId: 'xiaojingyu',
+    // 副人格：主人设上的指针 + 副人格卡库（都属于人设这一块，不另开一套市场）。
+    // 默认 tieba 是空白卡，正文由管理员补充；旧毒舌/嘴臭 id 会映射到 tieba。
+    vicePersonaId: 'tieba',
+    vicePersonas: [{ id: 'tieba', name: 'tieba', roleText: '' }]
   },
   // 用户自定义人设库（保存在配置里，可在设置页添加/选择）
   customPersonas: [],
@@ -354,7 +359,30 @@ export const DEFAULT_CONFIG = {
       slackReplyFactor: 0.35
     }
   },
-  // 接入白名单
+  // 印象分（按人）：心情评审时顺便判断“这个人让我舒服/不舒服”，落入人物记忆。
+  // 低分开始冷淡并梯度降低回复概率；低于阈值时可按概率调用嘴臭副人格；高分提高主动分享概率。
+  impression: {
+    enabled: true,
+    baseline: 50,
+    lowThreshold: 30,
+    hostileThreshold: 15,
+    highThreshold: 80,
+    decayHalfLifeDays: 14,
+    lowReplyFactor: 0.4,
+    highShareInfluence: 0.25,
+    vice: {
+      enabled: true,
+      provider: '',
+      model: '',
+      baseChance: 0.12,
+      maxChance: 0.7,
+      burstDelta: -4,               // 单次印象分跌这么多 → 进入爆点
+      burstBelow: 25,
+      cooldownMinutes: 30,
+      maxContextChars: 2000,
+      maxHistoryMessages: 12
+    }
+  },
   allow: { groups: [], private: [] },
   deny: { groups: [], private: [] },
   allowAllWhenEmpty: false,
@@ -1880,6 +1908,41 @@ export function updateConfig(patch) {
   if (patchPersona.customRules !== undefined && typeof next.persona.customRules === 'string') {
     next.persona.customRules = next.persona.customRules.slice(0, PERSONA_CUSTOM_RULES_MAX);
   }
+  // 副人格卡：主人设上的指针 + 卡库。默认 tieba 空白卡；旧 impression.vice 的
+  // personaId/personas/roleText 在这里迁移，之后配置只认 persona.vicePersona*。
+  {
+    const legacyVice = next.impression?.vice && typeof next.impression.vice === 'object'
+      ? next.impression.vice
+      : {};
+    const rawCards = Array.isArray(next.persona.vicePersonas)
+      ? next.persona.vicePersonas
+      : (Array.isArray(legacyVice.personas) ? legacyVice.personas : []);
+    const cards = [];
+    const seen = new Set();
+    for (const item of rawCards) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const id = String(item.id || '').trim().toLowerCase();
+      if (!/^[a-z0-9_-]{1,32}$/.test(id) || seen.has(id)) continue;
+      seen.add(id);
+      cards.push({
+        id,
+        name: String(item.name || id).trim().slice(0, 40) || id,
+        roleText: String(item.roleText || '').slice(0, PERSONA_ROLE_TEXT_MAX)
+      });
+      if (cards.length >= 20) break;
+    }
+    if (!seen.has('tieba')) {
+      cards.unshift({ id: 'tieba', name: 'tieba', roleText: '' });
+    }
+    const tieba = cards.find((card) => card.id === 'tieba');
+    const legacyInline = String(legacyVice.roleText || '').trim();
+    if (tieba && !tieba.roleText && legacyInline) tieba.roleText = legacyInline.slice(0, PERSONA_ROLE_TEXT_MAX);
+    const requestedId = normalizeVicePersonaId(
+      next.persona.vicePersonaId || legacyVice.personaId || 'tieba'
+    );
+    next.persona.vicePersonas = cards;
+    next.persona.vicePersonaId = cards.some((card) => card.id === requestedId) ? requestedId : 'tieba';
+  }
   if ('memberNotes' in safePatch) next.memberNotes = clampMemberNotes(next.memberNotes);
   // 表情判定标准（2026-10-10 补上控制台输入后同口径）：只在本次 patch 带了该字段时夹到 2000 字
   // （与 src/onebot/sticker-manager.js 判定期的截断一致）；无关保存不改写存量值。
@@ -1962,6 +2025,58 @@ export function updateConfig(patch) {
         maxMoodForRest: score(restCfg.maxMoodForRest, defaults.rest.maxMoodForRest),
         maxEnergyForRest: score(restCfg.maxEnergyForRest, defaults.rest.maxEnergyForRest),
         slackReplyFactor: bounded(restCfg.slackReplyFactor, defaults.rest.slackReplyFactor, 0.05, 1)
+      }
+    };
+  }
+  // 印象分配置：阈值保证 hostile <= low <= high；副人格概率/时长/上下文都夹上限。
+  {
+    const cfgIn = next.impression && typeof next.impression === 'object' && !Array.isArray(next.impression)
+      ? next.impression
+      : {};
+    const defaults = DEFAULT_CONFIG.impression;
+    const score = (value, fallback) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : fallback;
+    };
+    const bounded = (value, fallback, min, max) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const low = score(cfgIn.lowThreshold, defaults.lowThreshold);
+    const hostile = Math.min(low, score(cfgIn.hostileThreshold, defaults.hostileThreshold));
+    const high = Math.max(low, score(cfgIn.highThreshold, defaults.highThreshold));
+    const viceIn = cfgIn.vice && typeof cfgIn.vice === 'object' && !Array.isArray(cfgIn.vice)
+      ? cfgIn.vice
+      : {};
+    const viceDefaults = defaults.vice;
+    const baseChance = bounded(viceIn.baseChance, viceDefaults.baseChance, 0, 1);
+    const maxChance = Math.max(baseChance, bounded(viceIn.maxChance, viceDefaults.maxChance, 0, 1));
+    next.impression = {
+      enabled: cfgIn.enabled !== false,
+      baseline: score(cfgIn.baseline, defaults.baseline),
+      lowThreshold: low,
+      hostileThreshold: hostile,
+      highThreshold: high,
+      decayHalfLifeDays: bounded(cfgIn.decayHalfLifeDays, defaults.decayHalfLifeDays, 1, 60),
+      lowReplyFactor: bounded(cfgIn.lowReplyFactor, defaults.lowReplyFactor, 0.1, 0.8),
+      highShareInfluence: bounded(cfgIn.highShareInfluence, defaults.highShareInfluence, 0, 0.5),
+      vice: {
+        enabled: viceIn.enabled !== false,
+        provider: String(viceIn.provider || '').trim(),
+        model: String(viceIn.model || '').trim(),
+        baseChance,
+        maxChance,
+        burstDelta: bounded(viceIn.burstDelta, viceDefaults.burstDelta, -10, 0),
+        burstBelow: score(viceIn.burstBelow, viceDefaults.burstBelow),
+        cooldownMinutes: Math.round(bounded(
+          viceIn.cooldownMinutes, viceDefaults.cooldownMinutes, 1, 1440
+        )),
+        maxContextChars: Math.round(bounded(
+          viceIn.maxContextChars, viceDefaults.maxContextChars, 200, 8000
+        )),
+        maxHistoryMessages: Math.round(bounded(
+          viceIn.maxHistoryMessages, viceDefaults.maxHistoryMessages, 2, 40
+        ))
       }
     };
   }

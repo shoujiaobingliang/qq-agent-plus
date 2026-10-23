@@ -164,6 +164,42 @@
 - 当前值保存在 `$DATA_DIR/mood.json`，不写进 `config.json`。
 - 详细规则见 [MOOD.md](MOOD.md)。
 
+## impression：印象分与嘴臭副人格
+
+```json
+{
+  "impression": {
+    "enabled": true,
+    "baseline": 50,
+    "lowThreshold": 30,
+    "hostileThreshold": 15,
+    "highThreshold": 80,
+    "decayHalfLifeDays": 14,
+    "lowReplyFactor": 0.4,
+    "highShareInfluence": 0.25,
+    "vice": {
+      "enabled": true,
+      "provider": "",
+      "model": "",
+      "baseChance": 0.12,
+      "maxChance": 0.7,
+      "burstDelta": -4,
+      "burstBelow": 25,
+      "cooldownMinutes": 30,
+      "maxContextChars": 2000,
+      "maxHistoryMessages": 12
+    }
+  }
+}
+```
+
+- 印象分按人存在人物记忆里，由心情评审返回的 `impressions` 更新；低于阈值会冷淡/降概率，高分提高主动分享权重。
+- 副人格由主模型通过 `vice_persona` 工具按需调用：先把所选副人格卡喂进去，之后送上下文、拿回复，再由主模型决定是否发送。
+- 副人格卡属于人设区域：主人设用 `persona.vicePersonaId` 指向副人格卡，卡库在 `persona.vicePersonas`；默认 `tieba` 空白卡，旧“毒舌/嘴臭”映射到 tieba。
+- 必须先设置主人格（`persona.roleText` 或 `persona.templateId`）才能配置/触发副人格。
+- `impression.vice` 只控制触发概率、爆点、冷却、模型与上下文上限。
+- 详细规则和安全边界见 [IMPRESSION.md](IMPRESSION.md)。
+
 ## webSearch：联网搜索（多家 provider + 聚合）
 
 

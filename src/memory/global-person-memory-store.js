@@ -9,6 +9,42 @@ const MIGRATION_MARKER = path.join(MEMORY_DIR, '_global_people_v1.json');
 const MIGRATION_BACKUP_DIR = path.join(MEMORY_DIR, 'backups', 'global-people-v1');
 
 const clean = (v, n = 300) => String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+const IMPRESSION_HISTORY_LIMIT = 20;
+const DEFAULT_IMPRESSION = 50;
+const round1 = (value) => Math.round(Number(value) * 10) / 10;
+const clampImpression = (value, fallback = DEFAULT_IMPRESSION) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(100, Math.max(0, n));
+};
+function impressionConfig() {
+  const cfg = getConfig().impression;
+  return cfg && typeof cfg === 'object' && !Array.isArray(cfg) ? cfg : {};
+}
+function effectiveImpression(member = {}, now = Date.now()) {
+  const cfg = impressionConfig();
+  const baseline = clampImpression(cfg.baseline, DEFAULT_IMPRESSION);
+  const updatedAt = Number(member.impressionUpdatedAt) || 0;
+  if (!updatedAt) return baseline;
+  const halfLifeDays = Math.min(60, Math.max(1, Number(cfg.decayHalfLifeDays) || 14));
+  const elapsed = Math.max(0, Number(now) - updatedAt);
+  const factor = Math.pow(0.5, elapsed / (halfLifeDays * 86400000));
+  return round1(baseline + (clampImpression(member.impressionScore, baseline) - baseline) * factor);
+}
+function normalizeImpressionHistory(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => ({
+      at: Number(item.at) || 0,
+      delta: round1(Number(item.delta) || 0),
+      score: round1(clampImpression(item.score)),
+      reason: clean(item.reason, 80),
+      source: clean(item.source, 20),
+      chatKey: String(item.chatKey || '')
+    }))
+    .slice(-IMPRESSION_HISTORY_LIMIT);
+}
 const validChat = (v) => /^(group|private):\d+$/.test(String(v || ''));
 const chatKeyFromDir = (name) => {
   const m = /^(group|private)_(\d+)$/.exec(String(name || ''));
@@ -64,7 +100,19 @@ function sourceKeys(value, fallback = '') {
   return out;
 }
 function emptyMember(userId = '', name = '') {
-  return { version: 2, userId: String(userId || ''), name: String(name || ''), impressions: [], sourceChatKeys: [], updatedAt: 0, lastConsolidatedAt: 0 };
+  return {
+    version: 2,
+    userId: String(userId || ''),
+    name: String(name || ''),
+    impressions: [],
+    sourceChatKeys: [],
+    updatedAt: 0,
+    lastConsolidatedAt: 0,
+    impressionScore: DEFAULT_IMPRESSION,
+    impressionUpdatedAt: 0,
+    impressionHistory: [],
+    lastViceAt: 0
+  };
 }
 // origin：这条印象是怎么来的 —— 'model'（机器人自己 memory_append 记的）、
 // 'consolidated'（记忆整理/提炼改写的）、'manual'（控制台手动编辑的）；
@@ -102,6 +150,10 @@ function normalizeMember(raw = {}, userId = '', name = '', fallbackChatKey = '')
   const member = emptyMember(raw.userId ?? userId, raw.name ?? name);
   member.updatedAt = Number(raw.updatedAt) || 0;
   member.lastConsolidatedAt = Number(raw.lastConsolidatedAt) || 0;
+  member.impressionScore = clampImpression(raw.impressionScore);
+  member.impressionUpdatedAt = Number(raw.impressionUpdatedAt) || 0;
+  member.impressionHistory = normalizeImpressionHistory(raw.impressionHistory);
+  member.lastViceAt = Number(raw.lastViceAt) || 0;
   member.sourceChatKeys = sourceKeys(raw.sourceChatKeys, fallbackChatKey);
   for (const item of Array.isArray(raw.impressions) ? raw.impressions : []) {
     const entry = normalizeEntry(item, fallbackChatKey);
@@ -118,6 +170,13 @@ function mergeMember(target, incoming) {
   target.sourceChatKeys = sourceKeys([...target.sourceChatKeys, ...incoming.sourceChatKeys]);
   target.updatedAt = Math.max(target.updatedAt || 0, incoming.updatedAt || 0);
   target.lastConsolidatedAt = Math.max(target.lastConsolidatedAt || 0, incoming.lastConsolidatedAt || 0);
+  // 印象分跟着“最近一次调整”走；整理/合并不能把分数冲回默认值。
+  if (Number(incoming.impressionUpdatedAt) > Number(target.impressionUpdatedAt)) {
+    target.impressionScore = clampImpression(incoming.impressionScore);
+    target.impressionUpdatedAt = Number(incoming.impressionUpdatedAt) || 0;
+    target.impressionHistory = normalizeImpressionHistory(incoming.impressionHistory);
+  }
+  target.lastViceAt = Math.max(Number(target.lastViceAt) || 0, Number(incoming.lastViceAt) || 0);
 }
 function archive(src, rel) {
   try {
@@ -222,13 +281,128 @@ export class GlobalPersonMemoryStore {
   members(sourceChatKey = '') {
     const source = String(sourceChatKey || '').trim();
     return [...this.#ensure().values()]
-      .filter((m) => m.impressions.length && (!source || m.sourceChatKeys.includes(source)))
+      .filter((m) => (m.impressions.length || m.impressionHistory.length)
+        && (!source || m.sourceChatKeys.includes(source)))
       .map((m) => structuredClone(m))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
   get(userId) {
     const uid = String(userId || '').trim();
     return structuredClone(this.#ensure().get(uid) || emptyMember(uid));
+  }
+  /** 某个人的印象分快照（惰性衰减后），供提示词/控制台使用。 */
+  impressionOf(userId, { now = Date.now() } = {}) {
+    const uid = String(userId || '').trim();
+    const member = this.#ensure().get(uid) || emptyMember(uid);
+    return {
+      userId: uid,
+      name: member.name || '',
+      score: effectiveImpression(member, now),
+      baseline: clampImpression(impressionConfig().baseline, DEFAULT_IMPRESSION),
+      history: normalizeImpressionHistory(member.impressionHistory).slice(-10),
+      lastViceAt: Number(member.lastViceAt) || 0
+    };
+  }
+  /**
+   * 调整某个人的印象分：先按半衰期衰减，再应用 ±5 内的单次变化。
+   * 返回快照；印象分关闭/uid 非法/变化为 0 时返回当前快照或不写盘。
+   */
+  adjustImpression(userId, {
+    delta = 0, reason = '', chatKey = '', source = 'judge', name = '', now = Date.now()
+  } = {}) {
+    const cfg = impressionConfig();
+    if (cfg.enabled === false) return null;
+    const uid = String(userId || '').trim();
+    if (!/^\d{1,15}$/.test(uid)) return null;
+    const map = this.#ensure();
+    const member = map.get(uid) || emptyMember(uid, name);
+    const before = effectiveImpression(member, now);
+    const change = Math.min(5, Math.max(-5, Number(delta) || 0));
+    const score = clampImpression(before + change, clampImpression(cfg.baseline, DEFAULT_IMPRESSION));
+    const actual = round1(score - before);
+    if (!actual) return this.impressionOf(uid, { now });
+    member.impressionScore = score;
+    member.impressionUpdatedAt = now;
+    member.impressionHistory = [
+      ...normalizeImpressionHistory(member.impressionHistory),
+      {
+        at: now,
+        delta: actual,
+        score,
+        reason: clean(reason, 80),
+        source: clean(source, 20),
+        chatKey: String(chatKey || '')
+      }
+    ].slice(-IMPRESSION_HISTORY_LIMIT);
+    if (name) member.name = clean(name, 60) || member.name;
+    member.userId = uid;
+    if (validChat(chatKey)) member.sourceChatKeys = sourceKeys([...member.sourceChatKeys, chatKey]);
+    member.updatedAt = now;
+    this.#persist(member);
+    map.set(memberKey(member.userId, member.name), member);
+    return this.impressionOf(uid, { now });
+  }
+  /** 批量应用评审返回的按人印象变化；只处理数字 QQ 号，返回成功应用的快照。 */
+  adjustImpressions(list, { chatKey = '', source = 'judge', now = Date.now() } = {}) {
+    const out = [];
+    for (const item of Array.isArray(list) ? list : []) {
+      const uid = String(item?.uid ?? item?.userId ?? '').trim();
+      if (!/^\d{1,15}$/.test(uid)) continue;
+      const snapshot = this.adjustImpression(uid, {
+        delta: item?.delta,
+        reason: item?.reason,
+        chatKey,
+        source,
+        name: item?.name || '',
+        now
+      });
+      if (snapshot) out.push(snapshot);
+    }
+    return out;
+  }
+  /** 群级“高印象分享”系数：成员平均印象越高，主动分享概率越高。 */
+  impressionFactorForChat(chatKey, { now = Date.now() } = {}) {
+    const cfg = impressionConfig();
+    if (cfg.enabled === false) return 1;
+    const members = this.members(chatKey);
+    if (!members.length) return 1;
+    const baseline = clampImpression(cfg.baseline, DEFAULT_IMPRESSION);
+    const scores = members.map((m) => effectiveImpression(m, now));
+    const avg = scores.reduce((n, v) => n + v, 0) / scores.length;
+    const influence = Math.min(0.5, Math.max(0, Number(cfg.highShareInfluence) || 0));
+    return Math.min(1.3, Math.max(0.85, 1 + ((avg - baseline) / Math.max(1, baseline)) * influence));
+  }
+  /** 低印象回复系数：这批发送者的平均印象低于阈值时，按比例降低回复概率。 */
+  replyFactorForUserIds(userIds = [], { now = Date.now() } = {}) {
+    const cfg = impressionConfig();
+    if (cfg.enabled === false) return 1;
+    const ids = [...new Set((Array.isArray(userIds) ? userIds : []).map(String).filter(Boolean))];
+    if (!ids.length) return 1;
+    const map = this.#ensure();
+    const scores = ids.map((uid) => effectiveImpression(map.get(uid) || emptyMember(uid), now));
+    if (!scores.length) return 1;
+    const avg = scores.reduce((n, v) => n + v, 0) / scores.length;
+    const low = Math.min(100, Math.max(1, Number(cfg.lowThreshold) || 30));
+    if (avg >= low) return 1;
+    const floor = Math.min(0.8, Math.max(0.1, Number(cfg.lowReplyFactor) || 0.4));
+    return Math.min(1, Math.max(floor * 0.8, floor + (avg / low) * (1 - floor)));
+  }
+  markViceTriggered(userId, { now = Date.now() } = {}) {
+    const uid = String(userId || '').trim();
+    if (!/^\d{1,15}$/.test(uid)) return false;
+    const map = this.#ensure();
+    const member = map.get(uid) || emptyMember(uid, '');
+    member.lastViceAt = Number(now) || Date.now();
+    member.updatedAt = member.lastViceAt;
+    this.#persist(member);
+    map.set(memberKey(member.userId, member.name), member);
+    return true;
+  }
+  viceCooldownOk(userId, minutes = 30, now = Date.now()) {
+    const member = this.#ensure().get(String(userId || '').trim());
+    const last = Number(member?.lastViceAt) || 0;
+    if (!last) return true;
+    return Number(now) - last >= Math.max(1, Number(minutes) || 30) * 60000;
   }
   append(chatKey, userId, name, content, createdAt = Date.now(), origin = 'model', lastObservedAt = 0) {
     const map = this.#ensure();
@@ -307,6 +481,10 @@ export class GlobalPersonMemoryStore {
       member = {
         version: 2, userId: uid, name: finalName, sourceChatKeys: sources,
         updatedAt: now, lastConsolidatedAt: old.lastConsolidatedAt || 0,
+        impressionScore: clampImpression(old.impressionScore),
+        impressionUpdatedAt: Number(old.impressionUpdatedAt) || 0,
+        impressionHistory: normalizeImpressionHistory(old.impressionHistory),
+        lastViceAt: Number(old.lastViceAt) || 0,
         impressions: incoming.map((content) => {
           const prev = previous.get(String(content));
           const createdAt = Number(prev?.createdAt) || now;

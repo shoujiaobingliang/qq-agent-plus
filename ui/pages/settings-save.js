@@ -173,6 +173,37 @@ async function saveConfig({ quiet = false } = {}) {
     };
   }
 
+  if (sec === 'impression') {
+    const bounded = (raw, min, max, fallback) => {
+      const n = Number(raw);
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+    };
+    const imp = c.impression || {};
+    const vice = imp.vice || {};
+    patch.impression = {
+      ...imp,
+      enabled: chk('#cfg-imp-enabled', imp.enabled !== false),
+      lowThreshold: clampInt(val('#cfg-imp-low', imp.lowThreshold ?? 30), 1, 100, 30),
+      highThreshold: clampInt(val('#cfg-imp-high', imp.highThreshold ?? 80), 1, 100, 80),
+      decayHalfLifeDays: clampInt(val('#cfg-imp-decay', imp.decayHalfLifeDays ?? 14), 1, 60, 14),
+      lowReplyFactor: bounded(val('#cfg-imp-low-reply', imp.lowReplyFactor ?? 0.4), 0.1, 0.8, 0.4),
+      highShareInfluence: bounded(val('#cfg-imp-share', imp.highShareInfluence ?? 0.25), 0, 0.5, 0.25),
+      vice: {
+        ...vice,
+        enabled: chk('#cfg-vice-enabled', vice.enabled !== false),
+        provider: String(val('#cfg-vice-provider', vice.provider || '')).trim(),
+        model: String(val('#cfg-vice-model', vice.model || '')).trim(),
+        baseChance: bounded(val('#cfg-vice-base-chance', vice.baseChance ?? 0.12), 0, 1, 0.12),
+        maxChance: bounded(val('#cfg-vice-max-chance', vice.maxChance ?? 0.7), 0, 1, 0.7),
+        burstDelta: clampInt(val('#cfg-vice-burst-delta', vice.burstDelta ?? -4), -10, 0, -4),
+        burstBelow: clampInt(val('#cfg-vice-burst-below', vice.burstBelow ?? 25), 0, 100, 25),
+        cooldownMinutes: clampInt(val('#cfg-vice-cooldown', vice.cooldownMinutes ?? 30), 1, 1440, 30),
+        maxContextChars: clampInt(val('#cfg-vice-context', vice.maxContextChars ?? 2000), 200, 8000, 2000),
+        maxHistoryMessages: clampInt(val('#cfg-vice-history', vice.maxHistoryMessages ?? 12), 2, 40, 12)
+      }
+    };
+  }
+
   if (sec === 'reminders') {
     // 这一页只有一个开关；列表与取消是即时操作，不走保存
     patch.reminders = { enabled: chk('#cfg-reminders-enabled', c.reminders?.enabled !== false) };
@@ -675,6 +706,20 @@ async function saveConfig({ quiet = false } = {}) {
       // 只提交称呼，不要在这里碰 ownerUin：管理员 QQ 由「全局管理员 QQ」唯一维护。
       addressAs: val('#cfg-admin-address', c.admin?.addressAs || '').trim().slice(0, 20)
     };
+    const viceId = String(val('#cfg-vice-persona-id', c.persona.vicePersonaId || 'tieba')).trim().toLowerCase() || 'tieba';
+    const viceName = String(val('#cfg-vice-persona-name', '')).trim().slice(0, 40) || viceId;
+    const viceRole = String(val('#cfg-vice-persona-role', ''));
+    const viceCards = (Array.isArray(c.persona.vicePersonas) ? c.persona.vicePersonas : [])
+      .map((card) => ({ ...card }));
+    if (!viceCards.some((card) => card.id === 'tieba')) {
+      viceCards.unshift({ id: 'tieba', name: 'tieba', roleText: '' });
+    }
+    const viceIndex = viceCards.findIndex((card) => card.id === viceId);
+    if (viceIndex >= 0) {
+      viceCards[viceIndex] = { ...viceCards[viceIndex], name: viceName, roleText: viceRole };
+    } else {
+      viceCards.push({ id: viceId, name: viceName, roleText: viceRole });
+    }
     patch.persona = {
       botName: val('#cfg-botname', c.persona.botName).trim() || '小鲸鱼',
       selfNickname: val('#cfg-selfnick', c.persona.selfNickname || '').trim(),
@@ -682,7 +727,9 @@ async function saveConfig({ quiet = false } = {}) {
       behaviorProfile: behaviorProfileDraft,
       roleText: roleTextDraft,
       customRules: customRulesDraft,
-      templateId
+      templateId,
+      vicePersonaId: viceId,
+      vicePersonas: viceCards
     };
     // 当前草稿来自自定义卡时，把编辑写回卡库里的同一张卡；否则只更新 persona 快照。
     // 这样保存后界面仍能匹配到那张卡，不会多出一张“自定义正文/额外自定义卡”。

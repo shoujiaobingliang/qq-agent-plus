@@ -42,6 +42,7 @@ export const EXPERIMENTAL_ORDERED_READ_TOOLS = new Set([
   'generate_image',          // 按张计费的生成：串行 + 结果决定下一步
   'read_image_text',          // OCR：与 get_message_images/get_message_audio 同类的观察动作，不并发
   'meme_lookup',              // 可能写候选库 + 外呼有每小时额度：保持串行，别和同批查询抢预算
+  'vice_persona',             // 生成副人格回复：结果决定下一步说什么，保持串行
   'skill'                     // 读技能后通常决定下一步，保持串行
 ]);
 

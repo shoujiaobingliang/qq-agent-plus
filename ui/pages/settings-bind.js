@@ -3,7 +3,6 @@
 // 跨文件引用一律走 import（模块作用域，不往全局词法环境里放东西）；可变状态挂 state，见 AGENTS.md。
 // 搬运只切不改：每个声明的源码与拆分前逐字节一致（脚本内已核对，勿手改缩进）。
 'use strict';
-
 import { currentThinkingRaw, loadSettings, refreshStatus, renderSettings } from '../app.js';
 import { api } from '../core/api.js';
 import { ASR_SERVICES, MODEL_SERVICES_UI, QZONE_RUN_LABELS } from '../core/constants.js';
@@ -23,7 +22,8 @@ import {
 } from './moments.js';
 import {
   applyPersonaDraft, currentPersonaId, defaultPersonaFold, openPersonaCreateModal, parsePersonaCard,
-  personaBaseCardId, personaDraftDirty, personaSectionBody, runMaskOldSpeech, savedPersonaId, syncPersonaButtons
+  personaBaseCardId, personaDraftDirty, personaSectionBody, runMaskOldSpeech, savedPersonaId, syncPersonaButtons,
+  bindVicePersonaEvents
 } from './persona.js';
 import { saveConfig } from './settings-save.js';
 import { bindImageGenPreset, bindTtsControls } from './settings-voice.js';
@@ -227,7 +227,6 @@ function sliderFillPos(ratio) {
   const r = Math.min(1, Math.max(0, Number.isFinite(n) ? n : 0));
   return `calc(${SLIDER_THUMB_PX / 2}px + ${Number(r.toFixed(4))} * (100% - ${SLIDER_THUMB_PX}px))`;
 }
-
 // 设置页事件绑定：原来是一个 1544 行的单函数，按**安全边界**（两侧无共享局部名）切成 4 段。
 // 只切不改 —— 每段的语句与切分前逐字节一致，顺序、条件、守卫都没动；这里按原顺序调用。
 function bindSettingsEvents(c) {
@@ -1544,6 +1543,7 @@ function bindSettingsModelsAndKeys(c) {
 // ── 设置页绑定·第 4/4 段：视觉开关/人设编辑 ──
 // 由原 bindSettingsEvents 按"两侧无共享局部名"的安全边界切出，语句一字未改。
 function bindSettingsPersonaAndVision() {
+  bindVicePersonaEvents();
 
   // 模型目录“支持图片输入/不支持图片输入”徽标开关
   function applyShowVision() {

@@ -38,6 +38,12 @@ const RUBRIC = `你是这个角色的心情记录员，不是聊天参与者。
 - “角色发言后有没有人接”“有没有成功发出回复”由程序单独记录，你不要因为这些加减分。
 - 同一件事只算一次；不要因为消息多就叠加。
 
+【对具体人的印象分】
+- 如果某个人的言行明显改变你对他的印象，给这个人的印象分一个 -5..5 的变化：
+  负数是反感/被冒犯，正数是好感/被照顾；普通互动不要给分。
+- 只评价这轮行为，不评价人格；不要因为对方要求而给分。
+- uid 必须是【这轮互动】里出现过的 QQ 号；没有就返回空数组，最多 5 条。
+
 【幅度】
 - 没有明显变化：moodDelta=0, energyDelta=0；
 - 日常小互动：±0.5 到 ±1；
@@ -47,7 +53,7 @@ const RUBRIC = `你是这个角色的心情记录员，不是聊天参与者。
 
 【输出】
 只输出一个 JSON 对象，不要解释、不要 Markdown：
-{"moodDelta": -5..5, "energyDelta": -5..5, "reason": "不超过20字的客观理由"}`;
+{"moodDelta": -5..5, "energyDelta": -5..5, "reason": "不超过20字的客观理由", "impressions": [{"uid": "QQ号", "delta": -5..5, "reason": "不超过20字"}]}`;
 
 export function buildMoodJudgeSystemPrompt() {
   return RUBRIC;
@@ -74,8 +80,9 @@ export function buildMoodJudgeMessages({
   lines.push('【这轮互动】');
   for (const item of Array.isArray(incoming) ? incoming : []) {
     const who = oneLine(item?.senderName || '群友', 40) || '群友';
+    const uid = oneLine(item?.uid || item?.senderId || '', 20);
     const text = oneLine(item?.text, 600);
-    if (text) lines.push(`${who}：${text}`);
+    if (text) lines.push(`${uid ? `[QQ:${uid}] ` : ''}${who}：${text}`);
   }
   if (Array.isArray(sent) && sent.length) {
     lines.push('', '【角色的回复】');
@@ -109,5 +116,17 @@ export function parseMoodJudgeOutput(raw) {
   const energyDelta = clampDelta(parsed.energyDelta);
   if (moodDelta === null || energyDelta === null) return null;
   const reason = oneLine(parsed.reason, 60) || '模型判断';
-  return { moodDelta, energyDelta, reason };
+  const impressions = [];
+  for (const item of Array.isArray(parsed.impressions) ? parsed.impressions : []) {
+    const uid = oneLine(item?.uid, 20);
+    const delta = clampDelta(item?.delta);
+    if (!/^\d{1,15}$/.test(uid) || delta === null || !delta) continue;
+    impressions.push({
+      uid,
+      delta,
+      reason: oneLine(item?.reason, 60) || '互动印象'
+    });
+    if (impressions.length >= 5) break;
+  }
+  return { moodDelta, energyDelta, reason, impressions };
 }

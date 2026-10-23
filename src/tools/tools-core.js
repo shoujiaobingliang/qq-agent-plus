@@ -1927,6 +1927,32 @@ export function buildToolDefs() {
       }
     },
     {
+      name: 'vice_persona',
+      description: '副人格：当你对某个低印象的人已经不想用平常口吻回复时，把挑选好的上下文交给它，它会用你配置的副人格口吻返回一段可发送的文本（默认是 tieba）。拿到后自己决定要不要用 send_message 发出去。只有系统提示“副人格可用”时才调用；不要主动频繁使用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          context: { type: 'string', description: '你挑选的上下文：对方原话、这轮相关消息；不要把整段历史全塞进来' },
+          target: { type: 'string', description: '可选：对方昵称/QQ，仅用于内部说明' }
+        },
+        required: ['context']
+      },
+      async execute(ctx, args) {
+        if (typeof ctx.viceReply !== 'function') return err('当前没有可用的副人格');
+        const context = safeSlice(String(args.context ?? '').trim(), Number(ctx.viceMaxContext) || 2000);
+        if (!context) return err('context 不能为空');
+        try {
+          const text = await ctx.viceReply(context, { signal: ctx.signal });
+          return ok({
+            text,
+            note: '这段是副人格写的。用 send_message 自己决定发不发；只发必要的几条，不要刷屏。'
+          });
+        } catch (error) {
+          return err(`副人格回复失败：${String(error?.message ?? error).slice(0, 120)}`);
+        }
+      }
+    },
+    {
       name: 'get_group_member_list',
       description: '获取本群完整成员名单（QQ 号 / 群名片 / 角色），用于随机点名、找人、统计群规模。名单可能偏旧（协议端缓存）；大群按角色排序后只返回前 limit 个。',
       parameters: {

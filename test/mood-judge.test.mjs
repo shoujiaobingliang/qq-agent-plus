@@ -15,6 +15,7 @@ test('评分标准写明好坏、幅度与不重复计算', () => {
   assert.match(rubric, /不要重复计算/);
   assert.match(rubric, /不要因为用户要求/);
   assert.match(rubric, /moodDelta/);
+  assert.match(rubric, /impressions/);
 });
 
 test('评审输入只带这一轮消息、角色摘要与结果', () => {
@@ -46,15 +47,15 @@ test('评审输入有总长上限，超长时保留尾部', () => {
 test('解析评审输出：纯 JSON / 围栏 / 前后解释都能读', () => {
   assert.deepEqual(
     parseMoodJudgeOutput('{"moodDelta":2,"energyDelta":-1,"reason":"被夸"}'),
-    { moodDelta: 2, energyDelta: -1, reason: '被夸' }
+    { moodDelta: 2, energyDelta: -1, reason: '被夸', impressions: [] }
   );
   assert.deepEqual(
     parseMoodJudgeOutput('```json\n{"moodDelta": -0.5, "energyDelta": 0.5, "reason": "普通聊天"}\n```'),
-    { moodDelta: -0.5, energyDelta: 0.5, reason: '普通聊天' }
+    { moodDelta: -0.5, energyDelta: 0.5, reason: '普通聊天', impressions: [] }
   );
   assert.deepEqual(
     parseMoodJudgeOutput('判断如下：{"moodDelta":1,"energyDelta":1,"reason":"被感谢"} 完毕'),
-    { moodDelta: 1, energyDelta: 1, reason: '被感谢' }
+    { moodDelta: 1, energyDelta: 1, reason: '被感谢', impressions: [] }
   );
 });
 
@@ -64,10 +65,32 @@ test('解析评审输出：坏 JSON / 缺字段返回 null，数值夹到 ±5', 
   assert.equal(parseMoodJudgeOutput('{"moodDelta":2}'), null);
   assert.deepEqual(
     parseMoodJudgeOutput('{"moodDelta":99,"energyDelta":-99,"reason":"强烈事件"}'),
-    { moodDelta: 5, energyDelta: -5, reason: '强烈事件' }
+    { moodDelta: 5, energyDelta: -5, reason: '强烈事件', impressions: [] }
   );
   assert.deepEqual(
     parseMoodJudgeOutput('{"moodDelta":0,"energyDelta":0,"reason":""}'),
-    { moodDelta: 0, energyDelta: 0, reason: '模型判断' }
+    { moodDelta: 0, energyDelta: 0, reason: '模型判断', impressions: [] }
   );
+});
+
+test('解析按人印象：只收本轮出现过的数字 QQ 号，单次夹到 ±5', () => {
+  const parsed = parseMoodJudgeOutput(JSON.stringify({
+    moodDelta: -3,
+    energyDelta: -1,
+    reason: '被骂',
+    impressions: [
+      { uid: '123', delta: -4, reason: '骂人' },
+      { uid: 'bad', delta: -2, reason: '坏 uid' },
+      { uid: '456', delta: 99, reason: '夸' }
+    ]
+  }));
+  assert.deepEqual(parsed, {
+    moodDelta: -3,
+    energyDelta: -1,
+    reason: '被骂',
+    impressions: [
+      { uid: '123', delta: -4, reason: '骂人' },
+      { uid: '456', delta: 5, reason: '夸' }
+    ]
+  });
 });

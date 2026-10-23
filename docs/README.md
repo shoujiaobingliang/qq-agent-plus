@@ -19,6 +19,7 @@
 | [CONVERSATION_MODES.md](CONVERSATION_MODES.md) | 对话引擎三模式（legacy / threaded / lifecycle）的差异与选择 |
 | [ATTENTION.md](ATTENTION.md) | 模型注意力层：hybrid 触发、ignore/peek/reply、必回规则与回落策略 |
 | [MOOD.md](MOOD.md) | 心情与精力：每轮模型评审、客观事件、对回复频率与语气的影响、控制台入口 |
+| [IMPRESSION.md](IMPRESSION.md) | 印象分与嘴臭副人格：按人评分、梯度概率、副人格会话与安全边界 |
 | [IO-RETENTION.md](IO-RETENTION.md) | 降低云盘 IOPS 的写入/读取策略，以及消息、线程 transcript、会话文件的保留期配置 |
 | [DAILY_MOMENTS.md](DAILY_MOMENTS.md) | 每日说说：生成、发布、去重与计划/时间口径 |
 | [QZONE_INTERACTIONS.md](QZONE_INTERACTIONS.md) | 好友动态与评论回复的巡检节奏与退避 |
