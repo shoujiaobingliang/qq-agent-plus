@@ -30,12 +30,16 @@ const RUBRIC = `你是这个角色的心情记录员，不是聊天参与者。
 - 反复解释同一件事、被来回拉扯；
 - 明显需要它一直热场、却没人接住。
 
+【精力的方向】
+- 精力只会被互动消耗或保持不变；恢复只来自睡觉。
+- energyDelta 只能是 0 或负数，不要因为被夸、被感谢、聊得开心就给正数。
+
 【中性】
 - 普通信息交换、群友之间聊天、角色只是旁观；
 - 礼貌但简短的问答。
 
 【不要重复计算】
-- “角色发言后有没有人接”“有没有成功发出回复”由程序单独记录，你不要因为这些加减分。
+- “角色发言后有没有人接”“有没有休息/睡觉”由程序单独记录，你不要因为这些加减分。
 - 同一件事只算一次；不要因为消息多就叠加。
 
 【对具体人的印象分】
@@ -53,7 +57,7 @@ const RUBRIC = `你是这个角色的心情记录员，不是聊天参与者。
 
 【输出】
 只输出一个 JSON 对象，不要解释、不要 Markdown：
-{"moodDelta": -5..5, "energyDelta": -5..5, "reason": "不超过20字的客观理由", "impressions": [{"uid": "QQ号", "delta": -5..5, "reason": "不超过20字"}]}`;
+{"moodDelta": -5..5, "energyDelta": -5..0, "reason": "不超过20字的客观理由", "impressions": [{"uid": "QQ号", "delta": -5..5, "reason": "不超过20字"}]}`;
 
 export function buildMoodJudgeSystemPrompt() {
   return RUBRIC;
@@ -113,8 +117,10 @@ export function parseMoodJudgeOutput(raw) {
   try { parsed = JSON.parse(text); } catch { return null; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
   const moodDelta = clampDelta(parsed.moodDelta);
-  const energyDelta = clampDelta(parsed.energyDelta);
-  if (moodDelta === null || energyDelta === null) return null;
+  const rawEnergy = clampDelta(parsed.energyDelta);
+  if (moodDelta === null || rawEnergy === null) return null;
+  // 精力只减不增：模型即使给了正数也按 0 处理（恢复只走睡觉）。
+  const energyDelta = Math.min(0, rawEnergy);
   const reason = oneLine(parsed.reason, 60) || '模型判断';
   const impressions = [];
   for (const item of Array.isArray(parsed.impressions) ? parsed.impressions : []) {

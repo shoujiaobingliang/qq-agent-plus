@@ -128,6 +128,8 @@
     "frequencyInfluence": 0.2,
     "toneInfluence": 0.6,
     "decayHalfLifeHours": 12,
+    "energyDrainPerHour": 1,
+    "energyFatigueRampHours": 12,
     "followUpMinEnergy": 25,
     "historyLimit": 200,
     "dailyKeepDays": 90,
@@ -146,20 +148,26 @@
       "sleepMoodGain": 12,
       "sleepEnergyGain": 20,
       "slackMoodGain": 6,
-      "slackEnergyGain": 8,
       "maxMoodForRest": 45,
       "maxEnergyForRest": 40,
-      "slackReplyFactor": 0.35
+      "slackReplyFactor": 0.35,
+      "schedule": {
+        "enabled": true,
+        "sleepAt": "23:30",
+        "wakeAt": "07:30",
+        "allowStayUp": true
+      }
     }
   }
 }
 ```
 
-- 全局一份；主观变化由每轮一次小模型评审决定，客观事件（被无视/成功回复）由程序记录。
+- 全局一份；主观变化由每轮一次小模型评审决定，客观事件（被无视）由程序记录。
+- 精力按 `energyDrainPerHour` 持续消耗，只有睡觉能恢复；连续清醒满 `energyFatigueRampHours` 小时后消耗速度翻倍，睡醒后重新计时。作息建议默认 23:30–次日 07:30，到点只提示、不自动拦截消息。
 - `judge.provider/model` 留空 = 跟随聊天模型；`maxCallsPerDay` / `timeoutMs` / `maxInputChars` 控制成本。
 - `rest`：`sleep` 是硬暂停（消息全保留、醒来补），`slack` 是软暂停（选择性回复、不主动开话题）；恢复量与触发门槛在这里调。
 - `enabled: false` 时不读不写，行为回到引入前。
-- `baseline` 是长期回归目标，也是控制台「恢复到基线」的目标。
+- `baseline` 是初始值与控制台「恢复到基线」的目标；心情会回归基线，精力不会（只持续消耗，靠睡觉恢复）。
 - `frequencyInfluence`（0-0.5）控制精力对回复/主动概率的影响；`toneInfluence`（0-1）控制语气提示强度，0 = 不注入。
 - 当前值保存在 `$DATA_DIR/mood.json`，不写进 `config.json`。
 - 详细规则见 [MOOD.md](MOOD.md)。

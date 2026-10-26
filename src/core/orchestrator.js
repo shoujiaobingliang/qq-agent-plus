@@ -530,6 +530,23 @@ export class Orchestrator {
     else this.proactiveSuppressions.delete(key);
   }
 
+  /** P1 shadow：把一次模型调用的思考 Token 交给精力模型；不影响任何决策。 */
+  #noteEnergyThinking(response, purpose) {
+    try {
+      const message = response?.message || {};
+      const reasoning = typeof message.reasoning_content === 'string' ? message.reasoning_content : '';
+      const content = typeof message.content === 'string' ? message.content : '';
+      this.mood?.noteThinking?.({
+        at: Date.now(),
+        reasoningTokens: Number(response?.usage?.completion_tokens_details?.reasoning_tokens) || 0,
+        completionTokens: Number(response?.usage?.completion_tokens) || 0,
+        reasoningChars: reasoning.length,
+        contentChars: content.length,
+        purpose
+      });
+    } catch { /* shadow only：失败不影响聊天 */ }
+  }
+
   /**
    * 心情评审：每轮机器人参与的对话结束后异步调用一次小模型。
    * 不阻塞回复；失败/超时/超每日上限只记日志，本轮不加不减。
@@ -1567,6 +1584,7 @@ export class Orchestrator {
       if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted', '前置判定失败');
       return;
     }
+    try { this.mood?.noteSession?.({ at: Date.now() }); } catch { /* shadow only */ }
 
     // 未命中时只确认本次判定的快照；运行批次在模型处理成功后确认。
     const cfgNow = getConfig();
@@ -1871,11 +1889,6 @@ export class Orchestrator {
       // 各端未读数不再堆积；默认关是因为它会改变"你自己打开机器人 QQ 时的未读观感"。
       if (getConfig().platform?.readReceipts === true) this.#markBatchRead(chatKey, triggerEntries);
       const status = session.sent.length > 0 ? 'done' : 'noreply';
-      if (session.sent.length > 0) {
-        try { this.#emitMood(this.mood.observeReplied()); } catch (error) {
-          log.warn('[mood] 成功回复记录失败：', error?.message ?? error);
-        }
-      }
       this.sessions.finish(session.id, status);
       this.emit('session-end', { sessionId: session.id, chatKey, status,
         sent: session.sent.length, finishReason: session.finishReason, usage: session.usage });
@@ -2193,6 +2206,7 @@ export class Orchestrator {
         });
         addUsage(session.usage, response.usage);
         session.usage.calls += 1;
+        this.#noteEnergyThinking(response, 'reply-correction');
         session.replyCorrectionUsage = response.usage;
         // 与主循环同口径：兜底渠道换过端点时，成本记到实际渠道；per-call 台账也要有一行
         session.model = response.model || session.model;
@@ -2778,6 +2792,7 @@ export class Orchestrator {
       const reasoningContent = typeof msg.reasoning_content === 'string'
         ? msg.reasoning_content
         : null;
+      this.#noteEnergyThinking(response, 'chat');
       // 2026-10-06 复审 P2：部分网关/自部署推理服务返回的 tool_calls 形态不规整（缺 id、
       // 非数组、null 项）。缺 id 的 tool 消息下一轮会被多数 OpenAI 兼容端点整请求 400 拒掉，
       // isRetryableError 判 false → 批次转人工、被 @ 的消息当场无人回。与 inline 路径自造
@@ -2865,6 +2880,7 @@ export class Orchestrator {
         session.webSearchCount = webSearchCount;
         markActivity(`正在调用 ${name}…`);
         const result = await executeTool(toolDefs, ctx, name, argsRaw);
+        try { this.mood?.noteToolCall?.({ at: Date.now() }); } catch { /* shadow only */ }
         // meme_lookup 命中本地库时零外呼；只有真的走到普通搜索/梗来源才计入"联网次数"。
         if (name === 'meme_lookup' && result?.isError !== true) {
           try {
@@ -3036,6 +3052,7 @@ export class Orchestrator {
   }
 
   #tickRest() {
+    // 作息只做提示，不在系统层自动 sleep：是否睡由模型调用 take_break 决定。
     const result = this.mood?.finishDueRest?.();
     if (!result?.finished) return;
     this.#emitMood(result.snapshot);

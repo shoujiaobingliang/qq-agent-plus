@@ -1856,13 +1856,16 @@ export function buildToolDefs() {
       description: '心情或精力很低时给自己放个假：睡觉或摸鱼。'
         + ' sleep = 硬暂停：休息期间收到的消息全部保持未读，醒来后统一补看，期间不回复任何消息；'
         + ' slack = 软暂停：仍然会看消息，但只选择性回一些，不主动开新话题（以后摸鱼时可能会刷小黑盒）。'
-        + ' 只有确实很低落/很累时才用；状态还好时系统会拒绝。休息结束（或被管理员叫醒）后心情和精力会恢复一些。'
+        + ' 决定睡觉时，先按人设用 send_message 回一句（如“晚安，我先去睡了”），再调用本工具；'
+        + ' 调用后进入硬暂停，消息会在醒来后统一补。'
+        + ' 睡觉会恢复精力，摸鱼只恢复心情、不恢复精力。'
+        + ' 作息窗口内调用 sleep 且不填 minutes 会直接睡到起床时间；作息只提示、不自动拦截，睡不睡由你自己决定。'
         + ' 睡前可选做几件事（都可以不填）：status 改 QQ 在线状态、signature 改个性签名、adminMessage 私聊管理员一句短话。',
       parameters: {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['sleep', 'slack'], description: 'sleep=睡觉（硬暂停）；slack=摸鱼（选择性回复）' },
-          minutes: { type: 'integer', description: '休息多少分钟（睡觉 30~180，摸鱼 10~60；不填用配置默认值）' },
+          minutes: { type: 'integer', description: '休息多少分钟（睡觉 30~180，摸鱼 10~60；作息窗口内睡觉不填 = 睡到起床时间）' },
           reason: { type: 'string', description: '一句很短的内部理由（可选，不直接发到群里）' },
           status: { type: 'string', description: '睡前可选：QQ 自定义在线状态（≤16 字，如“睡觉中”）' },
           signature: { type: 'string', description: '睡前可选：个性签名（≤40 字，如“晚安，明天见”）' },
@@ -1874,6 +1877,12 @@ export function buildToolDefs() {
         const mood = ctx.mood;
         if (!mood?.startRest) return err('心情系统未启用，不能休息');
         const kind = args.kind === 'slack' ? 'slack' : 'sleep';
+        // 有人在本轮说话时，先按人设回一句再睡；没有对话对象（主动唤醒/管理员操作等）可以直接睡。
+        const hasIncoming = Array.isArray(ctx.triggerEntries) && ctx.triggerEntries.length > 0;
+        const sentCount = Array.isArray(ctx.session?.sent) ? ctx.session.sent.length : 0;
+        if (kind === 'sleep' && hasIncoming && sentCount === 0) {
+          return err('决定睡觉前，先用 send_message 按人设回一句（如“晚安，我先去睡了”），再调用 take_break。');
+        }
         const snapshot = mood.startRest({ kind, minutes: args.minutes, reason: args.reason });
         if (!snapshot) {
           return err('现在还不能休息：心情/精力还没有低到需要休息，或者已经在休息中');

@@ -44,7 +44,7 @@ function renderMoodPanel(data) {
     </div>
     ${data.rest?.active ? `
       <div class="mood-rest">
-        <span>${data.rest.kind === 'slack' ? '摸鱼中' : '睡觉中'} · 还剩 ${Math.max(0, Number(data.rest.remainingMinutes) || 0)} 分钟</span>
+        <span>${data.rest.kind === 'slack' ? '摸鱼中' : (data.rest.scheduled ? '睡觉中（按作息）' : '睡觉中')} · 还剩 ${Math.max(0, Number(data.rest.remainingMinutes) || 0)} 分钟</span>
         <button type="button" class="btn btn-small" data-mood-wake="1">叫醒 / 结束</button>
       </div>` : ''}
     ${history.length ? `
@@ -73,14 +73,15 @@ function renderMoodSection(c) {
   const baseline = m.baseline && typeof m.baseline === 'object' ? m.baseline : {};
   const judge = m.judge && typeof m.judge === 'object' ? m.judge : {};
   const rest = m.rest && typeof m.rest === 'object' ? m.rest : {};
+  const schedule = rest.schedule && typeof rest.schedule === 'object' ? rest.schedule : {};
   const enabled = m.enabled !== false;
   const frequency = moodNum(m.frequencyInfluence, 0.2);
   const tone = moodNum(m.toneInfluence, 0.6);
   return `
     <h3 id="settings-mood">心情</h3>
     <div class="hint" style="margin-bottom:12px">
-      心情和精力是<strong>全局状态</strong>，由互动规则实时加减，并按半衰期回到基线。
-      精力影响回复与主动发言的频率，心情影响语气与主动性；
+      心情和精力是<strong>全局状态</strong>：心情按互动加减、按半衰期回到基线；
+      精力持续消耗，只有睡觉能补回来。精力影响回复与主动发言的频率，心情影响语气与主动性；
       <strong>不会改变角色设定、事实判断、安全边界或管理员指令</strong>。
     </div>
     <div class="checkbox-row">
@@ -125,6 +126,17 @@ function renderMoodSection(c) {
         </label>
       </div>
       <div class="gm-row">
+        <label>精力每小时消耗
+          <input type="number" id="cfg-mood-energy-drain" min="0" max="10" step="0.1" value="${moodNum(m.energyDrainPerHour, 1)}" />
+        </label>
+        <label>疲劳加速（连续清醒小时）
+          <input type="number" id="cfg-mood-fatigue-ramp" min="0" max="72" step="1" value="${moodNum(m.energyFatigueRampHours, 12)}" />
+        </label>
+      </div>
+      <div class="hint" style="margin-bottom:8px">
+        连续清醒越久，精力消耗越快：清醒满「疲劳加速」小时数后速度翻倍，睡醒后重新计时；填 0 关闭累积效果。
+      </div>
+      <div class="gm-row">
         <button type="button" class="btn btn-small" id="cfg-mood-reset">恢复到基线</button>
       </div>
 
@@ -135,7 +147,7 @@ function renderMoodSection(c) {
       </div>
       <div class="hint" style="margin-bottom:8px">
         睡觉会暂停处理所有消息，醒来统一补；摸鱼仍会看消息，但只选择性回复、不主动开话题。
-        只有心情或精力低于下面的门槛时才会允许休息。
+        睡觉恢复精力，摸鱼只恢复心情、不恢复精力。只有心情或精力低于下面的门槛时才会允许手动休息。
       </div>
       <div class="gm-row">
         <label>睡觉时长（分钟）
@@ -155,9 +167,6 @@ function renderMoodSection(c) {
         <label>摸鱼恢复心情
           <input type="number" id="cfg-mood-slack-mood-gain" min="0" max="50" step="1" value="${moodNum(rest.slackMoodGain, 6)}" />
         </label>
-        <label>摸鱼恢复精力
-          <input type="number" id="cfg-mood-slack-energy-gain" min="0" max="50" step="1" value="${moodNum(rest.slackEnergyGain, 8)}" />
-        </label>
       </div>
       <div class="gm-row">
         <label>可休息的心情上限
@@ -169,6 +178,28 @@ function renderMoodSection(c) {
         <label>摸鱼回复系数
           <input type="number" id="cfg-mood-slack-reply-factor" min="0.05" max="1" step="0.05" value="${moodNum(rest.slackReplyFactor, 0.35)}" />
         </label>
+      </div>
+
+      <h4>作息睡觉</h4>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-mood-schedule-enabled" ${schedule.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-mood-schedule-enabled">按作息自动睡觉</label>
+      </div>
+      <div class="hint" style="margin-bottom:8px">
+        到点只注入“建议睡觉”的提示，不自动拦截消息；是否睡由模型决定。
+        睡满整晚精力恢复到 100，晚睡/早醒按实际睡眠比例恢复。
+      </div>
+      <div class="gm-row">
+        <label>睡觉时间
+          <input type="time" id="cfg-mood-sleep-at" value="${esc(schedule.sleepAt || '23:30')}" />
+        </label>
+        <label>起床时间
+          <input type="time" id="cfg-mood-wake-at" value="${esc(schedule.wakeAt || '07:30')}" />
+        </label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-mood-allow-stay-up" ${schedule.allowStayUp !== false ? 'checked' : ''} />
+        <label for="cfg-mood-allow-stay-up">到点提示建议睡觉（关闭后不再提示）</label>
       </div>
     </div>`;
 }
@@ -211,7 +242,7 @@ function bindMoodEvents() {
   });
 
   $('#cfg-mood-reset')?.addEventListener('click', async () => {
-    const ok = await askForConfirmation('把心情和精力恢复到基线？当前状态会被重置，历史记录保留。');
+    const ok = await askForConfirmation('把心情和精力恢复到基线？这是管理员手动重置，不是自然恢复；历史记录保留。');
     if (!ok) return;
     try {
       await api('/api/mood/reset', { method: 'POST', body: JSON.stringify({ confirm: true }) });

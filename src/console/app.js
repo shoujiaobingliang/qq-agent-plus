@@ -3065,9 +3065,21 @@ export function createApp({
 
   router.add('GET', /^\/api\/memory-files\/(group|private)_(\d+)$/, async (req, res, params) => {
     const chatKey = `${params[1]}:${params[2]}`;
+    // 人物记忆页/会话记忆页显示“当前印象分”：按 impression.decayHalfLifeDays
+    // 惰性衰减后的值，而不是人物文件里可能已经过时的原始分。
+    const members = memory.members(chatKey).map((member) => {
+      const uid = String(member.userId || '').trim();
+      if (!/^\d{1,15}$/.test(uid) || typeof memory.impressionOf !== 'function') return member;
+      try {
+        const snap = memory.impressionOf(uid);
+        return { ...member, impressionScoreEffective: snap.score };
+      } catch {
+        return member;
+      }
+    });
     return json(res, 200, {
       ...memory.query(chatKey),
-      members: memory.members(chatKey),
+      members,
       handoff: memory.getHandoff(chatKey)
     });
   });

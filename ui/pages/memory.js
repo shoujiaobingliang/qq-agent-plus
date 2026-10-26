@@ -152,7 +152,8 @@ async function loadMemoryDetail(chatKey) {
     const rows = members.map((m) => {
       const who = notes[String(m.userId)] || m.name || m.userId || '某人';
       const qq = m.userId ? ` <span class="muted">(QQ ${esc(m.userId)})</span>` : '';
-      const score = Number.isFinite(Number(m.impressionScore)) ? Math.round(Number(m.impressionScore)) : 50;
+      const scoreValue = Number(m.impressionScoreEffective ?? m.impressionScore);
+      const score = Number.isFinite(scoreValue) ? Math.round(scoreValue) : 50;
       const imps = m.impressions.map((e) => `- ${impressionMetaLabel(e)}${e.content}`).join('\n');
       return `<div class="collapsible" open>
         <summary>${esc(who)}${qq}（${m.impressions.length} 条 · 印象 ${score}）

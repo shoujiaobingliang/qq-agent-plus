@@ -13,6 +13,7 @@ import {
 } from './tier-slider.js';   // 零依赖模块，避免循环依赖
 import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 import { normalizeTokenSaverMode } from './token-saver.js';   // 零依赖模块，避免循环依赖
+import { ENERGY_MODEL_DEFAULTS } from './energy-model.js';
 import { normalizeMomentWindows } from '../features/moment-schedule.js';
 import { PLATFORM_GATE_KEYS } from './platform-gates.js';   // 零依赖模块：按群覆盖的键名校验
 import {
@@ -331,7 +332,9 @@ export const DEFAULT_CONFIG = {
     baseline: { mood: 55, energy: 55 },
     frequencyInfluence: 0.2,   // 0-0.5：精力对回复/主动概率的最大偏移
     toneInfluence: 0.6,        // 0-1：心情对语气提示的强度
-    decayHalfLifeHours: 12,    // 1-168：向 baseline 回归的半衰期
+    decayHalfLifeHours: 12,    // 1-168：心情向 baseline 回归的半衰期
+    energyDrainPerHour: 1,     // 0-10：精力每小时基础消耗；不回归基线，只有睡觉能补
+    energyFatigueRampHours: 12, // 0-72：连续清醒多少小时后消耗速度翻倍；0 = 关闭累积疲劳
     followUpMinEnergy: 25,     // 低于此值不安排补话
     historyLimit: 200,         // 20-1000
     dailyKeepDays: 90,         // 7-365
@@ -353,10 +356,24 @@ export const DEFAULT_CONFIG = {
       sleepMoodGain: 12,
       sleepEnergyGain: 20,
       slackMoodGain: 6,
-      slackEnergyGain: 8,
       maxMoodForRest: 45,
       maxEnergyForRest: 40,
-      slackReplyFactor: 0.35
+      slackReplyFactor: 0.35,
+      // 作息睡觉：默认 23:30–次日 07:30。到点若仍有活跃消息/未读，允许先熬夜；
+      // 空闲后按剩余窗口睡，睡满整晚精力恢复到 100，晚睡/早醒按比例恢复。
+      schedule: {
+        enabled: true,
+        sleepAt: '23:30',
+        wakeAt: '07:30',
+        allowStayUp: true
+      }
+    },
+    // 精力模型 P1：只 shadow 计算，不参与决策；字段含义见 docs/requirements/energy.md。
+    energyModel: {
+      enabled: true,
+      shadow: true,
+      ...ENERGY_MODEL_DEFAULTS,
+      activity: { ...ENERGY_MODEL_DEFAULTS.activity }
     }
   },
   // 印象分（按人）：心情评审时顺便判断“这个人让我舒服/不舒服”，落入人物记忆。
@@ -1986,6 +2003,30 @@ export function updateConfig(patch) {
     const restCfg = moodCfg.rest && typeof moodCfg.rest === 'object' && !Array.isArray(moodCfg.rest)
       ? moodCfg.rest
       : {};
+    const scheduleCfg = restCfg.schedule && typeof restCfg.schedule === 'object' && !Array.isArray(restCfg.schedule)
+      ? restCfg.schedule
+      : {};
+    const clock = (value, fallback) => {
+      const text = String(value ?? '').trim();
+      return /^([01]\d|2[0-3]):([0-5]\d)$/.test(text) ? text : fallback;
+    };
+    let scheduleSleepAt = clock(scheduleCfg.sleepAt, defaults.rest.schedule.sleepAt);
+    let scheduleWakeAt = clock(scheduleCfg.wakeAt, defaults.rest.schedule.wakeAt);
+    // 相同时间 = 0 长度窗口，等于永远不睡；按坏配置处理，回退默认值。
+    if (scheduleSleepAt === scheduleWakeAt) {
+      scheduleSleepAt = defaults.rest.schedule.sleepAt;
+      scheduleWakeAt = defaults.rest.schedule.wakeAt;
+    }
+    const energyCfgIn = moodCfg.energyModel && typeof moodCfg.energyModel === 'object' && !Array.isArray(moodCfg.energyModel)
+      ? moodCfg.energyModel
+      : {};
+    const energyDefaults = defaults.energyModel;
+    const activityIn = energyCfgIn.activity && typeof energyCfgIn.activity === 'object' && !Array.isArray(energyCfgIn.activity)
+      ? energyCfgIn.activity
+      : {};
+    const includePurposes = Array.isArray(activityIn.includePurposes)
+      ? activityIn.includePurposes.map(String).filter(Boolean).slice(0, 8)
+      : [...energyDefaults.activity.includePurposes];
     next.mood = {
       enabled: moodCfg.enabled !== false,
       baseline: {
@@ -1995,6 +2036,10 @@ export function updateConfig(patch) {
       frequencyInfluence: bounded(moodCfg.frequencyInfluence, defaults.frequencyInfluence, 0, 0.5),
       toneInfluence: bounded(moodCfg.toneInfluence, defaults.toneInfluence, 0, 1),
       decayHalfLifeHours: bounded(moodCfg.decayHalfLifeHours, defaults.decayHalfLifeHours, 1, 168),
+      energyDrainPerHour: bounded(moodCfg.energyDrainPerHour, defaults.energyDrainPerHour, 0, 10),
+      energyFatigueRampHours: bounded(
+        moodCfg.energyFatigueRampHours, defaults.energyFatigueRampHours, 0, 72
+      ),
       followUpMinEnergy: score(moodCfg.followUpMinEnergy, defaults.followUpMinEnergy),
       historyLimit: Math.round(bounded(moodCfg.historyLimit, defaults.historyLimit, 20, 1000)),
       dailyKeepDays: Math.round(bounded(moodCfg.dailyKeepDays, defaults.dailyKeepDays, 7, 365)),
@@ -2021,10 +2066,61 @@ export function updateConfig(patch) {
         sleepMoodGain: bounded(restCfg.sleepMoodGain, defaults.rest.sleepMoodGain, 0, 50),
         sleepEnergyGain: bounded(restCfg.sleepEnergyGain, defaults.rest.sleepEnergyGain, 0, 50),
         slackMoodGain: bounded(restCfg.slackMoodGain, defaults.rest.slackMoodGain, 0, 50),
-        slackEnergyGain: bounded(restCfg.slackEnergyGain, defaults.rest.slackEnergyGain, 0, 50),
         maxMoodForRest: score(restCfg.maxMoodForRest, defaults.rest.maxMoodForRest),
         maxEnergyForRest: score(restCfg.maxEnergyForRest, defaults.rest.maxEnergyForRest),
-        slackReplyFactor: bounded(restCfg.slackReplyFactor, defaults.rest.slackReplyFactor, 0.05, 1)
+        slackReplyFactor: bounded(restCfg.slackReplyFactor, defaults.rest.slackReplyFactor, 0.05, 1),
+        schedule: {
+          enabled: scheduleCfg.enabled !== false,
+          sleepAt: scheduleSleepAt,
+          wakeAt: scheduleWakeAt,
+          allowStayUp: scheduleCfg.allowStayUp !== false
+        }
+      },
+      energyModel: {
+        enabled: energyCfgIn.enabled !== false,
+        shadow: energyCfgIn.shadow !== false,
+        tickSeconds: Math.round(bounded(energyCfgIn.tickSeconds, energyDefaults.tickSeconds, 5, 300)),
+        kr: bounded(energyCfgIn.kr, energyDefaults.kr, 0, 1),
+        kc: bounded(energyCfgIn.kc, energyDefaults.kc, 0, 1),
+        ks: bounded(energyCfgIn.ks, energyDefaults.ks, 0, 1),
+        gamma: bounded(energyCfgIn.gamma, energyDefaults.gamma, 0, 1),
+        delta: bounded(energyCfgIn.delta, energyDefaults.delta, 0, 1),
+        alpha: bounded(energyCfgIn.alpha, energyDefaults.alpha, 0, 1),
+        beta: bounded(energyCfgIn.beta, energyDefaults.beta, 0, 1),
+        eta: bounded(energyCfgIn.eta, energyDefaults.eta, 0, 1),
+        dayMinutes: bounded(energyCfgIn.dayMinutes, energyDefaults.dayMinutes, 1, 1440),
+        phaseOffsetMinutes: Math.round(bounded(
+          energyCfgIn.phaseOffsetMinutes, energyDefaults.phaseOffsetMinutes, 0, 1439
+        )),
+        eMin: bounded(energyCfgIn.eMin, energyDefaults.eMin, 0.01, 0.5),
+        maxStepMinutes: bounded(energyCfgIn.maxStepMinutes, energyDefaults.maxStepMinutes, 0.1, 60),
+        activity: {
+          windowMinutes: bounded(
+            activityIn.windowMinutes, energyDefaults.activity.windowMinutes, 1, 120
+          ),
+          fullTokensPerMinute: bounded(
+            activityIn.fullTokensPerMinute, energyDefaults.activity.fullTokensPerMinute, 1, 100000
+          ),
+          maxTokensPerCall: Math.round(bounded(
+            activityIn.maxTokensPerCall, energyDefaults.activity.maxTokensPerCall, 1, 1000000
+          )),
+          wThink: bounded(activityIn.wThink, energyDefaults.activity.wThink, 0, 1),
+          wSession: bounded(activityIn.wSession, energyDefaults.activity.wSession, 0, 1),
+          wTool: bounded(activityIn.wTool, energyDefaults.activity.wTool, 0, 1),
+          toolFullRate: bounded(
+            activityIn.toolFullRate, energyDefaults.activity.toolFullRate, 0.1, 1000
+          ),
+          emaMinutes: bounded(
+            activityIn.emaMinutes, energyDefaults.activity.emaMinutes, 0.1, 120
+          ),
+          estimateCharsPerToken: bounded(
+            activityIn.estimateCharsPerToken, energyDefaults.activity.estimateCharsPerToken, 0.1, 20
+          ),
+          sessionWindowMinutes: bounded(
+            activityIn.sessionWindowMinutes, energyDefaults.activity.sessionWindowMinutes, 1, 120
+          ),
+          includePurposes
+        }
       }
     };
   }

@@ -350,3 +350,29 @@ test('人物记忆统计读全局布局（memory/people/<QQ>.json），不重复
   assert.equal(priv.people, 1);
   assert.equal(priv.impressions, 1);
 });
+
+test('identitySnapshot 附带人物记忆里的当前印象分', async (t) => {
+  const dir = fs.mkdtempSync(path.join(root, 'identity-impression-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const identityStore = new IdentityStore({ dataDir: dir });
+  identityStore.rebuild({
+    activityRows: [{
+      userId: '123456',
+      chatKey: 'group:100',
+      name: '测试人物',
+      messageCount: 1,
+      firstSeenAt: 1,
+      lastSeenAt: 2
+    }]
+  });
+  identityStore.close();
+
+  const observer = new AssetObserver({
+    dataDir: dir,
+    memory: {
+      impressionOf: (uid) => ({ userId: uid, score: 62 })
+    }
+  });
+  const snapshot = observer.identitySnapshot();
+  assert.equal(snapshot.entries[0].impressionScore, 62);
+});

@@ -54,7 +54,9 @@
 **客观事件仍由程序记录**（评审模型不重复计分）：
 
 - 群聊里发言后，到补话时仍没人接话：小幅负向（私聊不算）；
-- 成功发出回复：小幅加精力。
+- 发言本身不再加精力；精力只会随时间与互动消耗。
+- 精力按 `energyDrainPerHour` 单向下降，不向基线回升；只有睡觉能补回来。
+  连续清醒越久消耗越快：清醒满 `energyFatigueRampHours` 小时后速度翻倍，睡醒后重新计时。
 
 边界：
 
@@ -62,6 +64,13 @@
 - 每小时全局最多 ±12、单个用户最多 ±6；
 - 所有值夹在 0-100；
 - 评审失败、超时、超每日上限、预算超限时，本轮不加不减，不影响聊天。
+
+## 精力模型（P1 shadow）
+
+`mood.energyModel` 维护 `E`（即时精力）、`S`（睡眠压力）、`φ`（昼夜相位），活动强度按主对话的
+思考 Token（缺失时用 `completion_tokens` 兜底）计算。**P1 只计算/记录，不参与回复、主动与休息决策**；
+`shadow=false` 可关闭日志，`enabled=false` 可整体关闭。`GET /api/mood` 的 `energyModel` 字段可看当前值，
+详细参数与分阶段计划见 [`docs/requirements/energy.md`](requirements/energy.md)。
 
 ## 对行为的影响
 
@@ -78,17 +87,34 @@
 ## 睡觉与摸鱼
 
 心情或精力低于 `rest.maxMoodForRest` / `rest.maxEnergyForRest` 时，模型可以调用
-`take_break` 自行休息；状态还好时系统会拒绝，避免随手偷懒。
+`take_break` 自行休息；窗口外状态还好时系统会拒绝，避免随手偷懒。作息窗口内主动睡不受此门槛限制。
 
 - **睡觉 `kind=sleep`**：硬暂停。休息期间收到的消息照常入库但**全部保持未读**，
   不建唤醒、不派发提醒、不主动开话题；醒来后补处理积压消息。
 - **摸鱼 `kind=slack`**：软暂停。仍会看消息，但回复概率乘 `rest.slackReplyFactor`，
   不主动开话题、不安排补话；只选择性回复一些（以后会接入小黑盒刷帖等摸鱼内容）。
+- **睡前告别**：决定睡觉时先按人设用 `send_message` 回一句（如“晚安，我先去睡了”），再调用
+  `take_break(kind=sleep)`；本轮有人说话但还没回时，工具会拒绝并要求先回一句。
+  没有对话对象（主动唤醒/管理员操作）可以直接睡。
 - 睡前可选：在 `take_break` 里填 `status` 改 QQ 在线状态、`signature` 改个性签名、
   `adminMessage` 私聊管理员一句短话。都失败也不影响休息本身，结果会回在工具返回里。
-- 两种休息结束时都会恢复心情/精力（睡觉更多、摸鱼较少）；管理员在控制台提前叫醒时，
+- 两种休息结束都会恢复心情，但**只有睡觉恢复精力**（摸鱼不恢复精力）；管理员在控制台提前叫醒时，
   按已休息时长给部分恢复。
 - 默认：睡觉 90 分钟、摸鱼 30 分钟；控制台「设置 → 心情」可调时长与恢复量。
+
+## 作息建议
+
+默认每天 **23:30–次日 07:30**（`mood.rest.schedule`）。这是**建议，不是系统级静音**：
+
+- 到点**不自动睡、不拦截消息**；在下一次模型请求的用户提示词里注入“建议睡觉，也可以继续熬夜”；
+- 只有模型自己调用 `take_break(kind=sleep)` 才进入硬暂停；窗口内调用且不填时长会直接睡到起床时间；
+- 睡满整晚：精力恢复到 100，心情增加 `sleepMoodGain`；
+- 晚睡/早醒：按实际睡眠时长占整晚窗口的比例恢复——
+  `精力 += (100 - 精力) × 比例`，心情同样按比例给 `sleepMoodGain`；
+- 管理员提前叫醒也按同一比例结算；
+- 模型不睡：消息照常处理，精力/疲劳继续累积；系统不强制叫醒、不强制拦截；
+- 睡醒后连续清醒时间清零（打盹也算睡过），精力消耗速度从基础值重新累积；
+- 摸鱼不恢复精力；只有睡觉可以。
 
 ## 语气
 
@@ -114,6 +140,8 @@
     "frequencyInfluence": 0.2,
     "toneInfluence": 0.6,
     "decayHalfLifeHours": 12,
+    "energyDrainPerHour": 1,
+    "energyFatigueRampHours": 12,
     "followUpMinEnergy": 25,
     "historyLimit": 200,
     "dailyKeepDays": 90,
@@ -132,29 +160,36 @@
       "sleepMoodGain": 12,
       "sleepEnergyGain": 20,
       "slackMoodGain": 6,
-      "slackEnergyGain": 8,
       "maxMoodForRest": 45,
       "maxEnergyForRest": 40,
-      "slackReplyFactor": 0.35
+      "slackReplyFactor": 0.35,
+      "schedule": {
+        "enabled": true,
+        "sleepAt": "23:30",
+        "wakeAt": "07:30",
+        "allowStayUp": true
+      }
     }
   }
 }
 ```
 
 - `enabled`：关闭后不读不写、所有系数为 1，行为回到引入心情之前。
-- `baseline`：长期回归目标，也是“恢复到基线”的目标值。
+- `baseline`：初始化与「恢复到基线」的目标值。心情会回归基线；精力不会，只用于初始值/手动重置。
 - `frequencyInfluence`：0-0.5，越大精力对频率的影响越明显。
 - `toneInfluence`：0-1，为 0 时不注入任何心情话术。
-- `decayHalfLifeHours`：偏离基线后，多久衰减一半。
+- `decayHalfLifeHours`：心情偏离基线后，多久衰减一半。
+- `energyDrainPerHour`：精力每小时单向消耗量（0-10，默认 1）；0 = 不随时间下降。
+- `energyFatigueRampHours`：连续清醒多少小时后消耗速度翻倍（0-72，默认 12）；睡醒后重新计时，0 = 关闭累积疲劳。
 - `followUpMinEnergy`：低于该精力不安排补话。
 - `historyLimit` / `dailyKeepDays`：变化流水与每日汇总的保留量。
 - `judge`：心情评审。`enabled=false` 时完全不做模型判断（客观事件仍生效）；`provider/model` 留空跟随聊天模型；`maxCallsPerDay`、`timeoutMs`、`maxInputChars` 控制成本与输入体积。
-- `rest`：睡觉/摸鱼。`enabled=false` 时 `take_break` 工具不注入；时长、恢复量、触发门槛与摸鱼回复系数都在这里。
+- `rest`：睡觉/摸鱼。`enabled=false` 时 `take_break` 工具不注入；时长、恢复量、触发门槛与摸鱼回复系数都在这里。`schedule` 是作息建议：`sleepAt`/`wakeAt`（本地时间）、`allowStayUp`（是否注入建议，不是强制睡眠）。
 
 ## 控制台
 
 - 顶部状态栏：心情与精力两条 mini bar + 当前档位；关闭时隐藏。
-- 「设置 → 心情」：当前状态、最近变化、最近 7 天汇总、基线/影响强度/半衰期/补话阈值、是否由模型评审、每日评审上限、休息时长与恢复量，以及「恢复到基线」「叫醒 / 结束摸鱼」。
+- 「设置 → 心情」：当前状态、最近变化、最近 7 天汇总、基线/影响强度/半衰期/每小时精力消耗/补话阈值、是否由模型评审、每日评审上限、休息时长与恢复量、作息建议时间与「到点提示」，以及「恢复到基线」「叫醒 / 结束摸鱼」。
 - `GET /api/mood`：当前快照 + 最近 50 条变化 + 最近 7 天汇总。
 - `POST /api/mood/reset`：需 `confirm: true`，恢复基线并保留历史。
 

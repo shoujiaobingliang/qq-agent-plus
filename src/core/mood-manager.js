@@ -7,6 +7,14 @@
 //   · 关闭时不读不写，所有系数恒为 1，行为完全回到现状。
 import { DATA_DIR, getConfig } from './config.js';
 import {
+  activityFromSamples,
+  advanceEnergy,
+  migrateLegacyEnergy,
+  observeEnergy,
+  thinkingTokensForSample
+} from './energy-model.js';
+import { sleepWindowFor } from './mood-schedule.js';
+import {
   DEFAULT_DAILY_KEEP_DAYS,
   DEFAULT_ENERGY,
   DEFAULT_HISTORY_LIMIT,
@@ -36,9 +44,14 @@ export class MoodManager {
     this.dataDir = dataDir;
     this.now = typeof now === 'function' ? now : Date.now;
     this.random = typeof random === 'function' ? random : Math.random;
-    this.log = typeof log === 'function' ? log : () => {};
+    this.log = typeof log === 'function'
+      ? log
+      : (typeof log?.info === 'function' ? (...args) => log.info(...args) : () => {});
     this.state = null;
     this.loaded = false;
+    // P1 shadow：思考/工具/会话样本只存在内存里；重启后活动从 0 重新累积。
+    this.energySamples = [];
+    this.lastShadowLogAt = 0;
   }
 
   config() {
@@ -64,6 +77,16 @@ export class MoodManager {
     return numIn(this.config().decayHalfLifeHours, 12, 1, 168);
   }
 
+  /** 精力每小时单向消耗量；0 = 不随时间下降。只有睡觉能补回来。 */
+  #energyDrain() {
+    return numIn(this.config().energyDrainPerHour, 1, 0, 10);
+  }
+
+  /** 连续清醒多久后消耗速度翻倍；0 = 关闭累积疲劳。 */
+  #fatigueRamp() {
+    return numIn(this.config().energyFatigueRampHours, 12, 0, 72);
+  }
+
   #historyLimit() {
     return Math.round(numIn(this.config().historyLimit, DEFAULT_HISTORY_LIMIT, 20, 1000));
   }
@@ -85,6 +108,16 @@ export class MoodManager {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   }
 
+  #scheduleConfig() {
+    const value = this.#restConfig().schedule;
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
+  #energyConfig() {
+    const value = this.config().energyModel;
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+
   restEnabled() {
     return this.enabled() && this.#restConfig().enabled !== false;
   }
@@ -102,12 +135,127 @@ export class MoodManager {
     return this.state;
   }
 
+  #energyEnabled() {
+    return this.#energyConfig().enabled !== false;
+  }
+
+  #trimEnergySamples(now = this.now()) {
+    const cfg = this.#energyConfig();
+    const window = Math.max(1, Number(cfg.activity?.windowMinutes) || 10);
+    const since = Number(now) - (window + 5) * 60 * 1000;
+    this.energySamples = this.energySamples
+      .filter((sample) => Number(sample?.at) >= since)
+      .slice(-2000);
+  }
+
+  /** P1 shadow：记录一次模型调用的思考 Token；不影响任何决策。 */
+  noteThinking({
+    at = this.now(),
+    reasoningTokens = 0,
+    completionTokens = 0,
+    reasoningChars = 0,
+    contentChars = 0,
+    purpose = 'chat'
+  } = {}) {
+    if (!this.#energyEnabled()) return;
+    const tokens = thinkingTokensForSample({
+      reasoningTokens,
+      completionTokens,
+      reasoningChars,
+      contentChars,
+      params: this.#energyConfig()
+    });
+    if (!tokens) return;
+    const sampleAt = Number(at) || this.now();
+    this.energySamples.push({
+      at: sampleAt,
+      kind: 'thinking',
+      tokens,
+      purpose: String(purpose || 'chat')
+    });
+    this.#trimEnergySamples(sampleAt);
+  }
+
+  noteToolCall({ at = this.now() } = {}) {
+    if (!this.#energyEnabled()) return;
+    const sampleAt = Number(at) || this.now();
+    this.energySamples.push({ at: sampleAt, kind: 'tool' });
+    this.#trimEnergySamples(sampleAt);
+  }
+
+  noteSession({ at = this.now() } = {}) {
+    if (!this.#energyEnabled()) return;
+    const sampleAt = Number(at) || this.now();
+    this.energySamples.push({ at: sampleAt, kind: 'session' });
+    this.#trimEnergySamples(sampleAt);
+  }
+
+  /** P1 shadow tick：更新 energyModel 并返回观测值；不参与行为决策。 */
+  #tickEnergyShadow(now = this.now(), { sleeping } = {}) {
+    if (!this.#energyEnabled()) return null;
+    const cfg = this.#energyConfig();
+    const state = this.#load();
+    if (!state.energyModel) {
+      // 旧状态/手动重置后没有 shadow：按当前旧 energy/lastSleepAt 生成初值。
+      const migrated = migrateLegacyEnergy({
+        energy: state.energy,
+        lastSleepAt: state.lastSleepAt,
+        now,
+        params: cfg
+      });
+      state.energyModel = {
+        ...migrated,
+        activity: 0,
+        activityEma: 0,
+        updatedAt: now
+      };
+    }
+    const asleep = sleeping === undefined ? this.sleeping() : sleeping === true;
+    const activity = activityFromSamples(this.energySamples, {
+      now,
+      previousActivity: Number(state.energyModel.activityEma) || 0,
+      params: cfg
+    });
+    const advanced = advanceEnergy(state.energyModel, {
+      now,
+      activity: activity.activity,
+      sleeping: asleep,
+      params: cfg
+    });
+    const observed = observeEnergy(advanced, cfg);
+    state.energyModel = {
+      ...advanced,
+      activity: activity.activity,
+      activityEma: activity.activity,
+      updatedAt: now
+    };
+    this.state = state;
+    this.loaded = true;
+    if (cfg.shadow !== false && now - this.lastShadowLogAt >= 15 * 60 * 1000) {
+      this.lastShadowLogAt = now;
+      this.log(`[energy-shadow] E=${observed.E} S=${observed.S} Eobs=${observed.Eobs}`
+        + ` activity=${Math.round(activity.activity * 100) / 100}`
+        + ` rate=${Math.round(activity.rate)}/min`);
+    }
+    return {
+      ...observed,
+      activity: activity.activity,
+      rate: activity.rate,
+      tokens: activity.tokens,
+      aThink: activity.aThink,
+      aSession: activity.aSession,
+      aTool: activity.aTool
+    };
+  }
+
   /** 当前值（已做惰性衰减），不写盘。 */
   #current() {
     return decayMood(this.#load(), {
       now: this.now(),
       baseline: this.baseline(),
-      halfLifeHours: this.#halfLife()
+      halfLifeHours: this.#halfLife(),
+      energyDrainPerHour: this.#energyDrain(),
+      energyFatigueRampHours: this.#fatigueRamp()
     });
   }
 
@@ -132,12 +280,29 @@ export class MoodManager {
     const snap = moodSnapshot(current, {
       now: this.now(),
       baseline: this.baseline(),
-      halfLifeHours: this.#halfLife()
+      halfLifeHours: this.#halfLife(),
+      energyDrainPerHour: this.#energyDrain(),
+      energyFatigueRampHours: this.#fatigueRamp()
     });
+    const scheduleCfg = this.#scheduleConfig();
+    const window = this.scheduledSleepWindow();
     return {
       ...snap,
       toneInfluence: this.#toneInfluence(),
-      restEnabled: this.restEnabled()
+      restEnabled: this.restEnabled(),
+      energyModel: this.#tickEnergyShadow(this.now()),
+      schedule: {
+        enabled: scheduleCfg.enabled !== false,
+        sleepAt: scheduleCfg.sleepAt || '23:30',
+        wakeAt: scheduleCfg.wakeAt || '07:30',
+        active: Boolean(window?.active),
+        // 作息只提示，不在系统层自动 sleep；调用方把它注入用户提示词。
+        suggestsSleep: Boolean(
+          window?.active
+          && !snap.rest?.active
+          && scheduleCfg.allowStayUp !== false
+        )
+      }
     };
   }
 
@@ -149,11 +314,14 @@ export class MoodManager {
 
   #apply(event, { bypassLimits = false } = {}) {
     if (!this.enabled()) return null;
+    this.#tickEnergyShadow(this.now());
     const current = this.#current();
     const next = applyMoodEvent(current, event, {
       now: this.now(),
       baseline: this.baseline(),
       halfLifeHours: this.#halfLife(),
+      energyDrainPerHour: this.#energyDrain(),
+      energyFatigueRampHours: this.#fatigueRamp(),
       historyLimit: this.#historyLimit(),
       dailyKeepDays: this.#dailyKeepDays(),
       bypassLimits
@@ -168,17 +336,15 @@ export class MoodManager {
     return this.snapshot();
   }
 
-  observeReplied() {
-    return this.#apply({ moodDelta: 0, energyDelta: 0.4, reason: '成功发出回复' });
-  }
-
   /**
    * 模型评审结果：只接受夹紧后的 delta；reason 只留一行，避免把整段用户原文带进状态文件。
+   * 精力只能被互动消耗（<=0）：恢复只来自睡觉，评审不能把精力凭空加回来。
    */
   applyJudge({ moodDelta = 0, energyDelta = 0, reason = '' } = {}) {
     if (!this.enabled()) return null;
     const text = String(reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 60) || '模型判断';
-    return this.#apply({ moodDelta, energyDelta, reason: text });
+    const safeEnergy = Math.min(0, Number(energyDelta) || 0);
+    return this.#apply({ moodDelta, energyDelta: safeEnergy, reason: text });
   }
 
   /** 当前休息状态；已到期但尚未结算时 `active=false`，由编排器的 tick 结算。 */
@@ -190,6 +356,7 @@ export class MoodManager {
     const active = rest.until > now;
     return {
       kind: rest.kind,
+      scheduled: rest.scheduled === true,
       startedAt: rest.startedAt,
       until: rest.until,
       reason: rest.reason,
@@ -213,7 +380,8 @@ export class MoodManager {
   }
 
   /**
-   * 开始休息。只有心情或精力低于阈值时才允许（防止模型随手偷懒）。
+   * 开始休息。窗口外只有心情/精力低时才允许；作息窗口内模型主动睡不受门槛限制。
+   * 窗口内且未指定 minutes：睡到 wakeAt（按作息结算恢复）。
    * 返回快照；不可休息（未启用/已休息/状态还很好）返回 null。
    */
   startRest({ kind = 'sleep', minutes, reason = '' } = {}) {
@@ -221,12 +389,22 @@ export class MoodManager {
     if (this.restStatus()?.active) return null;
     // 上一次休息已经到期但 ticker 还没结算：先结算，避免把上一次的恢复量吞掉。
     if (this.#current().rest) this.finishDueRest();
+    const safeKind = kind === 'slack' ? 'slack' : 'sleep';
+    const window = safeKind === 'sleep' ? this.scheduledSleepWindow() : null;
+    // 作息窗口内、模型没指定时长：按作息睡到起床时间。
+    if (window?.active && minutes === undefined) {
+      return this.startScheduledSleep({
+        windowStart: window.start,
+        windowEnd: window.end,
+        reason: reason || '按作息睡觉'
+      });
+    }
     const state = this.#current();
     const cfg = this.#restConfig();
     const maxMood = numIn(cfg.maxMoodForRest, 45, 0, 100);
     const maxEnergy = numIn(cfg.maxEnergyForRest, 40, 0, 100);
-    if (Number(state.mood) > maxMood && Number(state.energy) > maxEnergy) return null;
-    const safeKind = kind === 'slack' ? 'slack' : 'sleep';
+    // 作息窗口内是“建议睡觉”，模型主动睡不要求状态很低；窗口外维持原门槛。
+    if (!window?.active && Number(state.mood) > maxMood && Number(state.energy) > maxEnergy) return null;
     const defaultMinutes = safeKind === 'sleep'
       ? numIn(cfg.sleepMinutes, 90, 30, 180)
       : numIn(cfg.slackMinutes, 30, 10, 60);
@@ -255,44 +433,122 @@ export class MoodManager {
     return this.snapshot();
   }
 
+  /** 当前/下一次作息窗口；未启用或关闭时返回 null。 */
+  scheduledSleepWindow(now = this.now()) {
+    if (!this.restEnabled()) return null;
+    const cfg = this.#scheduleConfig();
+    if (cfg.enabled === false) return null;
+    return sleepWindowFor(now, { sleepAt: cfg.sleepAt, wakeAt: cfg.wakeAt });
+  }
+
+  /**
+   * 按作息开始睡觉：不受“心情/精力低”门槛限制，睡到窗口结束。
+   * 只由编排器的休息 ticker 调用；窗口已过/已在休息中返回 null。
+   */
+  startScheduledSleep({ windowStart, windowEnd, reason = '按作息睡觉' } = {}) {
+    if (!this.restEnabled()) return null;
+    const cfg = this.#scheduleConfig();
+    if (cfg.enabled === false) return null;
+    if (this.restStatus()?.active) return null;
+    // 上一次休息已到期但 ticker 还没结算：先结算，避免把它吞掉。
+    if (this.#current().rest) this.finishDueRest();
+    const now = this.now();
+    const end = Number(windowEnd) || 0;
+    const start = Number(windowStart) || now;
+    if (!Number.isFinite(end) || end <= now) return null;
+    const state = this.#current();
+    const reasonText = String(reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 60) || '按作息睡觉';
+    const next = {
+      ...state,
+      rest: {
+        kind: 'sleep',
+        scheduled: true,
+        windowStart: start,
+        windowEnd: end,
+        startedAt: now,
+        until: end,
+        reason: reasonText
+      },
+      updatedAt: now
+    };
+    this.state = next;
+    this.loaded = true;
+    try {
+      writeMoodState(next, { dataDir: this.dataDir });
+    } catch (error) {
+      this.log(`[mood] 作息睡觉状态写入失败（内存值继续可用）：${error?.message ?? error}`);
+    }
+    return this.snapshot();
+  }
+
   /**
    * 结算到期的休息。自然结束给全额恢复；被管理员提前叫醒按已休息比例给部分恢复。
    * 返回 `{ finished, kind?, snapshot?, forced? }`；没有到期休息时 `{ finished:false }`。
    */
   finishDueRest({ force = false } = {}) {
     if (!this.enabled()) return { finished: false };
-    const state = this.#current();
-    const rest = state.rest;
+    const before = this.#current();
+    const rest = before.rest;
     if (!rest) return { finished: false };
     const now = this.now();
     if (!force && rest.until > now) return { finished: false };
+    // 先把 shadow 推进到结算时刻（按“还在睡”处理），再清 rest。
+    this.#tickEnergyShadow(now, { sleeping: rest.kind === 'sleep' });
+    const state = this.#current();
     const cfg = this.#restConfig();
     const kind = rest.kind === 'slack' ? 'slack' : 'sleep';
-    const total = Math.max(1, rest.until - rest.startedAt);
-    const fraction = Math.min(1, Math.max(0, (now - rest.startedAt) / total));
-    const factor = force ? Math.max(0.25, fraction) : 1;
+    const scheduled = rest.scheduled === true && kind === 'sleep'
+      && Number(rest.windowEnd) > Number(rest.windowStart);
     const moodGain = kind === 'sleep'
       ? numIn(cfg.sleepMoodGain, 12, 0, 50)
       : numIn(cfg.slackMoodGain, 6, 0, 50);
-    const energyGain = kind === 'sleep'
-      ? numIn(cfg.sleepEnergyGain, 20, 0, 50)
-      : numIn(cfg.slackEnergyGain, 8, 0, 50);
-    const reason = force
-      ? (kind === 'sleep' ? '被叫醒（提前结束睡觉）' : '被叫醒（提前结束摸鱼）')
-      : (kind === 'sleep' ? '睡了一觉' : '摸鱼了一会儿');
+    let moodDelta = 0;
+    let energyDelta = 0;
+    let reason = '';
+
+    if (scheduled) {
+      // 作息睡觉：按“实际睡到的时间 / 整晚窗口”恢复。
+      // 睡满整晚 → 精力补到 100；晚睡或早醒 → 只补对应比例。
+      const windowStart = Number(rest.windowStart) || Number(rest.startedAt);
+      const windowEnd = Number(rest.windowEnd) || Number(rest.until);
+      const windowMs = Math.max(1, windowEnd - windowStart);
+      const sleptFrom = Math.max(Number(rest.startedAt) || windowStart, windowStart);
+      const sleptTo = Math.min(now, windowEnd);
+      const fraction = Math.min(1, Math.max(0, (sleptTo - sleptFrom) / windowMs));
+      const currentEnergy = Math.min(100, Math.max(0, Number(state.energy) || 0));
+      moodDelta = Math.round(moodGain * fraction * 10) / 10;
+      energyDelta = Math.round(Math.max(0, 100 - currentEnergy) * fraction * 10) / 10;
+      reason = force ? '被叫醒（提前结束睡觉）' : '睡了一觉（按作息）';
+    } else {
+      const total = Math.max(1, rest.until - rest.startedAt);
+      const fraction = Math.min(1, Math.max(0, (now - rest.startedAt) / total));
+      const factor = force ? Math.max(0.25, fraction) : 1;
+      // 摸鱼只恢复心情；精力只有睡觉能补。
+      const energyGain = kind === 'sleep' ? numIn(cfg.sleepEnergyGain, 20, 0, 50) : 0;
+      moodDelta = Math.round(moodGain * factor * 10) / 10;
+      energyDelta = Math.round(energyGain * factor * 10) / 10;
+      reason = force
+        ? (kind === 'sleep' ? '被叫醒（提前结束睡觉）' : '被叫醒（提前结束摸鱼）')
+        : (kind === 'sleep' ? '睡了一觉' : '摸鱼了一会儿');
+    }
+
     const next = applyMoodEvent(state, {
-      moodDelta: Math.round(moodGain * factor * 10) / 10,
-      energyDelta: Math.round(energyGain * factor * 10) / 10,
+      moodDelta,
+      energyDelta,
       reason
     }, {
       now,
       baseline: this.baseline(),
       halfLifeHours: this.#halfLife(),
+      energyDrainPerHour: this.#energyDrain(),
+      energyFatigueRampHours: this.#fatigueRamp(),
       historyLimit: this.#historyLimit(),
       dailyKeepDays: this.#dailyKeepDays(),
       bypassLimits: true
     });
     next.rest = null;
+    // 睡醒后连续清醒时间重新计时（打盹也算睡过）；摸鱼不重置。
+    if (kind === 'sleep') next.lastSleepAt = now;
     this.state = next;
     this.loaded = true;
     try {
@@ -316,11 +572,15 @@ export class MoodManager {
 
   reset() {
     if (!this.enabled()) return null;
+    this.energySamples = [];
+    this.lastShadowLogAt = 0;
     const current = this.#current();
     const next = resetMoodState(current, {
       now: this.now(),
       baseline: this.baseline(),
       halfLifeHours: this.#halfLife(),
+      energyDrainPerHour: this.#energyDrain(),
+      energyFatigueRampHours: this.#fatigueRamp(),
       historyLimit: this.#historyLimit(),
       dailyKeepDays: this.#dailyKeepDays()
     });

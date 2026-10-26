@@ -20,6 +20,12 @@ import { saveMemberNote } from './pages/memory.js';
     return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   };
 
+  // 当前印象分：优先用接口按半衰期算好的 effective 值，旧数据回退原始分。
+  const impressionScoreOf = (person) => {
+    const value = Number(person?.impressionScoreEffective ?? person?.impressionScore);
+    return Number.isFinite(value) ? Math.round(value) : null;
+  };
+
 
   function ensureStyle() {
     if (document.getElementById('global-memory-style')) return;
@@ -103,6 +109,14 @@ import { saveMemberNote } from './pages/memory.js';
       ...(incoming.sourceChatKeys || [])
     ].map(String).filter(Boolean))];
 
+    // 同一 QQ 在多个来源会话里其实是同一条人物记录：分数取接口给的当前有效值。
+    if (incoming.impressionScoreEffective !== undefined && incoming.impressionScoreEffective !== null) {
+      merged.impressionScoreEffective = incoming.impressionScoreEffective;
+    }
+    if (merged.impressionScore === undefined && incoming.impressionScore !== undefined) {
+      merged.impressionScore = incoming.impressionScore;
+    }
+
     const memoryMap = new Map();
     for (const item of [...(merged.impressions || []), ...(incoming.impressions || [])]) {
       const content = String(item?.content || '').trim();
@@ -164,9 +178,11 @@ import { saveMemberNote } from './pages/memory.js';
     const rendered = setHtmlIfChanged(box, people.map((person) => {
       const sources = person.sourceChatKeys || [];
       const title = person.name || person.userId || '未知人物';
+      const score = impressionScoreOf(person);
+      const scoreText = score === null ? '' : ` · 印象 ${score}/100`;
       const subtitle = person.userId
-        ? `QQ ${person.userId} · ${sources.length} 个来源会话`
-        : `${sources.length} 个来源会话`;
+        ? `QQ ${person.userId} · ${sources.length} 个来源会话${scoreText}`
+        : `${sources.length} 个来源会话${scoreText}`;
       return `<button type="button" class="gm-person ${person.key === selectedKey ? 'active' : ''}" data-gm-key="${esc(person.key)}">
         <div class="gm-person-title"><strong>${esc(title)}</strong><span class="gm-count">${(person.impressions || []).length} 条</span></div>
         <div class="gm-sub">${esc(subtitle)}</div>
@@ -224,6 +240,11 @@ import { saveMemberNote } from './pages/memory.js';
     const sourceHtml = (person.sourceChatKeys || []).length
       ? person.sourceChatKeys.map((key) => `<span class="gm-chip">${esc(key)}</span>`).join('')
       : '<span class="muted">无来源记录</span>';
+    const score = impressionScoreOf(person);
+    const scoreHtml = score === null ? '' : `
+      <div class="gm-section"><h3>印象分</h3>
+        <div class="gm-note">当前 ${score}/100（按半衰期衰减后的值）</div>
+      </div>`;
     const memories = person.impressions || [];
     const memoryHtml = memories.length
       ? memories.map((item) => {
@@ -271,6 +292,7 @@ import { saveMemberNote } from './pages/memory.js';
         人物长期记忆按 QQ 全局统一；来源会话只用于证据追溯，不限制这条记忆在哪个群可见。<br>
         群聊/私聊自己的 handoff 已独立到“会话记忆”页，并继续严格按 chatKey 隔离。
       </div>
+      ${scoreHtml}
       ${noteHtml}
       <div class="gm-section"><h3>来源会话</h3><div>${sourceHtml}</div></div>
       <div class="gm-section"><h3>长期印象</h3>${memoryHtml}</div>`);

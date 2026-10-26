@@ -188,6 +188,24 @@ test('take_break：把休息参数交给心情管理器；状态不够低时返�
   assert.match(rejected.content, /还不能休息/);
 });
 
+test('take_break：有人说话时先回一句再睡', async () => {
+  const mood = { startRest: () => ({ rest: { kind: 'sleep', remainingMinutes: 60 } }) };
+  const blocked = await tool('take_break').execute({
+    mood,
+    triggerEntries: [{ senderId: '1', senderName: '群友', self: false }],
+    session: { sent: [] }
+  }, { kind: 'sleep' });
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.content, /先.*回一句/);
+
+  const ok = parse(await tool('take_break').execute({
+    mood,
+    triggerEntries: [{ senderId: '1', senderName: '群友', self: false }],
+    session: { sent: [{ text: '晚安' }] }
+  }, { kind: 'sleep' }));
+  assert.equal(ok.kind, 'sleep');
+});
+
 test('take_break：睡前可私聊管理员一句短话', async () => {
   const sent = [];
   const mood = { startRest: () => ({ rest: { kind: 'sleep', remainingMinutes: 60 } }) };

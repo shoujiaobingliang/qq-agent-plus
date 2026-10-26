@@ -267,14 +267,16 @@ function renderIdentityAssets(data) {
   const people = data?.entries || [];
   if (!people.length) return '<div class="empty-hint">统一身份库为空</div>';
   return `<div class="asset-table-wrap"><table class="asset-table">
-    <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>会话</th><th>消息</th><th>好友</th><th>画像备注</th><th>操作</th></tr></thead>
+    <thead><tr><th>QQ</th><th>首选名称</th><th>别名</th><th>印象分</th><th>会话</th><th>消息</th><th>好友</th><th>画像备注</th><th>操作</th></tr></thead>
     <tbody>${people.map((person) => {
       const aliases = [...new Set((person.aliases || []).map((item) =>
         typeof item === 'string' ? item : item?.alias).filter(Boolean))];
+      const score = Number(person.impressionScore);
       return `<tr>
         <td><code>${esc(person.userId)}</code></td>
         <td>${esc(person.primaryName || '-')}</td>
         <td title="${esc(aliases.join(' / '))}">${esc(aliases.slice(0, 3).join(' / ') || '-')}</td>
+        <td class="r">${Number.isFinite(score) ? Math.round(score) : '-'}</td>
         <td class="r">${fmtTok(person.chatCount)}</td>
         <td class="r">${fmtTok(person.messageCount)}</td>
         <td>${person.isFriend ? '是' : '否'}</td>

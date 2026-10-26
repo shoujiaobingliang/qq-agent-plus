@@ -76,15 +76,59 @@ test('单用户每小时上限 6', () => {
   assert.equal(state.mood, 61, '5 + 1');
 });
 
-test('半衰期衰减回到基线', () => {
-  const state = { ...defaultMoodState(T0, baseline), mood: 100, energy: 0 };
+test('心情按半衰期回归；精力按每小时消耗单向下降', () => {
+  const state = { ...defaultMoodState(T0, baseline), mood: 100, energy: 55 };
   const decayed = decayMood(state, {
     now: T0 + 12 * 3600 * 1000,
     baseline,
-    halfLifeHours: 12
+    halfLifeHours: 12,
+    energyDrainPerHour: 1
   });
   assert.equal(decayed.mood, 77.5);
-  assert.equal(decayed.energy, 27.5);
+  assert.equal(decayed.energy, 43, '12 小时消耗 12 点，不向基线回升');
+
+  // 低于基线时也只能继续下降，不能像旧版那样回到 55。
+  const low = { ...defaultMoodState(T0, baseline), mood: 55, energy: 10 };
+  const drained = decayMood(low, {
+    now: T0 + 2 * 3600 * 1000,
+    baseline,
+    halfLifeHours: 12,
+    energyDrainPerHour: 1
+  });
+  assert.equal(drained.energy, 8);
+});
+
+test('连续清醒越久精力掉得越快（疲劳累积）', () => {
+  const state = { ...defaultMoodState(T0, baseline), mood: 55, energy: 55 };
+  const opts = {
+    baseline,
+    halfLifeHours: 12,
+    energyDrainPerHour: 1,
+    energyFatigueRampHours: 12
+  };
+  const at12 = decayMood(state, { ...opts, now: T0 + 12 * 3600 * 1000 });
+  // 0–12h：速率从 1 线性升到 2，积分 = 12 + 12²/(2×12) = 18
+  assert.equal(at12.energy, 37);
+
+  const at24 = decayMood(state, { ...opts, now: T0 + 24 * 3600 * 1000 });
+  // 0–24h：速率从 1 升到 3，积分 = 24 + 24²/(2×12) = 48
+  assert.equal(at24.energy, 7);
+  assert.ok(at24.energy < at12.energy - (55 - at12.energy), '后 12 小时掉得比前 12 小时更多');
+});
+
+test('睡觉期间不扣精力', () => {
+  const state = {
+    ...defaultMoodState(T0, baseline),
+    energy: 40,
+    rest: { kind: 'sleep', startedAt: T0, until: T0 + 8 * 3600 * 1000, reason: '睡' }
+  };
+  const decayed = decayMood(state, {
+    now: T0 + 4 * 3600 * 1000,
+    baseline,
+    halfLifeHours: 12,
+    energyDrainPerHour: 1
+  });
+  assert.equal(decayed.energy, 40);
 });
 
 test('跨天 daily：前一天补 end，新一天从当前值起算', () => {

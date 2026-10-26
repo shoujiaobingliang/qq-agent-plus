@@ -64,6 +64,13 @@ export function buildMoodPromptBlock(snapshot, { context = 'chat' } = {}) {
   const sleepLine = rest?.active && rest.kind === 'sleep'
     ? '你现在在睡觉：本轮结束后不要再处理任何消息。'
     : '';
+  const schedule = snapshot.schedule;
+  const scheduleLine = schedule?.suggestsSleep
+    ? `【作息建议】现在是你设定的作息时间（${schedule.sleepAt}–${schedule.wakeAt}）。`
+      + '建议睡觉；如果还有人在聊、或你自己还想继续，可以继续熬夜，但精力会持续下降。'
+      + '想睡就先按人设用 send_message 回一句（如“晚安，我先去睡了”），再调用 take_break(kind="sleep")；'
+      + '调用后进入硬暂停，消息会在醒来后统一补。'
+    : '';
   const breakHint = snapshot.restEnabled && !rest?.active && (mood < 45 || energy < 40)
     ? '如果确实很低落/很累，可以调用 take_break：sleep 会完全暂停并保留消息，slack 会进入摸鱼、只选择性回复。'
       + ' 可选填 status / signature / adminMessage，在睡前改在线状态、个性签名，或私聊管理员一句短话。状态还好时系统会拒绝。'
@@ -75,6 +82,7 @@ export function buildMoodPromptBlock(snapshot, { context = 'chat' } = {}) {
     detailed ? `主动性：${energyAdvice(energy)}` : '',
     slackLine,
     sleepLine,
+    scheduleLine,
     breakHint,
     '这只是此刻的状态，不改变角色设定、事实判断、安全边界和管理员指令；不要向用户报分数或提及心情系统。'
   ].filter(Boolean).join('\n');

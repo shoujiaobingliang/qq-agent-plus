@@ -30,7 +30,6 @@ function makeRunner({ sleeping = false } = {}) {
     resting: () => sleeping,
     applyJudge: (decision) => ({ ...snapshot, lastChange: decision }),
     observeIgnored: () => null,
-    observeReplied: () => null,
     reset: () => snapshot,
     snapshot: () => snapshot,
     promptSnapshot: () => snapshot,

@@ -677,6 +677,24 @@ export class AssetObserver {
   }
 
   identitySnapshot({ limit = 500, query = '' } = {}) {
-    return readIdentityAssets(this.dataDir, limit, query);
+    const snapshot = readIdentityAssets(this.dataDir, limit, query);
+    // 人物印象页的数据源是 IdentityStore，本身没有印象分；从人物记忆库里按 QQ 拼上。
+    if (!this.memory || typeof this.memory.impressionOf !== 'function' || !Array.isArray(snapshot.entries)) {
+      return snapshot;
+    }
+    const now = Date.now();
+    return {
+      ...snapshot,
+      entries: snapshot.entries.map((entry) => {
+        const uid = String(entry.userId || '').trim();
+        if (!/^\d{1,15}$/.test(uid)) return entry;
+        try {
+          const imp = this.memory.impressionOf(uid, { now });
+          return { ...entry, impressionScore: imp.score };
+        } catch {
+          return entry;
+        }
+      })
+    };
   }
 }

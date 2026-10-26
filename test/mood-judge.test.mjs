@@ -51,11 +51,11 @@ test('解析评审输出：纯 JSON / 围栏 / 前后解释都能读', () => {
   );
   assert.deepEqual(
     parseMoodJudgeOutput('```json\n{"moodDelta": -0.5, "energyDelta": 0.5, "reason": "普通聊天"}\n```'),
-    { moodDelta: -0.5, energyDelta: 0.5, reason: '普通聊天', impressions: [] }
+    { moodDelta: -0.5, energyDelta: 0, reason: '普通聊天', impressions: [] }
   );
   assert.deepEqual(
     parseMoodJudgeOutput('判断如下：{"moodDelta":1,"energyDelta":1,"reason":"被感谢"} 完毕'),
-    { moodDelta: 1, energyDelta: 1, reason: '被感谢', impressions: [] }
+    { moodDelta: 1, energyDelta: 0, reason: '被感谢', impressions: [] }
   );
 });
 

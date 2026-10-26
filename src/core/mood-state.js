@@ -10,9 +10,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import { normalizeEnergyState } from './energy-model.js';
 import { todayKey } from './util.js';
 
-export const MOOD_STATE_VERSION = 1;
+export const MOOD_STATE_VERSION = 2;
 export const DEFAULT_MOOD = 55;
 export const DEFAULT_ENERGY = 55;
 export const DEFAULT_HISTORY_LIMIT = 200;
@@ -89,6 +90,17 @@ function normalizeDaily(value) {
   return out;
 }
 
+function normalizeEnergyModel(value, { now = Date.now() } = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const base = normalizeEnergyState(value, { now });
+  return {
+    ...base,
+    activity: round1(Math.min(1, Math.max(0, Number(value.activity) || 0))),
+    activityEma: round1(Math.min(1, Math.max(0, Number(value.activityEma) || 0))),
+    updatedAt: Number(value.updatedAt) || Number(now) || Date.now()
+  };
+}
+
 function normalizeRest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const until = Number(value.until);
@@ -97,6 +109,9 @@ function normalizeRest(value) {
   const reason = String(value.reason || '').replace(/\s+/g, ' ').trim().slice(0, 60);
   return {
     kind,
+    scheduled: value.scheduled === true,
+    windowStart: Number(value.windowStart) || 0,
+    windowEnd: Number(value.windowEnd) || 0,
     startedAt: Number(value.startedAt) || 0,
     until,
     reason
@@ -106,16 +121,20 @@ function normalizeRest(value) {
 export function defaultMoodState(now = Date.now(), baseline = {}) {
   const mood = clampScore(baseline.mood, DEFAULT_MOOD);
   const energy = clampScore(baseline.energy, DEFAULT_ENERGY);
+  const at = Number(now) || Date.now();
   return {
     version: MOOD_STATE_VERSION,
     mood,
     energy,
-    updatedAt: Number(now) || Date.now(),
-    lastDecayAt: Number(now) || Date.now(),
+    updatedAt: at,
+    lastDecayAt: at,
+    // 连续清醒计时起点：睡醒（或首次初始化/手动重置）时刷新。
+    lastSleepAt: at,
     lastChange: null,
     history: [],
     daily: {},
-    rest: null
+    rest: null,
+    energyModel: null
   };
 }
 
@@ -127,10 +146,13 @@ function normalizeState(raw, { now = Date.now(), baseline = {} } = {}) {
     energy: round1(clampScore(raw.energy, clampScore(baseline.energy, DEFAULT_ENERGY))),
     updatedAt: Number(raw.updatedAt) || now,
     lastDecayAt: Number(raw.lastDecayAt) || now,
+    // 老状态没有这个字段：升级时从当前时刻起算，避免一启动就背着几天疲劳。
+    lastSleepAt: Number(raw.lastSleepAt) || Number(now) || Date.now(),
     lastChange: normalizeLastChange(raw.lastChange),
     history: normalizeHistory(raw.history),
     daily: normalizeDaily(raw.daily),
-    rest: normalizeRest(raw.rest)
+    rest: normalizeRest(raw.rest),
+    energyModel: normalizeEnergyModel(raw.energyModel, { now })
   };
 }
 
@@ -181,13 +203,19 @@ export function writeMoodState(state, { dataDir = DATA_DIR } = {}) {
 }
 
 /**
- * 惰性衰减：按半衰期向 baseline 指数回归。
+ * 惰性衰减：
+ *   · 心情按半衰期向 baseline 指数回归；
+ *   · 精力默认按 `energyDrainPerHour` 单向消耗（不回归基线，只有睡觉能补回来）。
+ *     不传 energyDrainPerHour 时保留旧的“向基线回归”行为，供旧调用/测试使用。
+ *   · 睡觉期间不扣精力：醒来时统一结算恢复，避免控制台看到“越睡越累”。
  * 不修改入参数；返回值带新的 lastDecayAt（调用方决定是否落盘）。
  */
 export function decayMood(state, {
   now = Date.now(),
   baseline = {},
-  halfLifeHours = 12
+  halfLifeHours = 12,
+  energyDrainPerHour = null,
+  energyFatigueRampHours = null
 } = {}) {
   const current = normalizeState(state, { now, baseline });
   const baseMood = clampScore(baseline.mood, DEFAULT_MOOD);
@@ -198,10 +226,35 @@ export function decayMood(state, {
     return { ...current, lastDecayAt: Number(now) || Date.now() };
   }
   const factor = Math.pow(0.5, elapsed / halfLifeMs);
+  const drain = energyDrainPerHour === null || energyDrainPerHour === undefined
+    ? null
+    : Math.max(0, Number(energyDrainPerHour) || 0);
+  const fatigueRamp = energyFatigueRampHours === null || energyFatigueRampHours === undefined
+    ? 0
+    : Math.max(0, Number(energyFatigueRampHours) || 0);
+  // 连续清醒越久，消耗越快：清醒 12h（ramp）后速度翻倍，24h 后 3 倍。
+  // 用区间首尾的平均清醒时数做积分近似，长时间不写盘也不会被低估。
+  const awakeHoursAt = (ts) => {
+    const base = Number(current.lastSleepAt) || Number(now) || Date.now();
+    return Math.max(0, (Number(ts || now) - base) / HOUR_MS);
+  };
+  const fatigue = drain !== null && fatigueRamp > 0
+    ? 1 + ((awakeHoursAt(current.lastDecayAt) + awakeHoursAt(now)) / 2) / fatigueRamp
+    : 1;
+  // 睡觉期间不扣精力；即使已经过了起床时间、ticker 还没来得及结算，也按“在睡”处理。
+  const sleeping = current.rest?.kind === 'sleep';
+  let energy;
+  if (sleeping) {
+    energy = current.energy;
+  } else if (drain === null) {
+    energy = baseEnergy + (current.energy - baseEnergy) * factor;
+  } else {
+    energy = current.energy - drain * fatigue * (elapsed / HOUR_MS);
+  }
   return {
     ...current,
     mood: round1(baseMood + (current.mood - baseMood) * factor),
-    energy: round1(baseEnergy + (current.energy - baseEnergy) * factor),
+    energy: round1(clampScore(energy, baseEnergy)),
     lastDecayAt: Number(now) || Date.now()
   };
 }
@@ -228,9 +281,13 @@ export function energyBand(score) {
 export function moodSnapshot(state, {
   now = Date.now(),
   baseline = {},
-  halfLifeHours = 12
+  halfLifeHours = 12,
+  energyDrainPerHour = null,
+  energyFatigueRampHours = null
 } = {}) {
-  const current = decayMood(state, { now, baseline, halfLifeHours });
+  const current = decayMood(state, {
+    now, baseline, halfLifeHours, energyDrainPerHour, energyFatigueRampHours
+  });
   const day = todayKey(now);
   const rest = current.rest;
   const active = Boolean(rest && rest.until > Number(now));
@@ -246,6 +303,7 @@ export function moodSnapshot(state, {
     today: current.daily?.[day] || null,
     rest: rest ? {
       kind: rest.kind,
+      scheduled: rest.scheduled === true,
       startedAt: rest.startedAt,
       until: rest.until,
       reason: rest.reason,
@@ -310,11 +368,15 @@ export function applyMoodEvent(state, event = {}, {
   now = Date.now(),
   baseline = {},
   halfLifeHours = 12,
+  energyDrainPerHour = null,
+  energyFatigueRampHours = null,
   historyLimit = DEFAULT_HISTORY_LIMIT,
   dailyKeepDays = DEFAULT_DAILY_KEEP_DAYS,
   bypassLimits = false
 } = {}) {
-  const base = decayMood(state, { now, baseline, halfLifeHours });
+  const base = decayMood(state, {
+    now, baseline, halfLifeHours, energyDrainPerHour, energyFatigueRampHours
+  });
   let moodDelta = bypassLimits ? Number(event.moodDelta) || 0 : clampDelta(event.moodDelta);
   let energyDelta = bypassLimits ? Number(event.energyDelta) || 0 : clampDelta(event.energyDelta);
   if (!bypassLimits) {
@@ -377,10 +439,14 @@ export function resetMoodState(state, {
   now = Date.now(),
   baseline = {},
   halfLifeHours = 12,
+  energyDrainPerHour = null,
+  energyFatigueRampHours = null,
   historyLimit = DEFAULT_HISTORY_LIMIT,
   dailyKeepDays = DEFAULT_DAILY_KEEP_DAYS
 } = {}) {
-  const base = decayMood(state, { now, baseline, halfLifeHours });
+  const base = decayMood(state, {
+    now, baseline, halfLifeHours, energyDrainPerHour, energyFatigueRampHours
+  });
   const mood = round1(clampScore(baseline.mood, DEFAULT_MOOD));
   const energy = round1(clampScore(baseline.energy, DEFAULT_ENERGY));
   const moodDelta = round1(mood - base.mood);
@@ -413,9 +479,12 @@ export function resetMoodState(state, {
     mood,
     energy,
     updatedAt: at,
+    lastDecayAt: at,
+    lastSleepAt: at,
     lastChange,
     history: [...base.history, entry].slice(-limit),
     daily,
-    rest: null
+    rest: null,
+    energyModel: null
   };
 }

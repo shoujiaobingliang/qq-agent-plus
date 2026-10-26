@@ -17,11 +17,23 @@ test('心情配置有默认值', () => {
   assert.equal(mood.frequencyInfluence, 0.2);
   assert.equal(mood.toneInfluence, 0.6);
   assert.equal(mood.decayHalfLifeHours, 12);
+  assert.equal(mood.energyDrainPerHour, 1);
+  assert.equal(mood.energyFatigueRampHours, 12);
   assert.equal(mood.judge.enabled, true);
   assert.equal(mood.judge.maxCallsPerDay, 100);
   assert.equal(mood.rest.enabled, true);
   assert.equal(mood.rest.sleepMinutes, 90);
   assert.equal(mood.rest.slackReplyFactor, 0.35);
+  assert.deepEqual(mood.rest.schedule, {
+    enabled: true,
+    sleepAt: '23:30',
+    wakeAt: '07:30',
+    allowStayUp: true
+  });
+  assert.equal(mood.energyModel.enabled, true);
+  assert.equal(mood.energyModel.shadow, true);
+  assert.equal(mood.energyModel.activity.fullTokensPerMinute, 2000);
+  assert.deepEqual(mood.energyModel.activity.includePurposes, ['chat', 'reply-correction']);
 });
 
 test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
@@ -32,6 +44,8 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
       frequencyInfluence: 9,
       toneInfluence: -1,
       decayHalfLifeHours: 0,
+      energyDrainPerHour: 999,
+      energyFatigueRampHours: 999,
       followUpMinEnergy: 999,
       historyLimit: 1,
       dailyKeepDays: 1,
@@ -46,7 +60,20 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
         sleepMinutes: 1,
         slackMinutes: 999,
         sleepMoodGain: 999,
-        slackReplyFactor: 9
+        slackReplyFactor: 9,
+        schedule: {
+          enabled: false,
+          sleepAt: '25:99',
+          wakeAt: '07:30',
+          allowStayUp: false
+        }
+      },
+      energyModel: {
+        enabled: false,
+        shadow: false,
+        kr: 999,
+        beta: -1,
+        activity: { wThink: 9, fullTokensPerMinute: 0, includePurposes: ['x', ''] }
       }
     }
   });
@@ -55,6 +82,8 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
   assert.equal(cfg.mood.frequencyInfluence, 0.5);
   assert.equal(cfg.mood.toneInfluence, 0);
   assert.equal(cfg.mood.decayHalfLifeHours, 1);
+  assert.equal(cfg.mood.energyDrainPerHour, 10);
+  assert.equal(cfg.mood.energyFatigueRampHours, 72);
   assert.equal(cfg.mood.followUpMinEnergy, 100);
   assert.equal(cfg.mood.historyLimit, 20);
   assert.equal(cfg.mood.dailyKeepDays, 7);
@@ -67,5 +96,28 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
   assert.equal(cfg.mood.rest.slackMinutes, 60);
   assert.equal(cfg.mood.rest.sleepMoodGain, 50);
   assert.equal(cfg.mood.rest.slackReplyFactor, 1);
+  assert.equal(cfg.mood.rest.schedule.enabled, false);
+  assert.equal(cfg.mood.rest.schedule.sleepAt, '23:30');
+  assert.equal(cfg.mood.rest.schedule.wakeAt, '07:30');
+  assert.equal(cfg.mood.rest.schedule.allowStayUp, false);
+  assert.equal(cfg.mood.energyModel.enabled, false);
+  assert.equal(cfg.mood.energyModel.shadow, false);
+  assert.equal(cfg.mood.energyModel.kr, 1);
+  assert.equal(cfg.mood.energyModel.beta, 0);
+  assert.equal(cfg.mood.energyModel.activity.wThink, 1);
+  assert.equal(cfg.mood.energyModel.activity.fullTokensPerMinute, 1);
+  assert.deepEqual(cfg.mood.energyModel.activity.includePurposes, ['x']);
   assert.equal(getConfig().mood.enabled, false);
+});
+
+test('作息时间相同（0 长度窗口）回退默认值', () => {
+  const cfg = updateConfig({
+    mood: {
+      rest: {
+        schedule: { sleepAt: '23:30', wakeAt: '23:30' }
+      }
+    }
+  });
+  assert.equal(cfg.mood.rest.schedule.sleepAt, '23:30');
+  assert.equal(cfg.mood.rest.schedule.wakeAt, '07:30');
 });

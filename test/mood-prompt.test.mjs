@@ -49,6 +49,22 @@ test('每日说说/空间互动使用短块，且不向读者报分数', () => {
   assert.match(buildQzoneInteractionPrompt({ roleText: '人设' }, { mood: snapshot }), /【当前心情】/);
 });
 
+test('作息建议：窗口内提示睡觉，但保留熬夜选择', () => {
+  const schedule = { sleepAt: '23:30', wakeAt: '07:30', active: true, suggestsSleep: true };
+  const block = buildMoodPromptBlock({ ...snapshot, schedule }, { context: 'chat' });
+  assert.match(block, /【作息建议】/);
+  assert.match(block, /建议睡觉/);
+  assert.match(block, /可以继续熬夜/);
+  assert.match(block, /send_message/);
+  assert.match(block, /take_break\(kind="sleep"\)/);
+
+  const hidden = buildMoodPromptBlock(
+    { ...snapshot, schedule: { ...schedule, suggestsSleep: false } },
+    { context: 'chat' }
+  );
+  assert.doesNotMatch(hidden, /【作息建议】/);
+});
+
 test('精力系数只作用于概率档，不影响必回的 @', () => {
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.messageTypes.expandForward = true;

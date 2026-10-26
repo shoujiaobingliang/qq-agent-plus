@@ -25,6 +25,9 @@ function fixture(t, mode = 'legacy') {
   cfg.api.baseUrl = 'https://model.invalid';
   cfg.memory.consolidateEnabled = false;
   cfg.sticker.enabled = false;
+  // 这组用例数的是“时间门控放行了几次模型调用”；心情评审是异步的第二次请求，
+  // 关掉它，否则断言会受评审完成时机影响（与 replyGuard 同一口径）。
+  cfg.mood.judge.enabled = false;
   // 这组用例数的是"时间门控放行了几次模型调用"：关掉「该回没发」的补救，
   // 否则私聊里只回正文的桩会多出一次纠正调用（该行为由 test/reply-guard.test.mjs 覆盖）
   cfg.conversation.replyGuardEnabled = false;
