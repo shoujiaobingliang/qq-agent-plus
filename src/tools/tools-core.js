@@ -4,13 +4,17 @@
 //
 // 工具命名去掉了 qq_ 前缀（更短，省 token）。
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { getConfig, imageGenAvailable, imageGenMaxPerHour } from '../core/config.js';
 import { imageType } from '../core/image-type.js';
 import { nextAtFromHHMM } from '../core/reminders.js';
 import { synthesizeSpeech, ttsConfigured } from '../llm/tts.js';
 import { generateImage, MAX_PROMPT_CHARS } from '../llm/image-gen.js';
 import { resolveApiKey } from '../llm/llm.js';
-import { safeFetchBinary } from '../llm/safe-fetch.js';
+import { safeFetchToFile } from '../llm/safe-fetch.js';
+import { withMediaSlot, assertMediaMemory } from '../core/media-budget.js';
 import { stickerVisionEnabled } from '../llm/vision-scan.js';
 import { todayKey } from '../core/util.js';   // 上海自然日（"每群每天一次"的去重用同一个口径）
 import { createQuota } from '../core/quota.js';
@@ -163,7 +167,13 @@ import { runMemeLookup } from '../llm/meme-lookup.js';
 import { getSkill, listSkills, SKILL_MAX_CHARS } from '../skills/registry.js';
 import { expandForwardNodes, extractMediaFromSegments } from '../onebot/onebot.js';
 import { readForwardMessages, readForwardNodesById } from '../onebot/forward-reader.js';
-import { convertGifToStillStrip, convertVideoToFrameStrip, fetchOversizedImageAsJpeg } from './image-downsample.js';
+import {
+  OVERSIZE_LIMIT_RE,
+  convertGifToStillStrip,
+  convertImageFileToVisionJpeg,
+  convertVideoFileToFrameStrip,
+  fetchOversizedImageAsJpeg
+} from './image-downsample.js';
 import { transcribeMessageAudio } from './audio-transcribe.js';
 import { memoryVisibilityOf } from '../core/memory-visibility.js';
 
@@ -183,45 +193,78 @@ async function toVisionDataUrl(buffer, mime, signal) {
   return `data:${mime};base64,${buffer.toString('base64')}`;
 }
 
+const IMAGE_FETCH_MAX_BYTES = 12 * 1024 * 1024;
+// 视频上限从 96MiB 降到 32MiB：抽帧只需要开头几分钟的画面，没必要把整段大视频
+// 拉进临时盘/解码器。超限会明确报错，不会静默当成空图。
+const VIDEO_FETCH_MAX_BYTES = 32 * 1024 * 1024;
+
 export async function downloadImageAsDataUrl(url, signal) {
   signal?.throwIfAborted();
   if (String(url || '').startsWith('base64://')) {
-    const buffer = Buffer.from(String(url).slice('base64://'.length), 'base64');
-    if (!buffer.length || buffer.length > 12 * 1024 * 1024) {
-      throw new Error('本地表情图片为空或超过 12 MiB');
-    }
-    const mime = detectMime(buffer);
-    if (!mime) throw new Error('本地表情图片格式无效');
-    return toVisionDataUrl(buffer, mime, signal);
+    return withMediaSlot(async () => {
+      assertMediaMemory(4 * 1024 * 1024);
+      const buffer = Buffer.from(String(url).slice('base64://'.length), 'base64');
+      if (!buffer.length || buffer.length > IMAGE_FETCH_MAX_BYTES) {
+        throw new Error('本地表情图片为空或超过 12 MiB');
+      }
+      const mime = detectMime(buffer);
+      if (!mime) throw new Error('本地表情图片格式无效');
+      return toVisionDataUrl(buffer, mime, signal);
+    });
   }
   const safeUrl = await validateImageUrl(url);
-  let buffer;
-  let contentType;
-  try {
-    ({ buffer, contentType } = await safeFetchBinary(safeUrl, 12 * 1024 * 1024, signal));
-  } catch (error) {
-    // 超过常规上限 → 放宽到 96MiB 重拉 + ffmpeg 降采样（Issue #6：群友发 >12MiB 大图）。
-    // 非超限错误原样抛出；ffmpeg 缺失/失败时抛带指引的错误，常规 ≤12MiB 路径不受影响。
-    ({ buffer, contentType } = await fetchOversizedImageAsJpeg(safeUrl, error, signal));
-  }
-  if (!buffer || !buffer.length) throw new Error('图片内容为空');
-  const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
-  return toVisionDataUrl(buffer, mime, signal);
+  return withMediaSlot(async () => {
+    assertMediaMemory(IMAGE_FETCH_MAX_BYTES);
+    // 流式落盘：内存里不再出现 12MB chunks + Buffer.concat 的双份副本。
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-media-'));
+    const inputPath = path.join(workDir, 'input');
+    try {
+      let contentType;
+      try {
+        ({ contentType } = await safeFetchToFile(safeUrl, IMAGE_FETCH_MAX_BYTES, inputPath, signal));
+      } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') throw error;
+        // 超过常规上限 → 放宽到 32MiB 重拉 + ffmpeg 降采样（Issue #6）。
+        // 非超限错误原样抛出，常规 ≤12MiB 路径不受影响。
+        if (!OVERSIZE_LIMIT_RE.test(String(error?.message ?? ''))) throw error;
+        const { buffer } = await fetchOversizedImageAsJpeg(safeUrl, error, signal);
+        return `data:image/jpeg;base64,${buffer.toString('base64')}`;
+      }
+      // 先降采样再进内存/base64：产物通常 300KB–1MB，base64 与请求体不会再放大。
+      const jpeg = await convertImageFileToVisionJpeg(inputPath, contentType, signal);
+      if (jpeg?.length) return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+      // ffmpeg 缺失/失败：回退原始文件（与历史行为一致，不劣化）
+      const buffer = fs.readFileSync(inputPath);
+      if (!buffer.length) throw new Error('图片内容为空');
+      const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
+      return toVisionDataUrl(buffer, mime, signal);
+    } finally {
+      try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
+    }
+  });
 }
 
 /**
  * 视频 → 视觉模型能看的 data URL（2×2 帧条）。
- * 视频没有"图片"那种直传路径：先把整段下下来（沿用图片通道的体积上限与内网限制），
- * 再按总时长抽 4 帧拼成一张 JPEG。抽帧失败时抛错（让模型知道看不到画面，而不是当成静默空图）。
+ * 视频没有"图片"那种直传路径：流式落盘（≤32MiB）后按总时长抽 4 帧拼成一张 JPEG。
+ * 抽帧失败时抛错（让模型知道看不到画面，而不是当成静默空图）。
  */
 export async function downloadVideoAsFrameStrip(url, signal) {
   signal?.throwIfAborted();
   const safeUrl = await validateImageUrl(url);
-  const { buffer } = await safeFetchBinary(safeUrl, 96 * 1024 * 1024, signal);
-  if (!buffer?.length) throw new Error('视频内容为空');
-  const strip = await convertVideoToFrameStrip(buffer, signal);
-  if (!strip?.length) throw new Error('视频抽帧失败（服务器上需要可用的 ffmpeg/ffprobe）');
-  return `data:image/jpeg;base64,${strip.toString('base64')}`;
+  return withMediaSlot(async () => {
+    assertMediaMemory(VIDEO_FETCH_MAX_BYTES);
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-media-'));
+    const inputPath = path.join(workDir, 'input');
+    try {
+      await safeFetchToFile(safeUrl, VIDEO_FETCH_MAX_BYTES, inputPath, signal);
+      const strip = await convertVideoFileToFrameStrip(inputPath, signal);
+      if (!strip?.length) throw new Error('视频抽帧失败（服务器上需要可用的 ffmpeg/ffprobe）');
+      return `data:image/jpeg;base64,${strip.toString('base64')}`;
+    } finally {
+      try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
+    }
+  });
 }
 
 function detectMime(buf) {

@@ -5,10 +5,11 @@ import { spawn } from 'node:child_process';
 // fs/path/os 用顶层静态 import：函数体里的 `const { x } = await import(...)`
 // 在 ops scan --strict 里会被判成"调用点有、定义没有"（CI 硬门禁），
 // 而且这里也没有延迟加载的必要。
-import { rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { safeFetchBinary } from '../llm/safe-fetch.js';
+import { safeFetchToFile } from '../llm/safe-fetch.js';
+import { withMediaSlot, assertMediaMemory } from '../core/media-budget.js';
 import { seedAsrTranscribe } from '../llm/seed-asr.js';
 import {
   asrApiKey, asrConfigured, asrLocalBin, asrLocalModel, asrMaxPerHour, asrMaxPerHourPerChat, asrProvider, getConfig
@@ -22,7 +23,9 @@ import { iflytekOptions, iflytekTranscribe } from '../llm/asr-iflytek.js';
 import { hasSilkMagic, looksLikeSilk, silkToPcm } from '../llm/silk.js';
 import { createQuota } from '../core/quota.js';
 
-const AUDIO_MAX_BYTES = 200 * 1024 * 1024; // 200MB：QQ 文件上限内
+// 64MB：够覆盖 15 分钟音频/常见视频，同时避免 200MB 级别的缓冲——
+// 后者在 1.6GB 机器上会连同 Buffer.concat 一起吃掉近 400MB（2026-10-26 复盘）。
+const AUDIO_MAX_BYTES = 64 * 1024 * 1024;
 // PCM 全量进内存：16kHz 单声道 s16 = 32KB/s，15 分钟约 28.8MB（上限按这个算）。
 // 更要防的是"群友连发长语音刷账单"，所以再加一道每小时次数闸门（asr.maxPerHour）。
 const ASR_MAX_PCM_SECONDS = 60 * 15;
@@ -370,19 +373,24 @@ async function localTranscribe(cfg, pcm, signal) {
  * 两条路：QQ 语音是 SILK（ffmpeg 解不了，见 src/llm/silk.js），其余走 ffmpeg 转码。
  * m4a/mp4 的 moov atom 常在尾部，ffmpeg 管道输入无法 seek —— 所以必须落盘成临时文件。
  */
+/** SILK 解码 + 时长一致性自检（缓冲区版本与文件版本共用）。 */
+async function silkBufferToPcmChecked(buffer) {
+  const { pcm, durationMs } = await silkToPcm(buffer);
+  if (durationMs > 0) {
+    // 一致性自检：SILK 头里的时长与解出来的字节数应当对得上（差太多说明解码中途出错了）
+    const expected = Math.round(durationMs / 1000 * 32000);
+    if (Math.abs(pcm.length - expected) > Math.max(3200, expected * 0.05)) {
+      throw new Error(`SILK 解码结果与时长不符（${pcm.length} 字节 vs 约 ${expected} 字节），这条语音可能损坏`);
+    }
+  }
+  return pcm;
+}
+
 export async function audioBufferToPcm(buffer, { name = '', signal } = {}) {
   if (!buffer?.length) throw new Error('音频内容为空（下载到 0 字节）：这条语音/音频可能已过期，让对方重发一次');
   // 文件头优先：缺依赖时也能认出 SILK，进而拿到"跑一次 npm ci"的可照做报错
   if (hasSilkMagic(buffer) || await looksLikeSilk(buffer)) {
-    const { pcm, durationMs } = await silkToPcm(buffer);
-    if (durationMs > 0) {
-      // 一致性自检：SILK 头里的时长与解出来的字节数应当对得上（差太多说明解码中途出错了）
-      const expected = Math.round(durationMs / 1000 * 32000);
-      if (Math.abs(pcm.length - expected) > Math.max(3200, expected * 0.05)) {
-        throw new Error(`SILK 解码结果与时长不符（${pcm.length} 字节 vs 约 ${expected} 字节），这条语音可能损坏`);
-      }
-    }
-    return pcm;
+    return silkBufferToPcmChecked(buffer);
   }
   const ext = /\.(m4a|mp3|wav|amr|aac|ogg|flac|wma|mp4|mov|avi|mkv|webm|silk)$/i.exec(String(name || ''))?.[1] || 'bin';
   const tmpFile = join(tmpdir(), `qa-audio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`);
@@ -392,6 +400,26 @@ export async function audioBufferToPcm(buffer, { name = '', signal } = {}) {
   } finally {
     try { rmSync(tmpFile, { force: true }); } catch { /* 清理失败无害 */ }
   }
+}
+
+/**
+ * 文件输入版本（流式下载后调用）：普通音频/视频直接交给 ffmpeg，不把整包读进内存；
+ * 只有确认是 SILK 时才整包读入（SILK 语音通常只有几十 KB～几 MB）。
+ */
+export async function audioFileToPcm(filePath, { signal } = {}) {
+  let stat = null;
+  try { stat = statSync(filePath); } catch { /* 下面按空文件报 */ }
+  if (!stat?.size) throw new Error('音频内容为空（下载到 0 字节）：这条语音/音频可能已过期，让对方重发一次');
+  // 只读头部认 SILK：避免为了一次判断把 64MB 音频读满。
+  // 小文件（语音通常只有几十 KB～几 MB）读全量，保留"头部被脏字节污染"的兜底判定。
+  const head = Buffer.alloc(Math.min(1024 * 1024, stat.size));
+  const fd = openSync(filePath, 'r');
+  try { readSync(fd, head, 0, head.length, 0); } finally { closeSync(fd); }
+  const whole = stat.size <= 8 * 1024 * 1024 ? readFileSync(filePath) : null;
+  if (hasSilkMagic(whole || head) || await looksLikeSilk(whole || head)) {
+    return silkBufferToPcmChecked(whole || readFileSync(filePath));
+  }
+  return ffmpegToPcm(filePath, { signal });
 }
 
 /** 主入口：给 tools-core 的 get_message_audio 工具用，返回转写文本。 */
@@ -453,19 +481,39 @@ export async function transcribeMessageAudio(ctx, entry) {
           : `本小时全局的语音转写次数已用完（上限 ${asrMaxPerHour(getConfig())} 次/小时，可在控制台「语音转文字」里调整），稍后再试`
       };
     }
-    let buffer;
+    let pcm = null;
+    let downloadError = null;
+    let convertError = null;
+    const tmpDir = mkdtempSync(join(tmpdir(), 'qa-audio-'));
+    const inputPath = join(tmpDir, 'input.bin');
     try {
-      ({ buffer } = await safeFetchBinary(target.url, AUDIO_MAX_BYTES, ctx.signal));
-    } catch (e) {
-      refundAsrQuota(ctx.chatKey, quota.at);
-      return { ok: false, error: `音频下载失败：${String(e?.message ?? e)}` };
+      await withMediaSlot(async () => {
+        // 排到槽位后再看内存：前一个媒体任务可能刚释放/占用过缓存
+        assertMediaMemory(AUDIO_MAX_BYTES);
+        try {
+          await safeFetchToFile(target.url, AUDIO_MAX_BYTES, inputPath, ctx.signal);
+        } catch (error) {
+          downloadError = error;
+          return;
+        }
+        try {
+          pcm = await audioFileToPcm(inputPath, { signal: ctx.signal });
+        } catch (error) {
+          convertError = error;
+        }
+      });
+    } catch (error) {
+      convertError = error;
+    } finally {
+      try { rmSync(tmpDir, { recursive: true, force: true }); } catch { /* 清理失败无害 */ }
     }
-    let pcm;
-    try {
-      pcm = await audioBufferToPcm(buffer, { name: target.name, signal: ctx.signal });
-    } catch (e) {
+    if (downloadError) {
       refundAsrQuota(ctx.chatKey, quota.at);
-      return { ok: false, error: String(e?.message ?? e) };
+      return { ok: false, error: `音频下载失败：${String(downloadError?.message ?? downloadError)}` };
+    }
+    if (convertError || !pcm) {
+      refundAsrQuota(ctx.chatKey, quota.at);
+      return { ok: false, error: String(convertError?.message ?? convertError ?? '音频转码失败') };
     }
     const cfg = getConfig();
     if (!asrConfigured(cfg)) {

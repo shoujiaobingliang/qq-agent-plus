@@ -42,9 +42,16 @@
 - 运行中会话 JSON 默认 10 秒落盘一次，去掉每次写盘的 `chmod`。
 - `messages.sqlite` 默认 `synchronous=NORMAL`（WAL）。
 - SnowLuma 容器增加 Docker 日志轮转（`20m × 3`）。
+- **媒体处理不再整包进内存**（2026-10-26 复盘）：图片/视频/音频改为流式落盘，
+  单次上限图片 12MiB（超大图 32MiB）、视频 32MiB、音频 64MiB；GIF/视频/普通图片先经
+  ffmpeg 降采样成小 JPEG 再进内存/base64。媒体任务全局串行（同一时刻只跑一个），
+  并在 `MemAvailable < 96MB`（音频等大媒体 `< 128MB`）时直接跳过。ffmpeg 限 `-threads 2`，
+  启动时清理 `/tmp/qq-media-*`、`/tmp/qq-ffmpeg-*`、`/tmp/qa-audio-*` 等残留目录。
 
 ## 注意
 
 - `messageRetentionDays=7` 会删除 7 天前的已读消息：引用旧消息、翻更早历史、金句墙等会受影响。
 - 延长保留期会增加磁盘与清理时间；繁忙群建议同时设置 `store.maxMessagesPerChat`。
 - 需要严格掉电持久化时把 `sqliteSynchronous` 改回 `FULL`，但 IOPS 会回升。
+- 超过上述媒体上限的图片/视频/音频会看不到画面（会明确报错）；这是为了避免
+  在内存紧张的机器上因一次大缓冲把整机拖进读盘抖动。

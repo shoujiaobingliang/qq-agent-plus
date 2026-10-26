@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { safeFetchBinary } from '../llm/safe-fetch.js';
+import { safeFetchToFile } from '../llm/safe-fetch.js';
 
 // safe-fetch.js readBounded 的超限报错形态（"响应体超过 N 字节限制"）。
 // 用报错形态识别"是不是拉超了"，其他错误（HTTP 4xx/5xx、SSRF 拦截）原样上抛。
@@ -70,6 +70,7 @@ async function runFfmpegOnce(ffmpegPath, buffer, vf, signal) {
     fs.writeFileSync(inputPath, buffer);
     child = spawn(ffmpegPath, [
       '-hide_banner', '-loglevel', 'error',
+      '-threads', '2',
       '-i', inputPath,
       '-vf', vf,
       '-frames:v', '1',
@@ -129,6 +130,205 @@ async function runFfmpeg(ffmpegPath, buffer, vf, signal) {
 }
 
 /**
+ * 文件输入版本（流式下载后用）：不把整包读进 Node 内存。
+ * 输出仍走 pipe:1，只有最终 JPEG 进内存。
+ */
+function runFfmpegOnPathOnce(ffmpegPath, inputPath, vf, signal, { extraOutputArgs = [] } = {}) {
+  signal?.throwIfAborted();
+  let child;
+  try {
+    child = spawn(ffmpegPath, [
+      '-hide_banner', '-loglevel', 'error',
+      '-threads', '2',
+      '-i', inputPath,
+      ...extraOutputArgs,
+      '-vf', vf,
+      '-frames:v', '1',
+      '-q:v', '5',
+      '-f', 'image2pipe',
+      '-vcodec', 'mjpeg',
+      'pipe:1'
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    throw error;
+  }
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let stderr = '';
+    let settled = false;
+    let timer = null;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      try { child.kill(); } catch { /* 已退出 */ }
+      fn(value);
+    };
+    const onAbort = () => settle(reject, new Error('已中止'));
+    timer = setTimeout(() => settle(reject, new Error('ffmpeg 降采样超时（30 秒）')), 30000);
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout.on('data', (chunk) => chunks.push(chunk));
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 4000) stderr = stderr.slice(-4000);
+    });
+    child.on('error', (error) => settle(reject, new Error(`ffmpeg 启动失败：${error.message}`)));
+    child.on('close', (code) => {
+      const out = Buffer.concat(chunks);
+      if (code === 0 && out.length) settle(resolve, out);
+      else settle(reject, new Error(`ffmpeg 降采样失败（exit ${code}）：${stderr.trim().split('\n').pop() || '无错误输出'}`));
+    });
+  });
+}
+
+async function runFfmpegOnPath(ffmpegPath, inputPath, vf, signal, opts = {}) {
+  try {
+    return await runFfmpegOnPathOnce(ffmpegPath, inputPath, vf, signal, opts);
+  } catch (error) {
+    if (!/启动失败/.test(String(error?.message ?? ''))) throw error;
+    await sleep(250);
+    return runFfmpegOnPathOnce(ffmpegPath, inputPath, vf, signal, opts);
+  }
+}
+
+/** 数 GIF 总帧数（文件输入）：超时 5 秒就够了，数不出走"前 4 帧"保底。 */
+function countGifFramesOnPath(ffmpegPath, inputPath, signal) {
+  signal?.throwIfAborted();
+  return new Promise((resolve) => {
+    let stderr = '';
+    let settled = false;
+    let timer = null;
+    let child;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      try { child?.kill(); } catch { /* 已退出 */ }
+      resolve(value);
+    };
+    const onAbort = () => settle(null);
+    try {
+      child = spawn(ffmpegPath, [
+        '-hide_banner', '-threads', '2',
+        '-i', inputPath,
+        '-map', '0:v:0', '-f', 'null', '-'
+      ], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    timer = setTimeout(() => settle(null), 5000);
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 8000) stderr = stderr.slice(-8000);
+    });
+    child.on('error', () => settle(null));
+    child.on('close', () => {
+      const matches = [...stderr.matchAll(/frame=\s*(\d+)/g)];
+      const total = matches.length ? parseInt(matches[matches.length - 1][1], 10) : 0;
+      settle(total > 0 ? total : null);
+    });
+  });
+}
+
+/** 视频时长（文件输入）：ffprobe 拿不到就按 10 秒估。 */
+function probeVideoSecondsOnPath(ffmpegPath, inputPath, signal) {
+  signal?.throwIfAborted();
+  const probePath = path.join(path.dirname(String(ffmpegPath) || ''),
+    process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    let child;
+    const settle = (value) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(value);
+    };
+    const onAbort = () => { try { child?.kill(); } catch { /* 已退出 */ } settle(0); };
+    try {
+      child = spawn(probePath, [
+        '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', inputPath
+      ], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      resolve(0);
+      return;
+    }
+    let text = '';
+    timer = setTimeout(() => { try { child.kill(); } catch { /* 已退出 */ } settle(0); }, 8000);
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout.on('data', (c) => { text = (text + c).slice(-200); });
+    child.on('error', () => settle(0));
+    child.on('close', () => {
+      const seconds = Number(String(text).trim());
+      settle(Number.isFinite(seconds) && seconds > 0 ? seconds : 0);
+    });
+  });
+}
+
+/** 视频文件 → JPEG 帧条（流式下载后调用，不经过 96MB 的 Buffer）。 */
+export async function convertVideoFileToFrameStrip(inputPath, signal) {
+  const ffmpegPath = await resolveFfmpeg();
+  if (!ffmpegPath) return null;
+  try {
+    const probed = await probeVideoSecondsOnPath(ffmpegPath, inputPath, signal);
+    const seconds = probed > 0 ? probed : 10;
+    const rate = 4 / Math.max(1, Math.min(600, seconds));
+    const vf = `fps=${rate.toFixed(6)},scale=320:-2,tile=2x2`;
+    const jpeg = await runFfmpegOnPath(ffmpegPath, inputPath, vf, signal, {
+      extraOutputArgs: ['-an']   // 只看画面，不解音频
+    });
+    return jpeg?.length ? jpeg : null;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return null;
+  }
+}
+
+/** GIF 文件 → JPEG 帧条（流式下载后调用）。 */
+export async function convertGifFileToStillStrip(inputPath, signal) {
+  const ffmpegPath = await resolveFfmpeg();
+  if (!ffmpegPath) return null;
+  try {
+    const frames = await countGifFramesOnPath(ffmpegPath, inputPath, signal);
+    const jpeg = await runFfmpegOnPath(ffmpegPath, inputPath, gifStripVf(frames), signal);
+    return jpeg?.length ? jpeg : null;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return null;
+  }
+}
+
+/**
+ * 普通图片（含 GIF）文件 → 视觉模型用的有界 JPEG。
+ * 长边压到 2048、q5，目标通常 300KB–1MB；这样 base64 和请求体也不会再放大。
+ * ffmpeg 缺失/失败返回 null，由调用方回退原始文件（保持旧行为）。
+ */
+export async function convertImageFileToVisionJpeg(inputPath, contentType, signal) {
+  if (!/^image\//i.test(String(contentType || ''))) return null;
+  const ffmpegPath = await resolveFfmpeg();
+  if (!ffmpegPath) return null;
+  try {
+    if (/^image\/gif/i.test(String(contentType || ''))) {
+      return await convertGifFileToStillStrip(inputPath, signal);
+    }
+    return await runFfmpegOnPath(ffmpegPath, inputPath, "scale='min(2048,iw)':-2", signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return null;
+  }
+}
+
+
+/**
  * 常规上限拉取抛出"超限"时调用：放宽到 largeCap 重拉一次，确认拿到的确实是
  * 图片（content-type image/*）后交给 ffmpeg 降采样成 JPEG。
  * 拿不到图 / 二次拉取失败 → 把原始超限错误抛回去（贴近真相）；
@@ -136,30 +336,34 @@ async function runFfmpeg(ffmpegPath, buffer, vf, signal) {
  */
 export async function fetchOversizedImageAsJpeg(safeUrl, originalError, signal, {
   cap = 12 * 1024 * 1024,
-  largeCap = 96 * 1024 * 1024
+  largeCap = 32 * 1024 * 1024
 } = {}) {
   if (!OVERSIZE_LIMIT_RE.test(String(originalError?.message ?? ''))) throw originalError;
   const ffmpegPath = await resolveFfmpeg();
   if (!ffmpegPath) {
     throw new Error(`${originalError.message}；图片超过 ${Math.round(cap / 1024 / 1024)} MiB 且系统未安装 ffmpeg，无法自动降采样（安装 ffmpeg 后即可支持超大图）`);
   }
-  let buffer;
-  let contentType;
+  // 二次拉取也走流式落盘：96MB 的 chunks + Buffer.concat 曾在这台 1.6GB 的机器上
+  // 一次性吃掉近 200MB，把 QQ 的 mmap 页挤出缓存（2026-10-26 复盘）。
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-ffmpeg-'));
+  const inputPath = path.join(workDir, 'input');
   try {
-    ({ buffer, contentType } = await safeFetchBinary(safeUrl, largeCap, signal));
-  } catch (error) {
-    // 二次拉取被中止（时间窗关闭/手动停止）时如实抛中止，别伪装成超限错误
-    if (signal?.aborted || error?.name === 'AbortError') throw error;
-    throw originalError; // 其他二次拉取失败：原始超限错误更贴近真相
+    let contentType;
+    try {
+      ({ contentType } = await safeFetchToFile(safeUrl, largeCap, inputPath, signal));
+    } catch (error) {
+      // 二次拉取被中止（时间窗关闭/手动停止）时如实抛中止，别伪装成超限错误
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      throw originalError; // 其他二次拉取失败：原始超限错误更贴近真相
+    }
+    if (!/^image\//i.test(String(contentType || ''))) throw originalError;
+    // GIF 走帧条、其他图按长边降采样；产物只有几百 KB，进内存的只有它
+    const jpeg = await convertImageFileToVisionJpeg(inputPath, contentType, signal);
+    if (!jpeg?.length) throw new Error('ffmpeg 降采样失败（没有产出 JPEG）');
+    return { buffer: jpeg, contentType: 'image/jpeg' };
+  } finally {
+    try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
   }
-  if (!buffer?.length || !/^image\//i.test(String(contentType || ''))) throw originalError;
-  // 动图走帧条（与常规 GIF 路径同一口径，别只给模型一帧）；其他图按尺寸降采样
-  let vf = "scale='min(2048,iw)':-2";
-  if (/^image\/gif/i.test(String(contentType || ''))) {
-    vf = gifStripVf(await countGifFrames(ffmpegPath, buffer, signal));
-  }
-  const jpeg = await runFfmpeg(ffmpegPath, buffer, vf, signal);
-  return { buffer: jpeg, contentType: 'image/jpeg' };
 }
 
 /** 数 GIF 总帧数：-f null 全量解一遍，取 stderr 末尾 progress 的 frame= N。

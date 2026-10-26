@@ -9,6 +9,7 @@
 // 例外开关：security.allowPrivateImageHosts = true 时，图片下载跳过内网检查
 // （仅供本地测试/自建图床使用，默认关闭）。
 import dns from 'node:dns';
+import fs from 'node:fs';
 import net from 'node:net';
 import http from 'node:http';
 import https from 'node:https';
@@ -280,6 +281,162 @@ export async function safeFetchBinary(urlString, maxBytes = 12 * 1024 * 1024, si
     if (result.statusCode !== 200) throw new Error(`HTTP ${result.statusCode}`);
     if (result.truncated || result.body.length > maxBytes) throw new Error(`响应体超过 ${maxBytes} 字节限制`);
     return { buffer: result.body, contentType: result.contentType };
+  }
+  throw new Error('重定向次数过多，已停止');
+}
+
+/**
+ * 单次请求：把响应体**边读边写**到 targetPath，绝不把整包读进 Node 内存。
+ *
+ * 背景（2026-10-26 事故复盘）：safeFetchBinary 用 Buffer.concat 收完整包，96MB 视频
+ * 的峰值是 ~192MB（chunks + concat），200MB 音频接近 400MB。这台 1.6GB 的机器上，
+ * 一次这样的分配就会触发内核回收页缓存，把 QQ 的 mmap 页踢出去，进入读盘抖动。
+ * 这里改成流式落盘：内存里只留当前 chunk，体积上限靠 total 计数和 content-length 双保险。
+ */
+function requestOnceToFile(url, ip, { maxBytes, signal, targetPath } = {}) {
+  return new Promise((resolve, reject) => {
+    const mod = url.protocol === 'https:' ? https : http;
+    const port = url.port || (url.protocol === 'https:' ? 443 : 80);
+    let settled = false;
+    let out = null;
+    let total = 0;
+    let onAbort = null;
+
+    const detach = () => {
+      if (signal && onAbort) {
+        try { signal.removeEventListener('abort', onAbort); } catch { /* ignore */ }
+      }
+    };
+    const cleanupFile = () => {
+      const unlink = () => {
+        try { fs.rmSync(targetPath, { force: true }); } catch { /* ignore */ }
+      };
+      // Windows 上打开中的文件删不掉：等写流 close 之后再做 unlink
+      if (out && !out.closed) {
+        out.once('close', unlink);
+        try { out.destroy(); } catch { unlink(); }
+      } else {
+        unlink();
+      }
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      detach();
+      cleanupFile();
+      reject(error);
+    };
+
+    const req = mod.request({
+      hostname: ip,
+      port,
+      path: url.pathname + url.search,
+      method: 'GET',
+      headers: {
+        host: url.host,
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) qq-agent/1.0',
+        accept: 'image/avif,image/webp,image/*,video/*,audio/*,*/*',
+        'accept-encoding': 'identity',
+        'accept-language': 'zh-CN,zh;q=0.9'
+      },
+      servername: url.protocol === 'https:' ? url.hostname : undefined,
+      rejectUnauthorized: url.protocol === 'https:',
+      signal,
+      timeout: 20000
+    }, (res) => {
+      const statusCode = res.statusCode || 0;
+      const contentType = String(res.headers['content-type'] || '');
+      if ([301, 302, 303, 307, 308].includes(statusCode)) {
+        res.destroy();
+        if (!settled) {
+          settled = true;
+          detach();
+          resolve({ statusCode, redirect: String(res.headers.location || '') });
+        }
+        return;
+      }
+      if (statusCode !== 200) {
+        res.destroy();
+        if (!settled) {
+          settled = true;
+          detach();
+          resolve({ statusCode, contentType });
+        }
+        return;
+      }
+      // content-length 先判：能提前拒绝就不创建文件
+      const declared = Number(res.headers['content-length']);
+      if (Number.isFinite(declared) && declared > maxBytes) {
+        // 先判失败再 destroy：否则 close/aborted 会抢先报成"连接中断"，掩盖真正的超限原因
+        fail(new Error(`响应体超过 ${maxBytes} 字节限制`));
+        res.destroy();
+        return;
+      }
+      try {
+        out = fs.createWriteStream(targetPath, { mode: 0o600 });
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      out.on('error', fail);
+      out.on('finish', () => {
+        if (settled) return;
+        settled = true;
+        detach();
+        resolve({ statusCode, contentType, bytes: total });
+      });
+      // 同时在 data 上计数（pipe 内部也监听 data，两者都能收到 chunk）：
+      // 一旦超限立即断开，绝不把剩余数据继续写进磁盘。
+      res.on('data', (chunk) => {
+        if (settled) return;
+        total += chunk.length;
+        if (total > maxBytes) {
+          // 同上：先结算超限错误，再断流
+          fail(new Error(`响应体超过 ${maxBytes} 字节限制`));
+          try { res.unpipe(out); } catch { /* ignore */ }
+          try { res.destroy(); } catch { /* ignore */ }
+        }
+      });
+      res.on('error', fail);
+      res.on('aborted', () => fail(new Error('响应连接中断')));
+      res.on('close', () => {
+        // 没读完就关（对端重置/超时）不能把半截文件当成完整下载
+        if (!res.complete) fail(new Error('响应连接中断'));
+      });
+      res.pipe(out);
+    });
+    req.on('timeout', () => req.destroy(new Error(`请求超时：${url.hostname}`)));
+    req.on('error', fail);
+    if (signal) {
+      onAbort = () => req.destroy(signal.reason ?? new Error('已中止'));
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
+    req.end();
+  });
+}
+
+/**
+ * 流式下载二进制到文件（图片/视频/音频专用），返回 { file, contentType, bytes }。
+ * SSRF/重定向口径与 safeFetchBinary 完全一致，只是不再把整包留在内存里。
+ * 超限时抛与 safeFetchBinary 相同的文案（`响应体超过 N 字节限制`），
+ * 调用方现有的超限识别逻辑（OVERSIZE_LIMIT_RE）不用改。
+ */
+export async function safeFetchToFile(urlString, maxBytes, targetPath, signal) {
+  const cap = Math.max(1, Math.floor(Number(maxBytes) || 1));
+  const allowPrivate = getConfig().security?.allowPrivateImageHosts === true;
+  let { url, ip } = await validateFetchUrl(urlString, { allowPrivate });
+  for (let i = 0; i <= MAX_REDIRECTS; i++) {
+    signal?.throwIfAborted();
+    const result = await requestOnceToFile(url, ip, { maxBytes: cap, signal, targetPath });
+    if ([301, 302, 303, 307, 308].includes(result.statusCode)) {
+      if (!result.redirect) throw new Error(`重定向缺少 Location：${result.statusCode}`);
+      const next = new URL(result.redirect, url).toString();
+      ({ url, ip } = await validateFetchUrl(next, { allowPrivate }));
+      continue;
+    }
+    if (result.statusCode !== 200) throw new Error(`HTTP ${result.statusCode}`);
+    return { file: targetPath, contentType: result.contentType, bytes: result.bytes };
   }
   throw new Error('重定向次数过多，已停止');
 }

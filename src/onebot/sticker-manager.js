@@ -45,6 +45,7 @@ import { safeFetchBinary, validateImageUrl } from '../llm/safe-fetch.js';
 import { resolveToolCalls } from '../tools/inline-tools.js';
 import { createLogger } from '../core/logger.js';
 import { createQuota } from '../core/quota.js';
+import { withMediaSlot, assertMediaMemory } from '../core/media-budget.js';
 
 const log = createLogger('sticker');
 
@@ -392,6 +393,17 @@ export class StickerManager {
         pick = await this.#judgeSticker({ ...media, url }, message);
         break;
       } catch (error) {
+        // 内存闸门拒绝是环境状态，不是这张图的问题：重试只会继续撞闸门
+        if (error?.code === 'MEDIA_MEMORY_LOW') {
+          log.info('[sticker] 内存紧张，这次跳过（不重试）：' + (error?.message ?? error));
+          return null;
+        }
+        // 「响应体超过 N 字节限制」是确定性失败：同一张图重拉多少次都一样。重试只会把
+        // 同样的网络流量、4MB 级缓冲和视觉请求再放大三倍（2026-10-26 事故复盘），直接放弃。
+        if (/响应体超过\s*\d+\s*字节限制/.test(String(error?.message ?? error))) {
+          log.info('[sticker] 图片超过取图上限，这次跳过（不重试）：' + (error?.message ?? error));
+          return null;
+        }
         if (attempt < 3) {
           await new Promise((resolve) => {
             const timer = setTimeout(resolve, 800 * attempt);
@@ -502,11 +514,15 @@ export class StickerManager {
 
   /** 把图片转成 data URL（视觉模型看的就是它）。 */
   async #stickerDataUrl(url, signal) {
-    const safeUrl = await validateImageUrl(url);
-    const { buffer, contentType } = await safeFetchBinary(safeUrl, 4 * 1024 * 1024, signal);
-    if (!buffer?.length) throw new Error('图片内容为空');
-    const mime = /^image\//.test(String(contentType || '')) ? String(contentType) : 'image/jpeg';
-    return `data:${mime};base64,${buffer.toString('base64')}`;
+    return withMediaSlot(async () => {
+      // 4MB 图片 + base64/请求副本约 20MB：和 96MB 视频处理串行，避免叠加成尖峰
+      assertMediaMemory(4 * 1024 * 1024);
+      const safeUrl = await validateImageUrl(url);
+      const { buffer, contentType } = await safeFetchBinary(safeUrl, 4 * 1024 * 1024, signal);
+      if (!buffer?.length) throw new Error('图片内容为空');
+      const mime = /^image\//.test(String(contentType || '')) ? String(contentType) : 'image/jpeg';
+      return `data:${mime};base64,${buffer.toString('base64')}`;
+    });
   }
 
   /** 判断一张图值不值得收（工具收藏与自动收藏共用同一口径：只收真正的表情包）。 */
@@ -691,11 +707,15 @@ export class StickerManager {
     let localFile = '';
     let assetFile = '';
     try {
-      const safeUrl = await validateImageUrl(url);
-      const { buffer } = await safeFetchBinary(safeUrl, MAX_STICKER_BYTES, signal);
-      const asset = this.#writeAsset(buffer, id);
-      localFile = asset.relativeFile;
-      assetFile = asset.file;
+      await withMediaSlot(async () => {
+        // 8MB 原图 + 落盘：同样排进全局媒体串行闸门，避免和视频/大图处理撞在一起
+        assertMediaMemory(MAX_STICKER_BYTES);
+        const safeUrl = await validateImageUrl(url);
+        const { buffer } = await safeFetchBinary(safeUrl, MAX_STICKER_BYTES, signal);
+        const asset = this.#writeAsset(buffer, id);
+        localFile = asset.relativeFile;
+        assetFile = asset.file;
+      });
     } catch (error) {
       throw new Error(`这张图取不到（${String(error?.message ?? error)}），没有收藏`);
     }

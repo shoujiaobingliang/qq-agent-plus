@@ -3,11 +3,14 @@
 // 实际字节却是 SILK（`.#!SILK_V3`）—— 直接喂 ffmpeg 只会得到 "Invalid data found"，用户看到的
 // 就是"语音转文字失败"。这里覆盖：识别、解码成 16k、以及"解码结果与时长对不上要报错"。
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { encode as silkEncode } from 'silk-wasm';
 
 const { looksLikeSilk, silkToPcm, SILK_SAMPLE_RATE } = await import('../src/llm/silk.js');
-const { audioBufferToPcm } = await import('../src/tools/audio-transcribe.js');
+const { audioBufferToPcm, audioFileToPcm } = await import('../src/tools/audio-transcribe.js');
 
 /** 合成一段单声道 s16le 正弦，当"语音"用（不落任何真实音频进仓库）。 */
 function sinePcm(seconds, rate = 16000) {
@@ -54,6 +57,19 @@ test('audioBufferToPcm：SILK 走本地解码（结果与 silkToPcm 一致），
   const direct = await silkToPcm(silk);
   assert.equal(pcm.length, direct.pcm.length);
   assert.ok(pcm.equals(direct.pcm), '两条路解出来应逐字节一致');
+});
+
+test('audioFileToPcm：文件输入与缓冲区输入结果一致（SILK，不经过 ffmpeg）', async () => {
+  const silk = await silkSample();
+  const file = path.join(os.tmpdir(), `qa-silk-${process.pid}-${Date.now()}.amr`);
+  fs.writeFileSync(file, silk);
+  try {
+    const fromBuffer = await audioBufferToPcm(silk, { name: 'x.amr' });
+    const fromFile = await audioFileToPcm(file);
+    assert.ok(fromFile.equals(fromBuffer), '文件版与缓冲版解码结果应逐字节一致');
+  } finally {
+    try { fs.rmSync(file, { force: true }); } catch { /* ignore */ }
+  }
 });
 
 test('不是 SILK 的字节不会被误判成 SILK（会走 ffmpeg 那条路，并如实报错）', async () => {

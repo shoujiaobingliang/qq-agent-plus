@@ -6,6 +6,7 @@ import { installManualFriendReviewRoute } from './console/manual-friend-review-r
 import { installExperimentalMultimodalContextPilot } from './pilots/experimental-multimodal-context.js';
 import { DATA_DIR } from './core/config.js';
 import { assertSqliteAvailable } from './core/sqlite.js';
+import { cleanupStaleMediaTempDirs } from './core/media-budget.js';
 import { createLogger } from './core/logger.js';
 import { createDailyRetentionScheduler } from './core/ledger-retention.js';
 
@@ -88,6 +89,13 @@ function reportInterruptedDeploy() {
 // 启动最早期确认 node:sqlite 可用：缺内建模块时给人话指引，
 // 而不是等 createApp 的存储层 import 链抛加载期裸栈（改进方案 C5/#11）。
 assertSqliteAvailable();
+
+// 清理上次被 SIGKILL/OOM 打断时留下的媒体临时文件（每个可能是几十 MB 的输入）。
+// 正常路径都在 finally 里删；这里只兜异常退出，失败不影响启动。
+try {
+  const removed = cleanupStaleMediaTempDirs();
+  if (removed > 0) log.info(`[media] 已清理 ${removed} 个残留临时目录`);
+} catch { /* 不影响启动 */ }
 
 // 仅安装一次薄包装；开关关闭时 multimodal-context commit 原样委托旧实现。
 installExperimentalMultimodalContextPilot();
