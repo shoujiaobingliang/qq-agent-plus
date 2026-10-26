@@ -344,6 +344,20 @@ function mergeImpressionLists(base = [], extra = []) {
 }
 
 /**
+ * finish 的同批屏障（issue #58）：finish 可以与其它工具同批，但
+ *  - 同批前面已有工具失败时，finish 不许提交（否则模型以为答完了，实际消息没发出去）；
+ *  - finish 成功之后，同批后面的工具不再执行（不能再产生副作用）。
+ * 返回空串 = 放行；返回非空串 = 这条工具要返回的拒绝原因。
+ */
+export function finishBarrierBlock(name, { finished = false, priorFailure = false } = {}) {
+  if (finished) return '未执行：finish 已形成本轮终止边界，之后的工具不能再产生副作用。';
+  if (name === 'finish' && priorFailure) {
+    return 'finish 未执行：本轮前置工具有失败项，需要先查看错误并重新决定。';
+  }
+  return '';
+}
+
+/**
  * 记忆整理的结果能不能采纳（纯函数，便于单测）。
  *
  * 规则（整理模式只在"合并/删减/按事实改写"的范围内可信）：
@@ -2863,8 +2877,30 @@ export class Orchestrator {
         break;
       }
 
+      // finish 是终止标记，必须最后执行：模型偶尔会把它排在 send_message 前面，
+      // 若按原顺序执行，finish 先成功 → 外层的 !finish 立刻退出循环，后面的 send_message
+      // 即便被屏障拒绝也没有下一轮让模型补发，消息就静默丢了（issue #58 复审 P1）。
+      if (toolCalls.length > 1) {
+        const ordered = [
+          ...toolCalls.filter((call) => call?.function?.name !== 'finish'),
+          ...toolCalls.filter((call) => call?.function?.name === 'finish')
+        ];
+        if (ordered.some((call, index) => call !== toolCalls[index])) {
+          toolCalls = ordered;
+          const lastAssistant = messages[messages.length - 1];
+          if (lastAssistant?.role === 'assistant') lastAssistant.tool_calls = toolCalls;
+          const live = this.sessions.current.get(session.id);
+          const liveLast = live?.messages?.[live.messages.length - 1];
+          if (liveLast?.role === 'assistant') liveLast.tool_calls = structuredClone(toolCalls);
+          this.sessions.update(session.id);
+          this.emit('session-update', session.id);
+        }
+      }
+
       const toolResults = [];
       const imageUserMessages = [];
+      // 只在"同一批 tool_calls"内有效：上一批的失败不挡下一批（模型可能已经在新一批里修正了）。
+      let priorFailure = false;
       // 流式响应结束后，把 assistant 条目的 tool_calls 也同步到会话消息流（一次）
       const liveTool = this.sessions.current.get(session.id);
       const lastAssistantUi = liveTool?.messages?.[liveTool.messages.length - 1];
@@ -2879,7 +2915,10 @@ export class Orchestrator {
         if (name === 'web_search' || name === 'web_fetch') webSearchCount += 1;
         session.webSearchCount = webSearchCount;
         markActivity(`正在调用 ${name}…`);
-        const result = await executeTool(toolDefs, ctx, name, argsRaw);
+        const blocked = finishBarrierBlock(name, { finished: finish, priorFailure });
+        const result = blocked
+          ? { content: blocked, isError: true, reportIncident: false }
+          : await executeTool(toolDefs, ctx, name, argsRaw);
         try { this.mood?.noteToolCall?.({ at: Date.now() }); } catch { /* shadow only */ }
         // meme_lookup 命中本地库时零外呼；只有真的走到普通搜索/梗来源才计入"联网次数"。
         if (name === 'meme_lookup' && result?.isError !== true) {
@@ -2946,6 +2985,9 @@ export class Orchestrator {
         if (this.store.hasUncertainEffects(session.leaseId)) {
           throw new Error('Delivery uncertain; batch held for operator review');
         }
+        // 部分发送失败（sendTextBatch 有 failed 但至少一条成功）不算 isError，
+        // 但同样不能把 finish 提交掉，否则失败的那几条永远没有下一轮补发（issue #58 复审 P1）。
+        if (result.isError || result.partialFailure === true) priorFailure = true;
         if (name === 'finish' && !result.isError) finish = true;
       }
       messages.push(...toolResults.map(({ role, tool_call_id, name, content }) => ({ role, tool_call_id, content, name })));

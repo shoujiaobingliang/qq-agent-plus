@@ -481,7 +481,10 @@ export function buildToolDefs() {
             const detail = result.failed.map((f) => `第${Number(f.index) + 1}条「${String(f.text ?? '').slice(0, 15)}」：${f.error}`).join('；');
             note.push(`（另有 ${result.failed.length} 条发送失败：${detail}——已成功的不需要重发，只补发失败的那几条或减少条数）`);
           }
-          return ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
+          const response = ok({ sent: result.sent.length, messageIds: result.sent.map((s) => s.messageId), note: note.join('') });
+          // 顶层标记：编排器的 finish 屏障要看得到"部分失败"，不能只写在给模型看的 JSON 文本里。
+          if (result.failed.length) response.partialFailure = true;
+          return response;
         } catch (error) {
           return sendErr(error);
         }
@@ -2624,7 +2627,7 @@ export function buildToolDefs() {
     },
     {
       name: 'finish',
-      description: '明确结束本次处理，并把下一次新会话需要的工作状态交接下去。summary 写本轮结论；话题还会继续时补充 topic/hypotheses/evidence/facts/decisions/rejectedDirections/openQuestions/nextStep。只写简洁、可检查的状态，不写逐步隐藏思维。话题已经完成且旧交接不再有用时设 clearHandoff=true。不调用也可以，直接结束文本输出同样代表结束。',
+      description: '明确结束本次处理，并把下一次新会话需要的工作状态交接下去。可以和本轮其它已经成功的工具放在同一批；但同批前置工具有失败时 finish 会被拒绝（先看错误再决定），finish 成功后同批后续工具不会执行。summary 写本轮结论；话题还会继续时补充 topic/hypotheses/evidence/facts/decisions/rejectedDirections/openQuestions/nextStep。只写简洁、可检查的状态，不写逐步隐藏思维。话题已经完成且旧交接不再有用时设 clearHandoff=true。不调用也可以，直接结束文本输出同样代表结束。',
       parameters: {
         type: 'object',
         properties: {
