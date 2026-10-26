@@ -763,14 +763,17 @@ export class Orchestrator {
   }
 
   #chatRuntimeDecision(chatKey) {
-    const meta = this.store.getChatMeta(chatKey);
+    // 这里每 5 秒（以及每条入站消息）都会跑：只查 held 的等值计数，不能拿 getChatMeta
+    // 去扫整张会话消息表 —— 那会把读 IO 打满（2026-10-26 复盘：iowait 82%、
+    // rtps 2700/s、bread 140MB/s，整机被同步扫描拖到内存压力）。
+    const held = this.store.chatHeldCount(chatKey);
     const pilot = this.getIncidentPilot();
-    if (pilot?.active) return pilot.chatDecision(chatKey, meta);
+    if (pilot?.active) return pilot.chatDecision(chatKey, { held });
     return {
-      allowed: Number(meta.held) === 0,
+      allowed: held === 0,
       mode: 'legacy',
-      effectiveState: Number(meta.held) > 0 ? 'blocked' : 'normal',
-      reason: Number(meta.held) > 0 ? '该会话存在发送结果待确认' : ''
+      effectiveState: held > 0 ? 'blocked' : 'normal',
+      reason: held > 0 ? '该会话存在发送结果待确认' : ''
     };
   }
 
@@ -958,10 +961,13 @@ export class Orchestrator {
         for (const key of this.store.listChats()) {
           // ⚠️ hasLeasedRun：硬崩溃后 runs 表会留下未过期的 leased 残行，此时排唤醒 →
           // claimUnread 返回 null → 静默中止，每 5 秒建一个空会话（详见 store.recoverExpired）。
+          // ⚠️ unreadCount 必须排在 #chatRuntimeDecision 之前：前者是索引等值计数，
+          // 后者虽然也已改成常量成本，但没有任何未读的会话本就不该进入判定分支
+          //（2026-10-26 复盘：这里曾是每 5 秒 × 每个会话的全表扫描入口）。
           if (!canRun(key) || this.runningChats.has(key) || this.pendingWake.has(key)
             || this.store.hasLeasedRun(key)
-            || !this.#chatRuntimeDecision(key).allowed
-            || this.store.unreadCount(key) <= 0) continue;
+            || this.store.unreadCount(key) <= 0
+            || !this.#chatRuntimeDecision(key).allowed) continue;
           if (this.mood?.sleeping?.()) continue;
           if (this.#budgetWouldDrop(key)) continue;
           this.scheduleWake(key);
@@ -2351,7 +2357,7 @@ export class Orchestrator {
       ? buildSlangContextForChat(chatKey, { max: 8 })
       : '';
     const incidentContext = this.getIncidentPilot()?.active
-      ? this.getIncidentPilot().contextForChat(chatKey, this.store.getChatMeta(chatKey))
+      ? this.getIncidentPilot().contextForChat(chatKey, { held: this.store.chatHeldCount(chatKey) })
       : '';
 
     // 工具集按配置过滤：工具列表属于缓存前缀，必须先固定后再决定是否复用生命周期 transcript。

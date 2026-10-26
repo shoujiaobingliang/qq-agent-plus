@@ -30,6 +30,11 @@ const MEDIA_TIMEOUT_MS = 60000;
 // WebSocket 通道（生产实测 1–14MB 帧全部正常应答，而贴纸链路的理论最大值
 // ≈10.7MiB = 8MiB 原始图 × 4/3，在实测范围内且留有余量），其余流量保持原 HTTP 路线不动。
 const HTTP_BODY_SAFE_MAX = 1536 * 1024;
+// 单帧接收上限。`ws` 默认允许 100MiB 的单帧，而这里收到后会先 String(data) 再 JSON.parse，
+// 峰值内存是帧本身的数倍 —— 协议端一个异常大帧就能把常驻进程顶进内存压力（2026-10-26 复盘）。
+// 生产实测大帧 1–14MB（贴纸发送链路的 WS 应答），取 32MB 留一倍余量；超限时 ws 会以
+// 1009 关闭连接，走既有的断线重连，比整机失稳可控。
+const WS_MAX_PAYLOAD = 32 * 1024 * 1024;
 
 export class OneBotActionError extends Error {
   constructor(message, {
@@ -144,7 +149,8 @@ export class OneBotClient {
     try {
       socket = new WebSocket(url, {
         headers: this.accessToken ? { authorization: `Bearer ${this.accessToken}` } : {},
-        handshakeTimeout: 15000
+        handshakeTimeout: 15000,
+        maxPayload: WS_MAX_PAYLOAD
       });
     } catch (error) {
       this.lastConnectError = this.#redactToken(error?.message ?? error);

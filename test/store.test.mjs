@@ -63,6 +63,21 @@ describe('ChatStore', () => {
     assert.equal(store.resolveHeld('group:1'), 1);
   });
 
+  it('chatHeldCount 与 getChatMeta().held 同口径：待核对在热路径探针里也必须可见', (t) => {
+    const { store } = fixture(t);
+    append(store, 1);
+    const batch = store.claimUnread('group:1');
+    const send = store.beginSend('group:1', batch.id, { text: 'hello' });
+    store.finishSend(send, { error: 'response lost' });
+    // 先把过期租约回收掉，resolveHeld 才会连 outbox 残骸一起清（leased 行会保护在途证据）
+    assert.equal(store.recoverExpired(Date.now() + 300000), 1);
+    assert.equal(store.getChatMeta('group:1').held, 1);
+    assert.equal(store.chatHeldCount('group:1'), 1, '编排器热路径不能漏掉待核对');
+    store.resolveHeld('group:1');
+    assert.equal(store.getChatMeta('group:1').held, 0);
+    assert.equal(store.chatHeldCount('group:1'), 0);
+  });
+
   it('recoverExpired 跳过 live 集合里仍在跑的租约：不把在跑批次放回队列（2026-10-09 审查）', (t) => {
     const { store } = fixture(t);
     append(store, 1);

@@ -156,6 +156,8 @@ export async function runHealthCheck(opts = {}) {
 
   const checks = [];
   const add = (name, ok, detail = '') => checks.push({ name, ok, detail });
+  // 巡检状态只读一次：下面的完整性检查要用它做「每天一次」的闸门，通知抑制也复用同一份。
+  const state = loadState(dataDir);
   // AbortSignal.timeout 覆盖整次请求（含读 body）：挂死的服务在 fetchTimeoutMs 内必被中止，
   // 巡检不会为它多等一个 undici 默认超时。
   const probeSignal = () => AbortSignal.timeout(fetchTimeoutMs);
@@ -347,12 +349,23 @@ export async function runHealthCheck(opts = {}) {
   add('deploy-interrupted', !fs.existsSync(marker), fs.existsSync(marker) ? '存在中断标记，按 docs/LINUX.md「部署被中断后怎么恢复」处理' : '');
 
   // ⑦ messages 库完整性（适配层只读打开）
+  // 完整 integrity_check 会把整库（含 WAL）扫一遍：云盘上的大库每 5 分钟扫一次就是
+  // 持续的 IOPS/CPU 尖峰（2026-10-26 事故复盘）。改成每个自然日最多一次；检查失败
+  // 不记时间戳，下一轮仍会重试，坏库不会被静默漏掉。
   try {
-    const db = openDatabase(path.join(dataDir, 'messages.sqlite'), { readOnly: true });
-    try {
-      const row = db.prepare('PRAGMA integrity_check').get();
-      add('sqlite-integrity', row?.integrity_check === 'ok', row?.integrity_check ?? '');
-    } finally { db.close(); }
+    const lastFullCheckAt = Number(state.lastIntegrityCheckAt) || 0;
+    if (lastFullCheckAt > 0 && todayKey(lastFullCheckAt) === todayKey(now)) {
+      const at = new Date(lastFullCheckAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+      add('sqlite-integrity', true, `今日已做完整检查（${at}），本轮跳过`);
+    } else {
+      const db = openDatabase(path.join(dataDir, 'messages.sqlite'), { readOnly: true });
+      try {
+        const row = db.prepare('PRAGMA integrity_check').get();
+        const ok = row?.integrity_check === 'ok';
+        add('sqlite-integrity', ok, row?.integrity_check ?? '');
+        if (ok) state.lastIntegrityCheckAt = now;
+      } finally { db.close(); }
+    }
   } catch (error) {
     add('sqlite-integrity', false, error?.message ?? String(error));
   }
@@ -412,7 +425,6 @@ export async function runHealthCheck(opts = {}) {
   const healthy = checks.every((c) => c.ok);
 
   // ── 抑制与通知：按类别计连击；连续 NOTIFY_AFTER_STREAK 次失败才通知，恢复补发一次 ──
-  const state = loadState(dataDir);
   state.streaks = state.streaks || {};
   state.lastRunAt = now;
   state.healthy = healthy;

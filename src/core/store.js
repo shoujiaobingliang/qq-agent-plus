@@ -115,6 +115,9 @@ export class ChatStore {
         id TEXT PRIMARY KEY, run_id TEXT, chat_key TEXT NOT NULL,
         state TEXT NOT NULL, payload TEXT NOT NULL, message_id TEXT, error TEXT
       );
+      -- 待核对计数按 chat_key + state 过滤：没有这个索引时每次 getChatMeta / chatHeldCount
+      -- 都会全表扫 outbox（2026-10-26 复盘，EXPLAIN 实测为 SCAN outbox）。
+      CREATE INDEX IF NOT EXISTS outbox_chat_state ON outbox(chat_key, state);
       CREATE TABLE IF NOT EXISTS conversation_threads (
         chat_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
         mode TEXT NOT NULL DEFAULT 'threaded', state TEXT NOT NULL,
@@ -287,18 +290,47 @@ export class ChatStore {
   listChats() { return this.db.prepare('SELECT chat_key FROM chats ORDER BY chat_key').all().map((r) => r.chat_key); }
   close() { this.db.close(); }
 
+  /**
+   * 会话的「待核对」数量（messages.held 与 outbox 的发送中/结果未知取大）。
+   *
+   * 热路径专用：两条等值查询都走 (chat_key,state) 覆盖索引，成本不随消息行数增长。
+   * 不要再换回 getChatMeta —— 那个是 O(该会话全部消息)，放进 5 秒 ticker 会被
+   * 会话数 × 行数无限放大（2026-10-26 复盘：iowait 82%、rtps 2700/s、bread 140MB/s）。
+   */
+  chatHeldCount(chatKey) {
+    const key = String(chatKey || '');
+    const heldMessages = Number(this.db.prepare(
+      "SELECT COUNT(*) AS n FROM messages WHERE chat_key=? AND state='held'"
+    ).get(key)?.n) || 0;
+    const uncertain = Number(this.db.prepare(`SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS n
+      FROM outbox WHERE chat_key=? AND state IN ('sending','unknown')`).get(key)?.n) || 0;
+    return Math.max(heldMessages, uncertain);
+  }
+
   getChatMeta(chatKey) {
-    const counts = this.db.prepare(`SELECT COUNT(*) AS total,
-      COALESCE(SUM(state IN ('pending','leased')),0) AS unread,
-      COALESCE(SUM(state='failed'),0) AS failed,
-      COALESCE(SUM(state='held'),0) AS heldMessages FROM messages WHERE chat_key=?`).get(chatKey);
-    const uncertain = this.db.prepare(`SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS held
-      FROM outbox WHERE chat_key=? AND state IN ('sending','unknown')`).get(chatKey).held;
+    // 按 state 分组一次算完 total/unread/failed/held：仍是 O(该会话行数) 的覆盖索引扫描，
+    // 所以只给控制台 /api/chats 这类非热路径用 —— 编排器的每条消息与 5 秒 ticker
+    // 一律走成本恒定的 chatHeldCount()（2026-10-26 复盘）。
+    const byState = this.db.prepare(
+      'SELECT state, COUNT(*) AS n FROM messages WHERE chat_key=? GROUP BY state'
+    ).all(chatKey);
+    let total = 0;
+    let unread = 0;
+    let failed = 0;
+    let heldMessages = 0;
+    for (const row of byState) {
+      const n = Number(row.n) || 0;
+      total += n;
+      if (row.state === 'pending' || row.state === 'leased') unread += n;
+      else if (row.state === 'failed') failed += n;
+      else if (row.state === 'held') heldMessages += n;
+    }
+    const uncertain = Number(this.db.prepare(`SELECT COUNT(DISTINCT COALESCE(run_id,id)) AS held
+      FROM outbox WHERE chat_key=? AND state IN ('sending','unknown')`).get(chatKey)?.held) || 0;
     const last = this.db.prepare('SELECT ts,text FROM messages WHERE chat_key=? ORDER BY id DESC LIMIT 1').get(chatKey);
     const thread = this.getConversationThread(chatKey);
-    const { heldMessages, ...rest } = counts;
     return {
-      chatKey, ...rest, held: Math.max(Number(heldMessages) || 0, Number(uncertain) || 0),
+      chatKey, total, unread, failed, held: Math.max(heldMessages, uncertain),
       lastTs: last?.ts || 0, lastText: last?.text || '',
       thread: thread ? {
         threadId: thread.threadId,

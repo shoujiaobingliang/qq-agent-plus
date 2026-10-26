@@ -161,6 +161,26 @@ test('全绿：控件/OneBot/水位/磁盘/完整性都过 → healthy，退出�
   assert.equal(r.checks.find((c) => c.name === 'sqlite-integrity').ok, true);
 });
 
+test('完整性检查每个自然日只做一次：同一天后续巡检跳过，跨天重新执行', async () => {
+  const dir = makeDataDir();
+  const now = Date.now();
+  const opts = { dataDir: dir, fetchImpl: okFetch, statfs: okStatfs, notify: null, now };
+  const first = await runHealthCheck(opts);
+  const firstItem = first.checks.find((c) => c.name === 'sqlite-integrity');
+  assert.equal(firstItem.ok, true);
+  assert.doesNotMatch(String(firstItem.detail), /跳过/, '当天第一次必须真查');
+
+  const second = await runHealthCheck({ ...opts, now: now + 60 * 1000 });
+  const secondItem = second.checks.find((c) => c.name === 'sqlite-integrity');
+  assert.equal(secondItem.ok, true);
+  assert.match(String(secondItem.detail), /跳过/, '同一天第二次不再扫全库');
+
+  const nextDay = await runHealthCheck({ ...opts, now: now + 24 * 60 * 60 * 1000 });
+  const nextItem = nextDay.checks.find((c) => c.name === 'sqlite-integrity');
+  assert.equal(nextItem.ok, true);
+  assert.doesNotMatch(String(nextItem.detail), /跳过/, '跨天后要重新做完整检查');
+});
+
 test('控制台不可达 → 该项失败、healthy=false、退出码 1', async () => {
   const dir = makeDataDir();
   const r = await runHealthCheck({ dataDir: dir, fetchImpl: badFetch, statfs: okStatfs, notify: null });
