@@ -3101,6 +3101,7 @@ export class Orchestrator {
 
   #tickRest() {
     // 作息只做提示，不在系统层自动 sleep：是否睡由模型调用 take_break 决定。
+    try { this.mood?.tickShadow?.(); } catch { /* shadow only：失败不影响主流程 */ }
     const result = this.mood?.finishDueRest?.();
     if (!result?.finished) return;
     this.#emitMood(result.snapshot);

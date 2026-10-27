@@ -27,6 +27,8 @@
 - 精力模型 P1/P2：新增 `E/S/φ` 纯模型与思考 Token 活动强度；默认 `shadow=true` 只计算/记录，
   `shadow=false` 时 `E_obs/S` 接管回复概率、注意力、主动间隔、补话与休息建议；`mood.energyModel` 可关闭。
 - 控制台「设置 → 心情」新增精力模型诊断（`E/S/E_obs/活动/思考速率`）与 shadow/接管开关、补话/休息阈值。
+- 精力模型 JSONL 采集器：默认每 15 分钟追加 `data/energy-shadow/YYYY-MM-DD.jsonl`，
+  `shadow` 与接管模式都记录，按 `keepDays` 清理旧文件。
 
 ## 0.9.3（2026-10-22）
 

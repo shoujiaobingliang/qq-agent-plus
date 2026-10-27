@@ -290,6 +290,18 @@ async function saveConfig({ quiet = false } = {}) {
             val('#cfg-mood-energy-rest-s', c.mood?.energyModel?.decision?.restSuggestS ?? 0.75),
             0, 1, 0.75
           )
+        },
+        collector: {
+          ...(c.mood?.energyModel?.collector || {}),
+          enabled: chk('#cfg-mood-energy-collector', c.mood?.energyModel?.collector?.enabled !== false),
+          intervalMinutes: clampInt(
+            val('#cfg-mood-energy-collector-interval', c.mood?.energyModel?.collector?.intervalMinutes ?? 15),
+            1, 1440, 15
+          ),
+          keepDays: clampInt(
+            val('#cfg-mood-energy-keep-days', c.mood?.energyModel?.collector?.keepDays ?? 90),
+            1, 3650, 90
+          )
         }
       }
     };

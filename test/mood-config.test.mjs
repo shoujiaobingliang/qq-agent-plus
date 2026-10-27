@@ -39,6 +39,11 @@ test('心情配置有默认值', () => {
     restSuggestS: 0.75,
     scheduledFullSleepRatio: 0.99
   });
+  assert.deepEqual(mood.energyModel.collector, {
+    enabled: true,
+    intervalMinutes: 15,
+    keepDays: 90
+  });
 });
 
 test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
@@ -79,7 +84,8 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
         kr: 999,
         beta: -1,
         activity: { wThink: 9, fullTokensPerMinute: 0, includePurposes: ['x', ''] },
-        decision: { followUpMinEobs: 9, restSuggestS: -1, scheduledFullSleepRatio: 0 }
+        decision: { followUpMinEobs: 9, restSuggestS: -1, scheduledFullSleepRatio: 0 },
+        collector: { enabled: false, intervalMinutes: 0, keepDays: 0 }
       }
     }
   });
@@ -117,6 +123,11 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
     followUpMinEobs: 1,
     restSuggestS: 0,
     scheduledFullSleepRatio: 0.5
+  });
+  assert.deepEqual(cfg.mood.energyModel.collector, {
+    enabled: false,
+    intervalMinutes: 1,
+    keepDays: 1
   });
   assert.equal(getConfig().mood.enabled, false);
 });

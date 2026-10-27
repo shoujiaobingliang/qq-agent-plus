@@ -5,6 +5,8 @@
 //   · 快照只读不写 —— 控制台 15 秒轮询不会制造磁盘写；
 //   · 任何写失败只记日志、保留内存状态，不影响聊天主流程；
 //   · 关闭时不读不写，所有系数恒为 1，行为完全回到现状。
+import fs from 'node:fs';
+import path from 'node:path';
 import { DATA_DIR, getConfig } from './config.js';
 import {
   activityFromSamples,
@@ -14,6 +16,7 @@ import {
   thinkingTokensForSample
 } from './energy-model.js';
 import { sleepWindowFor } from './mood-schedule.js';
+import { todayKey } from './util.js';
 import {
   DEFAULT_DAILY_KEEP_DAYS,
   DEFAULT_ENERGY,
@@ -52,6 +55,9 @@ export class MoodManager {
     // P1 shadow：思考/工具/会话样本只存在内存里；重启后活动从 0 重新累积。
     this.energySamples = [];
     this.lastShadowLogAt = 0;
+    // JSONL 采集：默认 15 分钟一条，按天落盘。
+    this.lastCollectAt = 0;
+    this.lastCollectorPruneDay = '';
   }
 
   config() {
@@ -250,6 +256,7 @@ export class MoodManager {
         + ` activity=${Math.round(activity.activity * 100) / 100}`
         + ` rate=${Math.round(activity.rate)}/min`);
     }
+    this.#collectEnergyShadow({ now, observed, activity, sleeping: asleep });
     return {
       ...observed,
       activity: activity.activity,
@@ -259,6 +266,69 @@ export class MoodManager {
       aSession: activity.aSession,
       aTool: activity.aTool
     };
+  }
+
+  /** 按 intervalMinutes 追加一行 JSONL；shadow/active 两种模式都记录。 */
+  #collectEnergyShadow({ now, observed, activity, sleeping }) {
+    const cfg = this.#energyConfig();
+    const collector = cfg.collector && typeof cfg.collector === 'object' ? cfg.collector : {};
+    if (collector.enabled === false) return;
+    const intervalMinutes = Math.max(1, Math.min(1440, Number(collector.intervalMinutes) || 15));
+    if (now - this.lastCollectAt < intervalMinutes * 60 * 1000) return;
+    this.lastCollectAt = now;
+    const day = todayKey(now);
+    const dir = path.join(this.dataDir, 'energy-shadow');
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (this.lastCollectorPruneDay !== day) {
+        this.lastCollectorPruneDay = day;
+        this.#pruneEnergyShadow(dir, day, collector.keepDays);
+      }
+      const line = JSON.stringify({
+        at: now,
+        iso: new Date(now).toISOString(),
+        mode: this.#energyActive() ? 'active' : 'shadow',
+        E: observed.E,
+        S: observed.S,
+        phase: observed.phase,
+        Eobs: observed.Eobs,
+        energy: observed.energy,
+        fatigue: observed.fatigue,
+        activity: activity.activity,
+        rate: activity.rate,
+        tokens: activity.tokens,
+        aThink: activity.aThink,
+        aSession: activity.aSession,
+        aTool: activity.aTool,
+        legacyEnergy: Math.round(Number(this.#current().energy) || 0),
+        rest: sleeping ? 'sleep' : (this.slacking() ? 'slack' : '')
+      });
+      fs.appendFileSync(path.join(dir, `${day}.jsonl`), `${line}\n`, {
+        encoding: 'utf8',
+        mode: 0o600
+      });
+    } catch (error) {
+      this.log(`[energy-shadow] JSONL 采集失败：${error?.message ?? error}`);
+    }
+  }
+
+  #pruneEnergyShadow(dir, today, keepDays) {
+    const days = Math.max(1, Math.min(3650, Number(keepDays) || 90));
+    const cutoffDate = new Date(`${today}T00:00:00Z`);
+    cutoffDate.setUTCDate(cutoffDate.getUTCDate() - days);
+    const cutoff = cutoffDate.toISOString().slice(0, 10);
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        const match = /^(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
+        if (!match || match[1] >= cutoff) continue;
+        try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* ignore */ }
+      }
+    } catch { /* 目录读不了不影响采集 */ }
+  }
+
+  /** 供 rest ticker 调用：让 shadow 在空闲时也能按时推进/采集。 */
+  tickShadow(now = this.now()) {
+    return this.#tickEnergyShadow(now);
   }
 
   /** 当前值（已做惰性衰减），不写盘。 */

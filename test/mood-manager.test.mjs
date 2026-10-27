@@ -232,6 +232,69 @@ test('P2 shadow=false：E_obs 接管频率/补话；shadow=true 仍走旧 energy
   assert.ok(legacy.frequencyFactor() > 1.1, 'shadow=true 仍用旧 energy=90');
 });
 
+test('P3 采集器：按间隔写 energy-shadow/YYYY-MM-DD.jsonl，shadow/active 都记录', () => {
+  configure({
+    energyModel: {
+      enabled: true,
+      shadow: true,
+      collector: { enabled: true, intervalMinutes: 1, keepDays: 7 }
+    }
+  });
+  const dir = fs.mkdtempSync(path.join(root, 'energy-collector-'));
+  let now = T0;
+  const manager = new MoodManager({ dataDir: dir, now: () => now });
+  manager.tickShadow(now);
+  now += 30 * 1000;
+  manager.tickShadow(now);
+  now += 30 * 1000;
+  manager.tickShadow(now);
+
+  const folder = path.join(dir, 'energy-shadow');
+  const files = fs.readdirSync(folder);
+  assert.equal(files.length, 1);
+  const rows = fs.readFileSync(path.join(folder, files[0]), 'utf8').trim().split('\n');
+  assert.equal(rows.length, 2, '1 分钟间隔只写 2 条');
+  const row = JSON.parse(rows[0]);
+  assert.equal(row.mode, 'shadow');
+  assert.ok(Number.isFinite(row.E));
+  assert.ok(Number.isFinite(row.S));
+  assert.ok(Number.isFinite(row.Eobs));
+  assert.ok(Number.isFinite(row.legacyEnergy));
+
+  configure({
+    energyModel: {
+      enabled: true,
+      shadow: false,
+      collector: { enabled: true, intervalMinutes: 1, keepDays: 7 }
+    }
+  });
+  const activeDir = fs.mkdtempSync(path.join(root, 'energy-collector-active-'));
+  const active = new MoodManager({ dataDir: activeDir, now: () => T0 });
+  active.tickShadow(T0);
+  const activeFile = fs.readdirSync(path.join(activeDir, 'energy-shadow'))[0];
+  const activeRow = JSON.parse(
+    fs.readFileSync(path.join(activeDir, 'energy-shadow', activeFile), 'utf8').trim()
+  );
+  assert.equal(activeRow.mode, 'active');
+});
+
+test('P3 采集器：按 keepDays 清理旧文件', () => {
+  configure({
+    energyModel: {
+      enabled: true,
+      shadow: true,
+      collector: { enabled: true, intervalMinutes: 1, keepDays: 7 }
+    }
+  });
+  const dir = fs.mkdtempSync(path.join(root, 'energy-collector-prune-'));
+  const folder = path.join(dir, 'energy-shadow');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, '2000-01-01.jsonl'), '{}\n');
+  const manager = new MoodManager({ dataDir: dir, now: () => T0 });
+  manager.tickShadow(T0);
+  assert.equal(fs.existsSync(path.join(folder, '2000-01-01.jsonl')), false);
+});
+
 test('作息建议：窗口内只提示，不自动进入 rest', () => {
   configure({
     rest: { schedule: { enabled: true, sleepAt: '11:30', wakeAt: '13:30', allowStayUp: true } }

@@ -4,8 +4,8 @@
 > 本文按 qq-agent-plus 的实际架构（事件驱动、真实时钟、LLM 决策、`mood.json` 持久化）
 > 做了裁剪和映射。**审批通过后再实施。**
 >
-> **实施状态（2026-10-27）**：P0 纯模型完成；P1 shadow 接线完成；P2 决策接入完成；P3 控制台诊断与
-> shadow/接管开关完成（默认 `shadow=true` 仍走旧逻辑，显式 `shadow=false` 才让 `E_obs/S` 接管）；
+> **实施状态（2026-10-27）**：P0 纯模型完成；P1 shadow 接线完成；P2 决策接入完成；P3 控制台诊断、
+> shadow/接管开关与 JSONL 采集器完成（默认 `shadow=true` 仍走旧逻辑，显式 `shadow=false` 才让 `E_obs/S` 接管）；
 > P4（移除旧精力模型）待开始。
 
 ## 一、目标与范围
@@ -377,6 +377,11 @@ lastTickAt = now
         "restSuggestS": 0.75,
         "scheduledFullSleepRatio": 0.99
       },
+      "collector": {
+        "enabled": true,
+        "intervalMinutes": 15,
+        "keepDays": 90
+      },
       "schedule": {
         "enabled": true,
         "sleepAt": "23:30",
@@ -399,6 +404,9 @@ lastTickAt = now
   - 当前活动强度 `a`、当前消耗速率、最近 tick；
   - 最近变化里显示 `E_obs`/`S`，不显示用户 QQ。
 - `/api/mood` 返回 `energyModel: { E, S, phase, Eobs, rate }`（只读）。
+- **JSONL 采集**：默认每 15 分钟追加 `$DATA_DIR/energy-shadow/YYYY-MM-DD.jsonl`；
+  `shadow` 与接管模式都会记录，字段含 `at/iso/mode/E/S/phase/Eobs/energy/fatigue/activity/rate/tokens/aThink/aSession/aTool/legacyEnergy/rest`；
+  按 `collector.keepDays` 清理旧文件，保留 90 天。
 - **Shadow 模式**：`energyModel.shadow=true` 时只计算/记录，不参与任何决策；控制台显示新旧对照。建议先跑 3–7 天，再切行为。
 
 ## 十二、测试与验收

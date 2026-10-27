@@ -378,6 +378,11 @@ export const DEFAULT_CONFIG = {
         followUpMinEobs: 0.25,
         restSuggestS: 0.75,
         scheduledFullSleepRatio: 0.99
+      },
+      collector: {
+        enabled: true,
+        intervalMinutes: 15,
+        keepDays: 90
       }
     }
   },
@@ -2032,6 +2037,9 @@ export function updateConfig(patch) {
     const decisionIn = energyCfgIn.decision && typeof energyCfgIn.decision === 'object' && !Array.isArray(energyCfgIn.decision)
       ? energyCfgIn.decision
       : {};
+    const collectorIn = energyCfgIn.collector && typeof energyCfgIn.collector === 'object' && !Array.isArray(energyCfgIn.collector)
+      ? energyCfgIn.collector
+      : {};
     const includePurposes = Array.isArray(activityIn.includePurposes)
       ? activityIn.includePurposes.map(String).filter(Boolean).slice(0, 8)
       : [...energyDefaults.activity.includePurposes];
@@ -2139,6 +2147,15 @@ export function updateConfig(patch) {
           scheduledFullSleepRatio: bounded(
             decisionIn.scheduledFullSleepRatio, energyDefaults.decision.scheduledFullSleepRatio, 0.5, 1
           )
+        },
+        collector: {
+          enabled: collectorIn.enabled !== false,
+          intervalMinutes: Math.round(bounded(
+            collectorIn.intervalMinutes, energyDefaults.collector.intervalMinutes, 1, 1440
+          )),
+          keepDays: Math.round(bounded(
+            collectorIn.keepDays, energyDefaults.collector.keepDays, 1, 3650
+          ))
         }
       }
     };

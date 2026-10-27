@@ -86,6 +86,7 @@ function renderMoodSection(c) {
   const schedule = rest.schedule && typeof rest.schedule === 'object' ? rest.schedule : {};
   const energy = m.energyModel && typeof m.energyModel === 'object' ? m.energyModel : {};
   const energyDecision = energy.decision && typeof energy.decision === 'object' ? energy.decision : {};
+  const energyCollector = energy.collector && typeof energy.collector === 'object' ? energy.collector : {};
   const enabled = m.enabled !== false;
   const frequency = moodNum(m.frequencyInfluence, 0.2);
   const tone = moodNum(m.toneInfluence, 0.6);
@@ -234,6 +235,19 @@ function renderMoodSection(c) {
           <input type="number" id="cfg-mood-energy-rest-s" min="0" max="1" step="0.05" value="${moodNum(energyDecision.restSuggestS, 0.75)}" />
         </label>
       </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-mood-energy-collector" ${energyCollector.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-mood-energy-collector">记录精力 JSONL 数据</label>
+      </div>
+      <div class="gm-row">
+        <label>采集间隔（分钟）
+          <input type="number" id="cfg-mood-energy-collector-interval" min="1" max="1440" step="1" value="${moodNum(energyCollector.intervalMinutes, 15)}" />
+        </label>
+        <label>保留天数
+          <input type="number" id="cfg-mood-energy-keep-days" min="1" max="3650" step="1" value="${moodNum(energyCollector.keepDays, 90)}" />
+        </label>
+      </div>
+      <div class="hint">写入 data/energy-shadow/YYYY-MM-DD.jsonl；shadow 与接管模式都会记录，用于后续调参。</div>
     </div>`;
 }
 
