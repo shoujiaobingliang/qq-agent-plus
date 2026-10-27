@@ -373,7 +373,12 @@ export const DEFAULT_CONFIG = {
       enabled: true,
       shadow: true,
       ...ENERGY_MODEL_DEFAULTS,
-      activity: { ...ENERGY_MODEL_DEFAULTS.activity }
+      activity: { ...ENERGY_MODEL_DEFAULTS.activity },
+      decision: {
+        followUpMinEobs: 0.25,
+        restSuggestS: 0.75,
+        scheduledFullSleepRatio: 0.99
+      }
     }
   },
   // 印象分（按人）：心情评审时顺便判断“这个人让我舒服/不舒服”，落入人物记忆。
@@ -2024,6 +2029,9 @@ export function updateConfig(patch) {
     const activityIn = energyCfgIn.activity && typeof energyCfgIn.activity === 'object' && !Array.isArray(energyCfgIn.activity)
       ? energyCfgIn.activity
       : {};
+    const decisionIn = energyCfgIn.decision && typeof energyCfgIn.decision === 'object' && !Array.isArray(energyCfgIn.decision)
+      ? energyCfgIn.decision
+      : {};
     const includePurposes = Array.isArray(activityIn.includePurposes)
       ? activityIn.includePurposes.map(String).filter(Boolean).slice(0, 8)
       : [...energyDefaults.activity.includePurposes];
@@ -2120,6 +2128,17 @@ export function updateConfig(patch) {
             activityIn.sessionWindowMinutes, energyDefaults.activity.sessionWindowMinutes, 1, 120
           ),
           includePurposes
+        },
+        decision: {
+          followUpMinEobs: bounded(
+            decisionIn.followUpMinEobs, energyDefaults.decision.followUpMinEobs, 0, 1
+          ),
+          restSuggestS: bounded(
+            decisionIn.restSuggestS, energyDefaults.decision.restSuggestS, 0, 1
+          ),
+          scheduledFullSleepRatio: bounded(
+            decisionIn.scheduledFullSleepRatio, energyDefaults.decision.scheduledFullSleepRatio, 0.5, 1
+          )
         }
       }
     };

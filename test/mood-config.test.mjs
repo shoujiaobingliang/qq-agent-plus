@@ -34,6 +34,11 @@ test('心情配置有默认值', () => {
   assert.equal(mood.energyModel.shadow, true);
   assert.equal(mood.energyModel.activity.fullTokensPerMinute, 2000);
   assert.deepEqual(mood.energyModel.activity.includePurposes, ['chat', 'reply-correction']);
+  assert.deepEqual(mood.energyModel.decision, {
+    followUpMinEobs: 0.25,
+    restSuggestS: 0.75,
+    scheduledFullSleepRatio: 0.99
+  });
 });
 
 test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
@@ -73,7 +78,8 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
         shadow: false,
         kr: 999,
         beta: -1,
-        activity: { wThink: 9, fullTokensPerMinute: 0, includePurposes: ['x', ''] }
+        activity: { wThink: 9, fullTokensPerMinute: 0, includePurposes: ['x', ''] },
+        decision: { followUpMinEobs: 9, restSuggestS: -1, scheduledFullSleepRatio: 0 }
       }
     }
   });
@@ -107,6 +113,11 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
   assert.equal(cfg.mood.energyModel.activity.wThink, 1);
   assert.equal(cfg.mood.energyModel.activity.fullTokensPerMinute, 1);
   assert.deepEqual(cfg.mood.energyModel.activity.includePurposes, ['x']);
+  assert.deepEqual(cfg.mood.energyModel.decision, {
+    followUpMinEobs: 1,
+    restSuggestS: 0,
+    scheduledFullSleepRatio: 0.5
+  });
   assert.equal(getConfig().mood.enabled, false);
 });
 

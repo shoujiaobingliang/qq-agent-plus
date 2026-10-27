@@ -210,6 +210,28 @@ test('P1 shadow：睡觉期间 E 恢复，结算后继续推进', () => {
   assert.ok(manager.snapshot().energyModel.E > during.energyModel.E);
 });
 
+test('P2 shadow=false：E_obs 接管频率/补话；shadow=true 仍走旧 energy', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'energy-active-'));
+  writeMoodState({
+    ...defaultMoodState(T0, baseline),
+    energy: 90,
+    energyModel: { E: 0.2, S: 0.9, phase: 0, lastTickAt: T0, activity: 0, activityEma: 0 }
+  }, { dataDir: dir });
+
+  configure({ energyModel: { enabled: true, shadow: false } });
+  const manager = new MoodManager({ dataDir: dir, now: () => T0 });
+  const snap = manager.snapshot();
+  assert.equal(snap.energyModelActive, true);
+  assert.equal(snap.energyModel.energy, 0, 'E=0.2,S=0.9 → E_obs 被压到 0');
+  assert.equal(manager.frequencyFactor(), 0.8);
+  assert.equal(manager.followUpEnergyOk(), false);
+
+  configure({ energyModel: { enabled: true, shadow: true } });
+  const legacy = new MoodManager({ dataDir: dir, now: () => T0 });
+  assert.equal(legacy.snapshot().energyModelActive, false);
+  assert.ok(legacy.frequencyFactor() > 1.1, 'shadow=true 仍用旧 energy=90');
+});
+
 test('作息建议：窗口内只提示，不自动进入 rest', () => {
   configure({
     rest: { schedule: { enabled: true, sleepAt: '11:30', wakeAt: '13:30', allowStayUp: true } }

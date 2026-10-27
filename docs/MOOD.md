@@ -65,12 +65,17 @@
 - 所有值夹在 0-100；
 - 评审失败、超时、超每日上限、预算超限时，本轮不加不减，不影响聊天。
 
-## 精力模型（P1 shadow）
+## 精力模型（P1 shadow / P2 决策接入）
 
 `mood.energyModel` 维护 `E`（即时精力）、`S`（睡眠压力）、`φ`（昼夜相位），活动强度按主对话的
-思考 Token（缺失时用 `completion_tokens` 兜底）计算。**P1 只计算/记录，不参与回复、主动与休息决策**；
-`shadow=false` 可关闭日志，`enabled=false` 可整体关闭。`GET /api/mood` 的 `energyModel` 字段可看当前值，
-详细参数与分阶段计划见 [`docs/requirements/energy.md`](requirements/energy.md)。
+思考 Token（缺失时用 `completion_tokens` 兜底）计算。
+
+- `shadow=true`（默认）：只计算/记录，回复/主动/休息仍走旧 `energy`；
+- `shadow=false`：`E_obs/S` 接管 `frequencyFactor`、注意力阈值、主动间隔、补话门槛与 `take_break` 建议；
+  提示词里的精力/困倦度也改用 `E_obs/S`；
+- `enabled=false`：整体关闭 shadow 与接管；
+- `GET /api/mood` 的 `energyModel` 字段可看当前值，详细参数与分阶段计划见
+  [`docs/requirements/energy.md`](requirements/energy.md)。
 
 ## 对行为的影响
 

@@ -65,6 +65,20 @@ test('作息建议：窗口内提示睡觉，但保留熬夜选择', () => {
   assert.doesNotMatch(hidden, /【作息建议】/);
 });
 
+test('P2：模型接管时提示词显示 E_obs 与困倦度', () => {
+  const active = {
+    ...snapshot,
+    restEnabled: true,
+    energyModelActive: true,
+    restSuggestS: 0.75,
+    energyModel: { E: 0.2, S: 0.9, phase: 0, Eobs: 0, energy: 0, fatigue: 90 }
+  };
+  const block = buildMoodPromptBlock(active, { context: 'chat' });
+  assert.match(block, /精力 0\/100（疲惫）/);
+  assert.match(block, /困倦度 90\/100/);
+  assert.match(block, /take_break/);
+});
+
 test('精力系数只作用于概率档，不影响必回的 @', () => {
   const cfg = structuredClone(DEFAULT_CONFIG);
   cfg.messageTypes.expandForward = true;

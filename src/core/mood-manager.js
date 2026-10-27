@@ -139,6 +139,19 @@ export class MoodManager {
     return this.#energyConfig().enabled !== false;
   }
 
+  /** P2：只有显式 shadow=false 才让 E_obs/S 接管决策；shadow=true 仍走旧逻辑。 */
+  #energyActive() {
+    const cfg = this.#energyConfig();
+    return this.enabled() && cfg.enabled !== false && cfg.shadow === false;
+  }
+
+  /** 决策用精力（0-100）：active 时用 E_obs，否则沿用旧 energy。 */
+  #decisionEnergy(current = null) {
+    if (!this.#energyActive()) return Number((current || this.#current()).energy) || 0;
+    const observed = this.#tickEnergyShadow(this.now());
+    return Number(observed?.energy) || 0;
+  }
+
   #trimEnergySamples(now = this.now()) {
     const cfg = this.#energyConfig();
     const window = Math.max(1, Number(cfg.activity?.windowMinutes) || 10);
@@ -291,6 +304,8 @@ export class MoodManager {
       toneInfluence: this.#toneInfluence(),
       restEnabled: this.restEnabled(),
       energyModel: this.#tickEnergyShadow(this.now()),
+      energyModelActive: this.#energyActive(),
+      restSuggestS: numIn(this.#energyConfig().decision?.restSuggestS, 0.75, 0, 1),
       schedule: {
         enabled: scheduleCfg.enabled !== false,
         sleepAt: scheduleCfg.sleepAt || '23:30',
@@ -404,7 +419,9 @@ export class MoodManager {
     const maxMood = numIn(cfg.maxMoodForRest, 45, 0, 100);
     const maxEnergy = numIn(cfg.maxEnergyForRest, 40, 0, 100);
     // 作息窗口内是“建议睡觉”，模型主动睡不要求状态很低；窗口外维持原门槛。
-    if (!window?.active && Number(state.mood) > maxMood && Number(state.energy) > maxEnergy) return null;
+    const observed = this.#energyActive() ? this.#tickEnergyShadow(this.now()) : null;
+    const energyForRest = observed ? Number(observed.energy) : Number(state.energy);
+    if (!window?.active && Number(state.mood) > maxMood && energyForRest > maxEnergy) return null;
     const defaultMinutes = safeKind === 'sleep'
       ? numIn(cfg.sleepMinutes, 90, 30, 180)
       : numIn(cfg.slackMinutes, 30, 10, 60);
@@ -597,7 +614,7 @@ export class MoodManager {
   /** 回复概率/主动概率的乘数：精力 0 → 0.8，50 → 1.0，100 → 1.2（默认影响 0.2）。 */
   frequencyFactor() {
     if (!this.enabled()) return 1;
-    const energy = this.#current().energy;
+    const energy = this.#decisionEnergy();
     const norm = (energy - 50) / 50;
     let factor = numIn(1 + this.#frequencyInfluence() * norm, 1, 0.6, 1.4);
     // 摸鱼是软暂停：仍然会看消息，但只选择性回一些；睡觉时通常没有运行，不影响这里。
@@ -611,7 +628,7 @@ export class MoodManager {
   attentionMinConfidence(base = 0.55) {
     const fallback = numIn(base, 0.55, 0.2, 0.9);
     if (!this.enabled()) return fallback;
-    const energy = this.#current().energy;
+    const energy = this.#decisionEnergy();
     const slackBias = this.slacking() ? 0.15 : 0;
     return numIn(
       fallback + (0.5 - energy / 100) * this.#frequencyInfluence() + slackBias,
@@ -631,7 +648,7 @@ export class MoodManager {
   /** 主动间隔：精力高时略缩短，精力低时略拉长。 */
   proactiveIntervalFactor() {
     if (!this.enabled()) return 1;
-    const energy = this.#current().energy;
+    const energy = this.#decisionEnergy();
     const norm = (energy - 50) / 50;
     return numIn(1 - this.#frequencyInfluence() * norm * 0.5, 1, 0.75, 1.25);
   }
@@ -639,6 +656,12 @@ export class MoodManager {
   followUpEnergyOk() {
     if (!this.enabled()) return true;
     if (this.resting()) return false;
+    if (this.#energyActive()) {
+      const observed = this.#tickEnergyShadow(this.now());
+      const min = numIn(this.#energyConfig().decision?.followUpMinEobs, 0.25, 0, 1);
+      const eobs = Number(observed?.Eobs);
+      if (Number.isFinite(eobs)) return eobs >= min;
+    }
     const min = numIn(this.config().followUpMinEnergy, 25, 0, 100);
     return this.#current().energy >= min;
   }

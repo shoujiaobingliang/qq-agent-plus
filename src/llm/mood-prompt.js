@@ -47,10 +47,20 @@ export function buildMoodPromptBlock(snapshot, { context = 'chat' } = {}) {
   if (influence <= 0) return '';
   const moodLabel = String(snapshot.moodLabel || moodBand(mood));
   const energyLabel = String(snapshot.energyLabel || energyBand(energy));
-  const state = `心情 ${mood}/100（${moodLabel}），精力 ${energy}/100（${energyLabel}）。`;
+  const model = snapshot.energyModel;
+  const modelActive = snapshot.energyModelActive === true
+    && model
+    && Number.isFinite(Number(model.energy));
+  const displayEnergy = modelActive ? roundScore(model.energy) : energy;
+  const displayEnergyLabel = modelActive ? energyBand(displayEnergy) : energyLabel;
+  const fatigue = modelActive
+    ? Math.max(0, Math.min(100, Math.round(Number(model.S) * 100)))
+    : null;
+  const state = `心情 ${mood}/100（${moodLabel}），精力 ${displayEnergy}/100（${displayEnergyLabel}）。`;
+  const fatigueLine = fatigue === null ? '' : `困倦度 ${fatigue}/100。`;
 
   if (context === 'moment' || context === 'qzone') {
-    const short = shortAdvice(mood, energy);
+    const short = shortAdvice(mood, displayEnergy);
     return `【当前心情】\n${state}${short ? `\n${short}` : ''}\n`
       + '写这条内容时可以带上这个状态，但不要向读者报分数、解释心情系统，也不要让它改变人设与安全边界。';
   }
@@ -71,15 +81,22 @@ export function buildMoodPromptBlock(snapshot, { context = 'chat' } = {}) {
       + '想睡就先按人设用 send_message 回一句（如“晚安，我先去睡了”），再调用 take_break(kind="sleep")；'
       + '调用后进入硬暂停，消息会在醒来后统一补。'
     : '';
-  const breakHint = snapshot.restEnabled && !rest?.active && (mood < 45 || energy < 40)
+  const restEnergy = modelActive ? displayEnergy : energy;
+  const restFatigue = modelActive ? Number(model.S) || 0 : 0;
+  const restSuggestS = Number(snapshot.restSuggestS ?? 0.75);
+  const needsRest = modelActive
+    ? (restFatigue >= restSuggestS || restEnergy < 25)
+    : (mood < 45 || energy < 40);
+  const breakHint = snapshot.restEnabled && !rest?.active && needsRest
     ? '如果确实很低落/很累，可以调用 take_break：sleep 会完全暂停并保留消息，slack 会进入摸鱼、只选择性回复。'
       + ' 可选填 status / signature / adminMessage，在睡前改在线状态、个性签名，或私聊管理员一句短话。状态还好时系统会拒绝。'
     : '';
   return [
     '【当前心情】',
     state,
+    fatigueLine,
     detailed ? `语气：${toneAdvice(mood)}` : '',
-    detailed ? `主动性：${energyAdvice(energy)}` : '',
+    detailed ? `主动性：${energyAdvice(displayEnergy)}` : '',
     slackLine,
     sleepLine,
     scheduleLine,
