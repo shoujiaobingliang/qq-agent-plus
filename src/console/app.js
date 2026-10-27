@@ -99,8 +99,8 @@ const UI_DIR = path.resolve(__dirname, '..', '..', 'ui');
 // ⚠️ 为什么必须现算（2026-10-16）：控制台的 ui/ 是**每个请求现从磁盘读**的（见 handleHttp 的
 // 静态分支），所以"只改前端"根本不需要重启进程 —— 而重启会掐断 OneBot 连接（实测每次约 3 秒，
 // 今天一天 8 次部署就是 8 次断线）。戳若在开机时算死，"不重启发前端"这条路就不成立：已打开的
-// 页面永远收不到刷新提示，用户会拿着旧 JS 对着新 CSS 跑。代价是 6 次 statSync / 次请求，只在
-// /api/status 这条路上，可以忽略。
+// 页面永远收不到刷新提示，用户会拿着旧 JS 对着新 CSS 跑。代价是每次现算要递归 stat
+// 全部前端文件（当前约 47 个）；/api/status 用 30 秒缓存把它压到最多每 30 秒一次。
 
 // ── UI 静态资源的版本令牌（改进方案 §11「给 core/* 加内容哈希长缓存」）──
 // 令牌 = 文件内容的 sha256 前 12 位，按 (size, mtime) 记忆，避免每次请求重算哈希。
@@ -2331,8 +2331,18 @@ export function createApp({
     return json(res, 200, { ok: true, marked: drained.length });
   });
 
+  // 资产概览要读全部人物文件 + slang.json + identity 库；页面刷新/SSE 回声可能连续触发，
+  // 10 秒内复用同一份快照，避免重复全量读盘。写操作最多延迟 10 秒反映到概览计数。
+  let assetsOverviewCache = { at: 0, value: null };
   router.add('GET', '/api/assets/overview', async (req, res) => {
-    const overview = assetObserver.overview();
+    const now = Date.now();
+    let overview;
+    if (assetsOverviewCache.value && now - assetsOverviewCache.at < 10000) {
+      overview = assetsOverviewCache.value;
+    } else {
+      overview = assetObserver.overview();
+      assetsOverviewCache = { at: now, value: overview };
+    }
     const pilotStatus = slangPilotStatus();
     return json(res, 200, {
       ...overview,
@@ -3916,7 +3926,7 @@ export function createApp({
       cacheHitRate: totals.cacheHitRate,
       webSearchCount: usage.webSearchCount || 0,
       // 前端构建戳：轮询时发现它变了 → 前端提示"控制台已更新，点击刷新"
-      uiBuild: uiBuildStamp(UI_DIR),
+      uiBuild: uiBuildStamp(UI_DIR, { ttlMs: 30000 }),
       // 当前版本号（package.json 的 version）：控制台侧栏与控制页的版本徽标用它。
       // 之前控制页只显示部署提交号（sha），用户看不出"这是哪个版本"。
       version: PKG.version,
@@ -4977,14 +4987,15 @@ export function createApp({
         const stat = fs.statSync(fullPath);
         const ext = path.extname(fullPath);
         const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' };
-        let body = fs.readFileSync(fullPath);
+        let body = null;
         let etag;
         let cacheControl = 'no-cache';
         const askedToken = new URL(req.url, 'http://127.0.0.1').searchParams.get('v') || '';
         if (ext === '.html') {
+          // HTML 要改写资源 URL，必须读正文；它只在下发入口页时请求，频率低。
           // 下发的 HTML 里把自家脚本/样式换成带**内容哈希**的 URL；ETag 取改写后的字节 ——
           // 这样"某个脚本变了、HTML 自己没变"也会换 ETag，浏览器不会攥着旧 HTML 里的旧令牌不放。
-          body = Buffer.from(rewriteAssetUrls(body.toString('utf8')));
+          body = Buffer.from(rewriteAssetUrls(fs.readFileSync(fullPath).toString('utf8')));
           etag = `W/"${crypto.createHash('sha256').update(body).digest('hex').slice(0, 16)}"`;
         } else {
           const token = assetToken(fullPath);
@@ -5002,6 +5013,7 @@ export function createApp({
         // 真 304：此前只发了 ETag/Last-Modified 却从不判 If-None-Match，于是 no-cache 强制回源
         // 而每次都是 200 + 全文 —— 实测每开一次控制台就把 30 个脚本整个重下一遍。
         // HTML 只认 If-None-Match（它的 ETag 是改写后内容的哈希）；其余文件两种校验都认。
+        // 非 HTML 的正文读取放在 304 判断之后：未变化时只 stat/hash 缓存，不再 readFileSync。
         const inm = String(req.headers['if-none-match'] || '');
         const matched = inm
           ? inm.split(',').some((t) => t.trim() === etag || t.trim() === `W/${etag}` || `W/${t.trim()}` === etag)
@@ -5012,6 +5024,7 @@ export function createApp({
           res.end();
           return;
         }
+        if (body === null) body = fs.readFileSync(fullPath);
         res.writeHead(200, {
           'content-type': types[ext] ?? 'application/octet-stream',
           'cache-control': cacheControl,
@@ -5477,23 +5490,97 @@ function buildSessionView(s, store, options = {}) {
 // range='today' 调一次（它要日统计），与用量页的 range='7' 交替覆盖同一个槽，导致 key
 // 永远对不上、缓存实际从未命中（用量页每次打开仍全量扫）。分槽后各自的 TTL 独立生效。
 const usageRowsCache = new Map();
+const usageStatsCache = new Map();
+const usageBreakdownCache = new Map();
+const usageFileCache = new Map();
 const USAGE_CACHE_MAX_KEYS = 8;
+const USAGE_RESULT_MAX_KEYS = 16;
+const USAGE_RESULT_TTL_MS = 60000;
+const USAGE_FILE_CACHE_MAX_KEYS = 2000;
 const USAGE_CACHE_TTL_MS = 120000;   // 2 分钟；/api/status 已不再走全量扫描，用量页命中率更高
+const USAGE_SIGNATURE_TTL_MS = 30000;
+let usageSignatureCache = { at: 0, value: '' };
+
+function pruneUsageCache(map, maxKeys) {
+  if (map.size <= maxKeys) return;
+  let oldestKey = null;
+  let oldestAt = Infinity;
+  for (const [key, entry] of map) {
+    const at = Number(entry?.at) || 0;
+    if (at < oldestAt) { oldestAt = at; oldestKey = key; }
+  }
+  if (oldestKey !== null) map.delete(oldestKey);
+}
 
 /**
  * 目录快照：**只看文件名集合，不看目录 mtime**。
  * 运行中的会话每 10 秒会 rewrite 自己那份 JSON，rename 会改目录 mtime；
  * 以前把 mtime 写进签名，等于任何活跃会话都让缓存失效，控制台 15 秒轮询会反复全量解析
  * 所有会话文件。文件增删仍然会改变签名，内容变化由 TTL 兜住。
+ *
+ * 签名本身也做 30 秒短缓存：15 秒轮询下不会每次都 readdir；新会话最多晚 30 秒进统计，
+ * 这个延迟远小于 rows 的 2 分钟 TTL。
  */
 function sessionsDirSignature() {
+  const now = Date.now();
+  if (now - usageSignatureCache.at < USAGE_SIGNATURE_TTL_MS) return usageSignatureCache.value;
   const dir = path.join(DATA_DIR, 'sessions');
+  let value = '';
   try {
     const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
-    return `${files.length}:${files.join('|')}`;
+    value = `${files.length}:${files.join('|')}`;
   } catch {
-    return '';
+    value = '';
   }
+  usageSignatureCache = { at: now, value };
+  return value;
+}
+
+/**
+ * 单个会话文件的解析缓存：跨 range 复用同一份 rows。
+ * 文件被 rewrite 时 mtime/size 会变，自动重读；没有变化时不再 readFileSync/JSON.parse。
+ */
+function usageForSessionFile(filePath, stat) {
+  const hit = usageFileCache.get(filePath);
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit;
+  const emptyEntry = () => {
+    const entry = {
+      at: Date.now(),
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      startedAt: 0,
+      rows: [],
+      searchCount: 0,
+      toolCounts: Object.create(null)
+    };
+    usageFileCache.set(filePath, entry);
+    pruneUsageCache(usageFileCache, USAGE_FILE_CACHE_MAX_KEYS);
+    return entry;
+  };
+  let s;
+  try { s = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { return emptyEntry(); }
+  const started = Number(s.startedAt) || 0;
+  if (!started) return emptyEntry();
+
+  const rows = usageRowsForSession(s);
+  let searchCount = Number(s.webSearchCount) || 0;
+  const toolCounts = Object.create(null);
+  for (const m of (s.messages || [])) {
+    const name = m && m.toolCall && m.toolCall.name;
+    if (name) toolCounts[String(name)] = (toolCounts[String(name)] || 0) + 1;
+  }
+  const entry = {
+    at: Date.now(),
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    startedAt: started,
+    rows,
+    searchCount,
+    toolCounts
+  };
+  usageFileCache.set(filePath, entry);
+  pruneUsageCache(usageFileCache, USAGE_FILE_CACHE_MAX_KEYS);
+  return entry;
 }
 
 function collectUsageRows({ range }) {
@@ -5528,26 +5615,23 @@ function collectUsageRows({ range }) {
 
   for (const f of files) {
     const filePath = path.join(dir, f);
-    if (mtimeFloor > 0) {
-      try { if (fs.statSync(filePath).mtimeMs < mtimeFloor) continue; } catch { continue; }
-    }
-    let s;
-    try { s = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch { continue; }
-    const started = Number(s.startedAt) || 0;
-    if (!started) continue;
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { continue; }
+    if (mtimeFloor > 0 && stat.mtimeMs < mtimeFloor) continue;
+    const entry = usageForSessionFile(filePath, stat);
+    if (!entry) continue;
 
     // 这个会话是否落在时间窗口内（工具/搜索计数按会话归属，没有独立时间戳）
-    if (started >= win.start && started <= win.end) {
-      searchCount += Number(s.webSearchCount) || 0;
-      for (const m of (s.messages || [])) {
-        const name = m && m.toolCall && m.toolCall.name;
-        if (name) toolCounts[String(name)] = (toolCounts[String(name)] || 0) + 1;
+    if (entry.startedAt >= win.start && entry.startedAt <= win.end) {
+      searchCount += entry.searchCount;
+      for (const [name, count] of Object.entries(entry.toolCounts)) {
+        toolCounts[name] = (toolCounts[name] || 0) + count;
       }
     }
 
-    for (const row of usageRowsForSession(s)) {
+    for (const row of entry.rows) {
       if (row.at < win.start || row.at > win.end) continue;
-      rows.push(row);
+      rows.push({ ...row });
     }
   }
   // 写缓存：存的是"清洗完的 rows"，取用时给副本避免调用方污染
@@ -5558,14 +5642,7 @@ function collectUsageRows({ range }) {
     toolCounts: { ...toolCounts },
     at: Date.now()
   });
-  if (usageRowsCache.size > USAGE_CACHE_MAX_KEYS) {
-    let oldestKey = null;
-    let oldestAt = Infinity;
-    for (const [key, entry] of usageRowsCache) {
-      if (entry.at < oldestAt) { oldestAt = entry.at; oldestKey = key; }
-    }
-    if (oldestKey !== null) usageRowsCache.delete(oldestKey);
-  }
+  pruneUsageCache(usageRowsCache, USAGE_CACHE_MAX_KEYS);
   return { rows, win, searchCount, toolCounts };
 }
 
@@ -5681,7 +5758,18 @@ function groupBy(rows, field, limit = 0) {
 }
 
 /** 主统计：按天 / 按会话 / 按模型三个维度。 */
-function buildUsageStats({ range = '7' } = {}) {
+function buildUsageStats(options = {}) {
+  const range = String(options.range ?? '7');
+  const cacheKey = JSON.stringify([sessionsDirSignature(), range]);
+  const hit = usageStatsCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < USAGE_RESULT_TTL_MS) return hit.value;
+  const value = buildUsageStatsUncached({ ...options, range });
+  usageStatsCache.set(cacheKey, { at: Date.now(), value });
+  pruneUsageCache(usageStatsCache, USAGE_RESULT_MAX_KEYS);
+  return value;
+}
+
+function buildUsageStatsUncached({ range = '7' } = {}) {
   const { rows, win, searchCount, toolCounts } = collectUsageRows({ range });
   const totals = costOfRows(rows);
   // 按天分桶需要 dayKey 字段
@@ -5746,7 +5834,20 @@ function buildUsageStats({ range = '7' } = {}) {
  *   dim/key 定位子集，by 决定展开方式
  * 例：dim=chat&key=group:123&by=model → 该群下各模型的成本
  */
-function buildUsageBreakdown({ range = '7', dim = '', key = '', by = '' } = {}) {
+function buildUsageBreakdown(options = {}) {
+  const {
+    range = '7', dim = '', key = '', by = ''
+  } = options;
+  const cacheKey = JSON.stringify([sessionsDirSignature(), range, dim, key, by]);
+  const hit = usageBreakdownCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < USAGE_RESULT_TTL_MS) return hit.value;
+  const value = buildUsageBreakdownUncached({ range, dim, key, by });
+  usageBreakdownCache.set(cacheKey, { at: Date.now(), value });
+  pruneUsageCache(usageBreakdownCache, USAGE_RESULT_MAX_KEYS);
+  return value;
+}
+
+function buildUsageBreakdownUncached({ range = '7', dim = '', key = '', by = '' } = {}) {
   const { rows } = collectUsageRows({ range });
   for (const r of rows) r.dayKey = dayKeyOf(r.at);
   // dim/by 为 model 时按复合身份匹配（模型 + 供应商）

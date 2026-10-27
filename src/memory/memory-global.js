@@ -72,7 +72,12 @@ export function setMemberNote(userId, note) {
 }
 
 export class MemoryStore {
-  constructor() { this.people = new GlobalPersonMemoryStore({ onLegacyState: migrateLegacyHandoff }); }
+  constructor() {
+    this.people = new GlobalPersonMemoryStore({ onLegacyState: migrateLegacyHandoff });
+    // handoff 文件读取缓存：控制台人物记忆页 15 秒轮询会 repeated 读同一个文件，
+    // 用 mtime+size 判断内容是否真的变了；写入口会主动失效。
+    this._handoffCache = new Map();
+  }
   listChats() {
     const out = new Set(this.people.listSourceChats());
     try {
@@ -85,9 +90,34 @@ export class MemoryStore {
   }
   getHandoff(chatKey) {
     this.people.listSourceChats();
-    const raw = readJson(handoffFile(chatKey)); if (!raw) return null;
+    const file = handoffFile(chatKey);
+    let stat;
+    try { stat = fs.statSync(file); } catch {
+      this._handoffCache.delete(chatKey);
+      return null;
+    }
+    const hit = this._handoffCache.get(chatKey);
+    let raw;
+    if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {
+      raw = hit.raw;
+    } else {
+      raw = readJson(file);
+      if (!raw) {
+        this._handoffCache.delete(chatKey);
+        return null;
+      }
+      this._handoffCache.set(chatKey, { mtimeMs: stat.mtimeMs, size: stat.size, raw });
+      if (this._handoffCache.size > 1000) {
+        const oldest = this._handoffCache.keys().next().value;
+        if (oldest !== undefined) this._handoffCache.delete(oldest);
+      }
+    }
     const expiresAt = Number(raw.expiresAt) || 0;
-    if (expiresAt && expiresAt <= Date.now()) { try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* 有意忽略：过期交接删失败＝文件残留，下次读取时重试 */ } return null; }
+    if (expiresAt && expiresAt <= Date.now()) {
+      this._handoffCache.delete(chatKey);
+      try { fs.rmSync(file, { force: true }); } catch { /* 有意忽略：过期交接删失败＝文件残留，下次读取时重试 */ }
+      return null;
+    }
     return {
       version: 1, topic: clean(raw.topic, 200), summary: clean(raw.summary, 1200), hypotheses: list(raw.hypotheses, 6, 300), evidence: list(raw.evidence, 8, 300),
       facts: list(raw.facts, 8), decisions: list(raw.decisions, 6), rejectedDirections: list(raw.rejectedDirections, 6), openQuestions: list(raw.openQuestions, 6),
@@ -109,9 +139,14 @@ export class MemoryStore {
     };
     const meaningful = handoff.topic || handoff.summary || handoff.hypotheses.length || handoff.evidence.length || handoff.facts.length || handoff.decisions.length || handoff.rejectedDirections.length || handoff.openQuestions.length || handoff.nextStep || handoff.lastReply;
     if (!meaningful) return prev.version ? prev : null;
-    writeJson(handoffFile(chatKey), handoff); return handoff;
+    writeJson(handoffFile(chatKey), handoff);
+    this._handoffCache.delete(chatKey);
+    return handoff;
   }
-  clearHandoff(chatKey) { try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* 有意忽略：删失败＝文件残留，下次同 chatKey 写入时覆盖 */ } }
+  clearHandoff(chatKey) {
+    this._handoffCache.delete(chatKey);
+    try { fs.rmSync(handoffFile(chatKey), { force: true }); } catch { /* 有意忽略：删失败＝文件残留，下次同 chatKey 写入时覆盖 */ }
+  }
   formatHandoffForPrompt(chatKey) {
     if (getConfig().memory?.handoffEnabled === false) return '';
     const h = this.getHandoff(chatKey); if (!h) return '';

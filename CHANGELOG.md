@@ -30,6 +30,12 @@
 - 精力模型 JSONL 采集器：默认每 15 分钟追加 `data/energy-shadow/YYYY-MM-DD.jsonl`，
   `shadow` 与接管模式都记录，按 `keepDays` 清理旧文件；字段含 `lastSleepAt/lastTickAt/awakeHours` 便于排查精力去向。
 
+**改进**
+
+- 控制台 IO：用量按会话文件解析缓存 + 统计结果缓存 + 目录签名短缓存；前端构建戳 30 秒缓存、
+  资产概览 10 秒缓存、handoff 读取按 mtime 复用；静态资源 304 命中时不再读取正文。
+  保留原有 `mtime` 预筛、`usage-today.json` 内存缓冲与 today 只扫 today 的策略。
+
 ## 0.9.3（2026-10-22）
 
 **新增**
