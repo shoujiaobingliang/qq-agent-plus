@@ -5475,29 +5475,21 @@ function buildSessionView(s, store, options = {}) {
  * 每行是一次真实 API 调用（有 raw 时）或一次会话聚合（无 raw 时），
  * 都带自己的 token、发生时刻、模型、所属会话。
  */
-// ── 用量行缓存 ──
-// collectUsageRows 要遍历并 JSON.parse 全部会话文件。实测 300 个文件 / 25MB 时
-// 单次约 200ms，而前端每 15 秒轮询一次、stats 与 breakdown 还各扫一遍。
-// 注意：会话文件在运行期会被节流重写（sessions.js #persistThrottled），不是"写一次就不动"，
-// 所以可靠性绑定在下面两条失效策略上，别把它当不可变数据用。
-//
-// 失效策略（双保险，任一条命中就重算）：
-//   1. 目录快照变化：文件数或目录 mtime 变了（新增/删除会话）
-//   2. TTL 到期：60 秒（见 USAGE_CACHE_TTL_MS）。兜住"内容被改写但目录快照不变"这类边缘情况。
-//      用量统计不是实时数据，1 分钟的新鲜度完全够用。
-//      另外前端还有一层：切过去先用上次数据立即渲染，不等网络。
-// 2026-10-02 复审：缓存改成**按 range 分槽的 Map** —— 单槽时 /api/status 每 15 秒用
-// range='today' 调一次（它要日统计），与用量页的 range='7' 交替覆盖同一个槽，导致 key
-// 永远对不上、缓存实际从未命中（用量页每次打开仍全量扫）。分槽后各自的 TTL 独立生效。
-const usageRowsCache = new Map();
+// ── 用量 IO 缓存 ──
+// 会话文件在运行期会被节流重写（sessions.js #persistThrottled），不能当不可变数据。
+// 现在的分层：
+//   1. 单文件解析缓存：key = 文件路径，内容按 mtime+size 失效；跨 range 复用同一份 rows；
+//   2. stats/breakdown 结果缓存：key = 目录签名 + range + 参数，60 秒；
+//   3. 目录签名 30 秒缓存：文件名增删最多晚 30 秒反映到签名。
+// 保留 mtime 预筛和 usage-today 内存缓冲：窗口外文件仍然不读，today 仍只扫 today。
 const usageStatsCache = new Map();
 const usageBreakdownCache = new Map();
 const usageFileCache = new Map();
-const USAGE_CACHE_MAX_KEYS = 8;
 const USAGE_RESULT_MAX_KEYS = 16;
 const USAGE_RESULT_TTL_MS = 60000;
 const USAGE_FILE_CACHE_MAX_KEYS = 2000;
-const USAGE_CACHE_TTL_MS = 120000;   // 2 分钟；/api/status 已不再走全量扫描，用量页命中率更高
+const USAGE_FILE_CACHE_MAX_ROWS = 20000;
+let usageFileCacheRows = 0;
 const USAGE_SIGNATURE_TTL_MS = 30000;
 let usageSignatureCache = { at: 0, value: '' };
 
@@ -5510,6 +5502,28 @@ function pruneUsageCache(map, maxKeys) {
     if (at < oldestAt) { oldestAt = at; oldestKey = key; }
   }
   if (oldestKey !== null) map.delete(oldestKey);
+}
+
+/**
+ * 写单文件解析缓存：同时限制文件数与总 rows 数。
+ * rows 是最占内存的部分；只按文件数限制的话，一个大线程会话就能把缓存撑大。
+ */
+function storeUsageFileEntry(filePath, entry) {
+  const old = usageFileCache.get(filePath);
+  if (old) usageFileCacheRows -= old.rows.length;
+  usageFileCache.delete(filePath);
+  usageFileCache.set(filePath, entry);
+  usageFileCacheRows += entry.rows.length;
+  while (
+    usageFileCache.size > USAGE_FILE_CACHE_MAX_KEYS
+    || usageFileCacheRows > USAGE_FILE_CACHE_MAX_ROWS
+  ) {
+    if (usageFileCache.size <= 1) break;
+    const oldestKey = usageFileCache.keys().next().value;
+    const removed = usageFileCache.get(oldestKey);
+    usageFileCache.delete(oldestKey);
+    usageFileCacheRows -= removed?.rows?.length || 0;
+  }
 }
 
 /**
@@ -5553,8 +5567,7 @@ function usageForSessionFile(filePath, stat) {
       searchCount: 0,
       toolCounts: Object.create(null)
     };
-    usageFileCache.set(filePath, entry);
-    pruneUsageCache(usageFileCache, USAGE_FILE_CACHE_MAX_KEYS);
+    storeUsageFileEntry(filePath, entry);
     return entry;
   };
   let s;
@@ -5578,25 +5591,13 @@ function usageForSessionFile(filePath, stat) {
     searchCount,
     toolCounts
   };
-  usageFileCache.set(filePath, entry);
-  pruneUsageCache(usageFileCache, USAGE_FILE_CACHE_MAX_KEYS);
+  storeUsageFileEntry(filePath, entry);
   return entry;
 }
 
 function collectUsageRows({ range }) {
   const win = resolveRange(range);
-  // 命中缓存就直接返回（注意 rows 会被调用方改写字段，所以必须给副本）
-  const sig = sessionsDirSignature() + '@' + String(range);
-  const hit = usageRowsCache.get(sig);
-  if (hit && (Date.now() - hit.at) < USAGE_CACHE_TTL_MS) {
-    return {
-      rows: hit.rows.slice(),
-      win: win || hit.win,
-      searchCount: hit.searchCount || 0,
-      toolCounts: { ...(hit.toolCounts || {}) }
-    };
-  }
-
+  // 行由 usageFileCache 按文件复用；这里只做窗口过滤与聚合，重复调用不会重新 parse 文件。
   const dir = path.join(DATA_DIR, 'sessions');
   let files = [];
   try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return { rows: [], win, searchCount: 0, toolCounts: {} }; }
@@ -5634,15 +5635,6 @@ function collectUsageRows({ range }) {
       rows.push({ ...row });
     }
   }
-  // 写缓存：存的是"清洗完的 rows"，取用时给副本避免调用方污染
-  usageRowsCache.set(sig, {
-    rows: rows.slice(),
-    win,
-    searchCount,
-    toolCounts: { ...toolCounts },
-    at: Date.now()
-  });
-  pruneUsageCache(usageRowsCache, USAGE_CACHE_MAX_KEYS);
   return { rows, win, searchCount, toolCounts };
 }
 
