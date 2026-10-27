@@ -275,6 +275,22 @@ async function saveConfig({ quiet = false } = {}) {
           wakeAt,
           allowStayUp: chk('#cfg-mood-allow-stay-up', schedule.allowStayUp !== false)
         }
+      },
+      energyModel: {
+        ...(c.mood?.energyModel || {}),
+        enabled: chk('#cfg-mood-energy-enabled', c.mood?.energyModel?.enabled !== false),
+        shadow: chk('#cfg-mood-energy-shadow', c.mood?.energyModel?.shadow !== false),
+        decision: {
+          ...(c.mood?.energyModel?.decision || {}),
+          followUpMinEobs: bounded(
+            val('#cfg-mood-energy-followup', c.mood?.energyModel?.decision?.followUpMinEobs ?? 0.25),
+            0, 1, 0.25
+          ),
+          restSuggestS: bounded(
+            val('#cfg-mood-energy-rest-s', c.mood?.energyModel?.decision?.restSuggestS ?? 0.75),
+            0, 1, 0.75
+          )
+        }
       }
     };
   }

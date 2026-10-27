@@ -31,6 +31,15 @@ function renderMoodPanel(data) {
   const energy = moodClamp(data.energy);
   const history = Array.isArray(data.history) ? data.history.slice(0, 5) : [];
   const daily = Array.isArray(data.daily) ? data.daily.slice(-7) : [];
+  const em = data.energyModel && typeof data.energyModel === 'object' ? data.energyModel : null;
+  const emActive = data.energyModelActive === true;
+  const pct = (value) => Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100);
+  const shadowHtml = em ? `
+    <div class="mood-shadow">
+      <b>精力模型 ${emActive ? '（已接管决策）' : '（shadow 只记录）'}</b>
+      <div class="mood-line"><span>E ${pct(em.E)}% · S ${pct(em.S)}% · E_obs ${Math.round(Number(em.energy) || 0)}/100 · 困倦 ${Math.round(Number(em.fatigue) || 0)}/100</span></div>
+      <div class="mood-line"><span>活动 ${pct(em.activity)}% · 思考 ${Math.round(Number(em.rate) || 0)} tok/min · 相位 ${(Number(em.phase) || 0).toFixed(2)}</span></div>
+    </div>` : '';
   return `
     <div class="mood-current">
       <div class="mood-line">
@@ -42,6 +51,7 @@ function renderMoodPanel(data) {
         ${moodMeter(energy, 'is-energy')}
       </div>
     </div>
+    ${shadowHtml}
     ${data.rest?.active ? `
       <div class="mood-rest">
         <span>${data.rest.kind === 'slack' ? '摸鱼中' : (data.rest.scheduled ? '睡觉中（按作息）' : '睡觉中')} · 还剩 ${Math.max(0, Number(data.rest.remainingMinutes) || 0)} 分钟</span>
@@ -74,6 +84,8 @@ function renderMoodSection(c) {
   const judge = m.judge && typeof m.judge === 'object' ? m.judge : {};
   const rest = m.rest && typeof m.rest === 'object' ? m.rest : {};
   const schedule = rest.schedule && typeof rest.schedule === 'object' ? rest.schedule : {};
+  const energy = m.energyModel && typeof m.energyModel === 'object' ? m.energyModel : {};
+  const energyDecision = energy.decision && typeof energy.decision === 'object' ? energy.decision : {};
   const enabled = m.enabled !== false;
   const frequency = moodNum(m.frequencyInfluence, 0.2);
   const tone = moodNum(m.toneInfluence, 0.6);
@@ -200,6 +212,27 @@ function renderMoodSection(c) {
       <div class="checkbox-row">
         <input type="checkbox" id="cfg-mood-allow-stay-up" ${schedule.allowStayUp !== false ? 'checked' : ''} />
         <label for="cfg-mood-allow-stay-up">到点提示建议睡觉（关闭后不再提示）</label>
+      </div>
+
+      <h4>精力模型</h4>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-mood-energy-enabled" ${energy.enabled !== false ? 'checked' : ''} />
+        <label for="cfg-mood-energy-enabled">启用精力模型</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-mood-energy-shadow" ${energy.shadow !== false ? 'checked' : ''} />
+        <label for="cfg-mood-energy-shadow">shadow 模式：只记录，不参与决策</label>
+      </div>
+      <div class="hint" style="margin-bottom:8px">
+        关闭 shadow 后 E_obs/S 会接管回复概率、注意力、主动间隔、补话与休息建议；可随时改回。
+      </div>
+      <div class="gm-row">
+        <label>补话最低 E_obs
+          <input type="number" id="cfg-mood-energy-followup" min="0" max="1" step="0.05" value="${moodNum(energyDecision.followUpMinEobs, 0.25)}" />
+        </label>
+        <label>休息建议困倦阈值
+          <input type="number" id="cfg-mood-energy-rest-s" min="0" max="1" step="0.05" value="${moodNum(energyDecision.restSuggestS, 0.75)}" />
+        </label>
       </div>
     </div>`;
 }

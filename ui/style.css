@@ -5157,6 +5157,9 @@ html[data-motion='off'] .chat-item.leaving { animation: none; }
 .mood-line .meter { margin-top: 0; }
 .mood-line .meter.is-energy .meter-fill { background: var(--green); }
 .mood-history, .mood-daily { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.mood-shadow { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 5px; }
+.mood-shadow > b { font-size: var(--fs-sm); color: var(--text); }
+.mood-shadow .mood-line { font-size: var(--fs-sm); }
 .mood-history > b, .mood-daily > b { display: block; margin-bottom: 5px; font-size: var(--fs-sm); color: var(--text); }
 .mood-history-row, .mood-day-row {
   display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
