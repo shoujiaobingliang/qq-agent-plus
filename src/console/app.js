@@ -5479,16 +5479,17 @@ function buildSessionView(s, store, options = {}) {
 // 会话文件在运行期会被节流重写（sessions.js #persistThrottled），不能当不可变数据。
 // 现在的分层：
 //   1. 单文件解析缓存：key = 文件路径，内容按 mtime+size 失效；跨 range 复用同一份 rows；
-//   2. stats/breakdown 结果缓存：key = 目录签名 + range + 参数，60 秒；
+//      预算 1000 个文件 / 8000 行，超限按最旧淘汰，避免内存压力反过来触发缺页/swap。
+//   2. stats/breakdown 结果缓存：key = 目录签名 + range + 参数，2 分钟；
 //   3. 目录签名 30 秒缓存：文件名增删最多晚 30 秒反映到签名。
 // 保留 mtime 预筛和 usage-today 内存缓冲：窗口外文件仍然不读，today 仍只扫 today。
 const usageStatsCache = new Map();
 const usageBreakdownCache = new Map();
 const usageFileCache = new Map();
-const USAGE_RESULT_MAX_KEYS = 16;
-const USAGE_RESULT_TTL_MS = 60000;
-const USAGE_FILE_CACHE_MAX_KEYS = 2000;
-const USAGE_FILE_CACHE_MAX_ROWS = 20000;
+const USAGE_RESULT_MAX_KEYS = 8;
+const USAGE_RESULT_TTL_MS = 120000;
+const USAGE_FILE_CACHE_MAX_KEYS = 1000;
+const USAGE_FILE_CACHE_MAX_ROWS = 8000;
 let usageFileCacheRows = 0;
 const USAGE_SIGNATURE_TTL_MS = 30000;
 let usageSignatureCache = { at: 0, value: '' };
