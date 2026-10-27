@@ -28,7 +28,7 @@
   `shadow=false` 时 `E_obs/S` 接管回复概率、注意力、主动间隔、补话与休息建议；`mood.energyModel` 可关闭。
 - 控制台「设置 → 心情」新增精力模型诊断（`E/S/E_obs/活动/思考速率`）与 shadow/接管开关、补话/休息阈值。
 - 精力模型 JSONL 采集器：默认每 15 分钟追加 `data/energy-shadow/YYYY-MM-DD.jsonl`，
-  `shadow` 与接管模式都记录，按 `keepDays` 清理旧文件。
+  `shadow` 与接管模式都记录，按 `keepDays` 清理旧文件；字段含 `lastSleepAt/lastTickAt/awakeHours` 便于排查精力去向。
 
 ## 0.9.3（2026-10-22）
 

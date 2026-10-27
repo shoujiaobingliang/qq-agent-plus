@@ -75,7 +75,7 @@
   提示词里的精力/困倦度也改用 `E_obs/S`；
 - `enabled=false`：整体关闭 shadow 与接管；
 - JSONL 采集：默认每 15 分钟追加 `$DATA_DIR/energy-shadow/YYYY-MM-DD.jsonl`，`shadow` 与接管模式都会记录，
-  按 `collector.keepDays` 清理旧文件；字段含 `at/mode/E/S/Eobs/activity/rate/tokens/legacyEnergy/rest`；
+  按 `collector.keepDays` 清理旧文件；字段含 `at/lastSleepAt/lastTickAt/awakeHours/mode/E/S/Eobs/activity/rate/tokens/legacyEnergy/rest`；
 - `GET /api/mood` 的 `energyModel` 字段可看当前值，详细参数与分阶段计划见
   [`docs/requirements/energy.md`](requirements/energy.md)。
 

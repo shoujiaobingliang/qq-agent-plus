@@ -260,6 +260,9 @@ test('P3 采集器：按间隔写 energy-shadow/YYYY-MM-DD.jsonl，shadow/active
   assert.ok(Number.isFinite(row.S));
   assert.ok(Number.isFinite(row.Eobs));
   assert.ok(Number.isFinite(row.legacyEnergy));
+  assert.equal(row.lastSleepAt, T0);
+  assert.ok(Number.isFinite(row.lastTickAt));
+  assert.ok(row.awakeHours === null || Number.isFinite(row.awakeHours));
 
   configure({
     energyModel: {

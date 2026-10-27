@@ -230,6 +230,7 @@ export class MoodManager {
       };
     }
     const asleep = sleeping === undefined ? this.sleeping() : sleeping === true;
+    const previousTickAt = Number(state.energyModel.lastTickAt) || now;
     const activity = activityFromSamples(this.energySamples, {
       now,
       previousActivity: Number(state.energyModel.activityEma) || 0,
@@ -256,7 +257,14 @@ export class MoodManager {
         + ` activity=${Math.round(activity.activity * 100) / 100}`
         + ` rate=${Math.round(activity.rate)}/min`);
     }
-    this.#collectEnergyShadow({ now, observed, activity, sleeping: asleep });
+    this.#collectEnergyShadow({
+      now,
+      observed,
+      activity,
+      sleeping: asleep,
+      state,
+      previousTickAt
+    });
     return {
       ...observed,
       activity: activity.activity,
@@ -269,7 +277,7 @@ export class MoodManager {
   }
 
   /** 按 intervalMinutes 追加一行 JSONL；shadow/active 两种模式都记录。 */
-  #collectEnergyShadow({ now, observed, activity, sleeping }) {
+  #collectEnergyShadow({ now, observed, activity, sleeping, state, previousTickAt }) {
     const cfg = this.#energyConfig();
     const collector = cfg.collector && typeof cfg.collector === 'object' ? cfg.collector : {};
     if (collector.enabled === false) return;
@@ -284,9 +292,17 @@ export class MoodManager {
         this.lastCollectorPruneDay = day;
         this.#pruneEnergyShadow(dir, day, collector.keepDays);
       }
+      const lastSleepAt = Number(state?.lastSleepAt) || 0;
+      const lastTickAt = Number(previousTickAt) || 0;
+      const awakeHours = lastSleepAt > 0
+        ? Math.round(Math.max(0, (now - lastSleepAt) / 3600000) * 10) / 10
+        : null;
       const line = JSON.stringify({
         at: now,
         iso: new Date(now).toISOString(),
+        lastSleepAt,
+        lastTickAt,
+        awakeHours,
         mode: this.#energyActive() ? 'active' : 'shadow',
         E: observed.E,
         S: observed.S,

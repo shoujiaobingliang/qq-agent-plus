@@ -405,7 +405,7 @@ lastTickAt = now
   - 最近变化里显示 `E_obs`/`S`，不显示用户 QQ。
 - `/api/mood` 返回 `energyModel: { E, S, phase, Eobs, rate }`（只读）。
 - **JSONL 采集**：默认每 15 分钟追加 `$DATA_DIR/energy-shadow/YYYY-MM-DD.jsonl`；
-  `shadow` 与接管模式都会记录，字段含 `at/iso/mode/E/S/phase/Eobs/energy/fatigue/activity/rate/tokens/aThink/aSession/aTool/legacyEnergy/rest`；
+  `shadow` 与接管模式都会记录，字段含 `at/iso/lastSleepAt/lastTickAt/awakeHours/mode/E/S/phase/Eobs/energy/fatigue/activity/rate/tokens/aThink/aSession/aTool/legacyEnergy/rest`；
   按 `collector.keepDays` 清理旧文件，保留 90 天。
 - **Shadow 模式**：`energyModel.shadow=true` 时只计算/记录，不参与任何决策；控制台显示新旧对照。建议先跑 3–7 天，再切行为。
 
