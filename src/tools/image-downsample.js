@@ -236,11 +236,56 @@ function countGifFramesOnPath(ffmpegPath, inputPath, signal) {
   });
 }
 
+/** ffprobe 与 ffmpeg 同目录；resolveFfmpeg 可能给裸名字（靠 PATH 找），dirname 之后仍是裸名字 ✓ */
+function ffprobePathFor(ffmpegPath) {
+  return path.join(path.dirname(String(ffmpegPath) || ''),
+    process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+}
+
+/** 图片宽高（文件输入）：ffprobe 拿不到返回 null，调用方回退旧的单图降采样。 */
+function probeImageSizeOnPath(ffmpegPath, inputPath, signal) {
+  signal?.throwIfAborted();
+  return new Promise((resolve) => {
+    let child;
+    let text = '';
+    let done = false;
+    let timer = null;
+    const settle = (value) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      try { child?.kill(); } catch { /* 已退出 */ }
+      resolve(value);
+    };
+    const onAbort = () => settle(null);
+    try {
+      child = spawn(ffprobePathFor(ffmpegPath), [
+        '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height', '-of', 'csv=p=0', inputPath
+      ], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    timer = setTimeout(() => settle(null), 8000);
+    timer.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout.on('data', (c) => { text = (text + c).slice(-200); });
+    child.on('error', () => settle(null));
+    child.on('close', () => {
+      const match = /(\d+)\s*,\s*(\d+)/.exec(String(text).trim());
+      const width = match ? Number(match[1]) : 0;
+      const height = match ? Number(match[2]) : 0;
+      settle(width > 0 && height > 0 ? { width, height } : null);
+    });
+  });
+}
+
 /** 视频时长（文件输入）：ffprobe 拿不到就按 10 秒估。 */
 function probeVideoSecondsOnPath(ffmpegPath, inputPath, signal) {
   signal?.throwIfAborted();
-  const probePath = path.join(path.dirname(String(ffmpegPath) || ''),
-    process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+  const probePath = ffprobePathFor(ffmpegPath);
   return new Promise((resolve) => {
     let done = false;
     let timer = null;
@@ -307,24 +352,86 @@ export async function convertGifFileToStillStrip(inputPath, signal) {
   }
 }
 
+// 视觉输入的单张边界。旧实现只限制宽度（scale='min(2048,iw)'），长截图宽度通常
+// 本来就 ≤2048，等于完全没缩放：1080×12000 原样发出去，超过上游单边/像素/长宽比
+// 限制就整张 400，模型什么都看不到。
+export const VISION_MAX_WIDTH = 2048;
+export const VISION_MAX_PIECE_HEIGHT = 4096;
+export const VISION_MAX_PIECES_PER_IMAGE = 4;
+
+function evenFloor(value) {
+  const n = Math.floor(Number(value) || 0);
+  return Math.max(2, n - (n % 2));
+}
+
 /**
- * 普通图片（含 GIF）文件 → 视觉模型用的有界 JPEG。
- * 长边压到 2048、q5，目标通常 300KB–1MB；这样 base64 和请求体也不会再放大。
- * ffmpeg 缺失/失败返回 null，由调用方回退原始文件（保持旧行为）。
+ * 计算长图如何竖向切片。返回 null 表示尺寸不可用。
+ * 规则：宽压到 ≤2048；按缩放后的高度切成若干段，每段高 ≤4096。
+ * 段数超过上限时宁可整体再缩小，也不让单段重新变大（否则又会撞上游限制）。
  */
-export async function convertImageFileToVisionJpeg(inputPath, contentType, signal) {
+export function visionSlicePlan(width, height) {
+  const w = Math.floor(Number(width) || 0);
+  const h = Math.floor(Number(height) || 0);
+  if (w < 1 || h < 1) return null;
+  let scaleW = Math.min(VISION_MAX_WIDTH, w);
+  let pieces = Math.max(1, Math.ceil((h * scaleW / w) / VISION_MAX_PIECE_HEIGHT));
+  if (pieces > VISION_MAX_PIECES_PER_IMAGE) {
+    pieces = VISION_MAX_PIECES_PER_IMAGE;
+    const maxScale = (pieces * VISION_MAX_PIECE_HEIGHT) / h;
+    scaleW = Math.min(scaleW, Math.floor(w * maxScale));
+  }
+  scaleW = evenFloor(scaleW);
+  return {
+    pieces,
+    scaleW,
+    pieceHeight: Math.ceil(h / pieces),
+    width: w,
+    height: h
+  };
+}
+
+/**
+ * 普通图片（含 GIF）文件 → 视觉模型用的有界 JPEG 数组。
+ * 长图竖向切成多段，每段长边有界；普通图只有 1 张。ffmpeg 缺失/失败返回 null。
+ */
+export async function convertImageFileToVisionJpegs(inputPath, contentType, signal) {
   if (!/^image\//i.test(String(contentType || ''))) return null;
   const ffmpegPath = await resolveFfmpeg();
   if (!ffmpegPath) return null;
   try {
     if (/^image\/gif/i.test(String(contentType || ''))) {
-      return await convertGifFileToStillStrip(inputPath, signal);
+      const strip = await convertGifFileToStillStrip(inputPath, signal);
+      return strip?.length ? [strip] : null;
     }
-    return await runFfmpegOnPath(ffmpegPath, inputPath, "scale='min(2048,iw)':-2", signal);
+    const size = await probeImageSizeOnPath(ffmpegPath, inputPath, signal);
+    const plan = visionSlicePlan(size?.width, size?.height);
+    if (!plan) {
+      // ffprobe 拿不到尺寸：保持旧的单图降采样（不劣化），宽度仍有界。
+      const jpeg = await runFfmpegOnPath(ffmpegPath, inputPath, "scale='min(2048,iw)':-2", signal);
+      return jpeg?.length ? [jpeg] : null;
+    }
+    const outputs = [];
+    for (let index = 0; index < plan.pieces; index += 1) {
+      signal?.throwIfAborted();
+      const y = index * plan.pieceHeight;
+      const h = Math.min(plan.pieceHeight, plan.height - y);
+      if (h <= 0) break;
+      // 先按原始坐标裁段，再缩到目标宽度：每个切片都保有完整长宽比，文字不会糊成窄条。
+      const jpeg = await runFfmpegOnPath(ffmpegPath, inputPath,
+        `crop=iw:${h}:0:${y},scale=${plan.scaleW}:-2`, signal);
+      if (jpeg?.length) outputs.push(jpeg);
+    }
+    return outputs.length ? outputs : null;
   } catch (error) {
     if (signal?.aborted) throw error;
     return null;
   }
+}
+
+/** 单张版本（兼容旧调用）：长图只取第一段时应改用 convertImageFileToVisionJpegs。 */
+export async function convertImageFileToVisionJpeg(inputPath, contentType, signal) {
+  const parts = await convertImageFileToVisionJpegs(inputPath, contentType, signal);
+  return parts?.length ? parts[0] : null;
 }
 
 
@@ -357,10 +464,10 @@ export async function fetchOversizedImageAsJpeg(safeUrl, originalError, signal, 
       throw originalError; // 其他二次拉取失败：原始超限错误更贴近真相
     }
     if (!/^image\//i.test(String(contentType || ''))) throw originalError;
-    // GIF 走帧条、其他图按长边降采样；产物只有几百 KB，进内存的只有它
-    const jpeg = await convertImageFileToVisionJpeg(inputPath, contentType, signal);
-    if (!jpeg?.length) throw new Error('ffmpeg 降采样失败（没有产出 JPEG）');
-    return { buffer: jpeg, contentType: 'image/jpeg' };
+    // GIF 走帧条、其他图按长边降采样（长图切段）；产物只有几百 KB，进内存的只有它们
+    const jpegs = await convertImageFileToVisionJpegs(inputPath, contentType, signal);
+    if (!jpegs?.length) throw new Error('ffmpeg 降采样失败（没有产出 JPEG）');
+    return { buffers: jpegs, buffer: jpegs[0], contentType: 'image/jpeg' };
   } finally {
     try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
   }

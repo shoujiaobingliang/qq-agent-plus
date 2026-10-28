@@ -7,7 +7,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-image-downsample-'));
@@ -15,7 +15,7 @@ process.env.QQ_AGENT_DATA_DIR = dataDir;
 process.on('exit', () => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* 句柄占用就算了 */ } });
 
 const { DEFAULT_CONFIG, updateConfig } = await import('../src/core/config.js');
-const { OVERSIZE_LIMIT_RE, fetchOversizedImageAsJpeg, resolveFfmpeg } = await import('../src/tools/image-downsample.js');
+const { OVERSIZE_LIMIT_RE, fetchOversizedImageAsJpeg, resolveFfmpeg, visionSlicePlan, convertImageFileToVisionJpegs } = await import('../src/tools/image-downsample.js');
 
 const cfg = structuredClone(DEFAULT_CONFIG);
 // safe-fetch 默认拒绝内网地址；测试服务就起在 127.0.0.1，显式放行（仅本测试进程的临时配置）
@@ -132,4 +132,71 @@ test('resolveFfmpeg 探测结果在进程内保持一致（缓存语义）', asy
   const second = await resolveFfmpeg();
   assert.equal(first, second);
   assert.ok(first === null || typeof first === 'string');
+});
+
+test('visionSlicePlan：普通图不切，长图切成有界高度，超长图段数封顶后整体缩小', () => {
+  assert.deepEqual(visionSlicePlan(800, 800), {
+    pieces: 1, scaleW: 800, pieceHeight: 800, width: 800, height: 800
+  });
+  // 1080 宽的长截图：旧实现完全没缩，现在切成 3 段 × 4000 高
+  const tall = visionSlicePlan(1080, 12000);
+  assert.equal(tall.pieces, 3);
+  assert.equal(tall.scaleW, 1080);
+  assert.equal(tall.pieceHeight, 4000);
+  // 宽图先压到 2048 再切，单段缩放后仍 ≤4096
+  const wide = visionSlicePlan(3000, 20000);
+  assert.equal(wide.pieces, 4);
+  assert.equal(wide.scaleW, 2048);
+  assert.ok(wide.pieceHeight * wide.scaleW / wide.width <= 4096, '单段缩放后高度应 ≤4096');
+  // 极长图：段数封顶 4，只能整体再缩，单段高度仍需有界
+  const extreme = visionSlicePlan(1080, 60000);
+  assert.equal(extreme.pieces, 4);
+  assert.ok(extreme.pieceHeight * extreme.scaleW / extreme.width <= 4096, '封顶后单段高度也应 ≤4096');
+  assert.equal(visionSlicePlan(0, 100), null);
+  assert.equal(visionSlicePlan(100, 0), null);
+});
+
+/** 用 ffmpeg 生成一张纯色长图（异步 spawn：Windows 上 spawnSync 偶发 EBUSY）。 */
+async function makeTallPng(width, height) {
+  const out = path.join(dataDir, `tall-${width}x${height}.png`);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const ok = await new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn('ffmpeg', [
+          '-hide_banner', '-loglevel', 'error',
+          '-f', 'lavfi', '-i', `color=c=gray:s=${width}x${height}`,
+          '-frames:v', '1', '-y', out
+        ], { windowsHide: true, stdio: 'ignore' });
+      } catch {
+        resolve(false);
+        return;
+      }
+      child.on('error', () => resolve(false));
+      child.on('close', (code) => resolve(code === 0));
+    });
+    if (ok) return out;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return null;
+}
+
+test('convertImageFileToVisionJpegs：长图产出多张 JPEG（装了 ffmpeg 才断言）', async () => {
+  if (await resolveFfmpeg() === null) return;
+  const file = await makeTallPng(400, 6000);
+  assert.ok(file, 'ffmpeg 应能生成测试长图');
+  const jpegs = await convertImageFileToVisionJpegs(file, 'image/png');
+  assert.equal(jpegs?.length, 2, '400×6000 应切成 2 段');
+  for (const jpeg of jpegs) {
+    assert.equal(jpeg[0], 0xff);
+    assert.equal(jpeg[1], 0xd8);
+  }
+});
+
+test('convertImageFileToVisionJpegs：普通图片仍只产出 1 张（装了 ffmpeg 才断言）', async () => {
+  if (await resolveFfmpeg() === null) return;
+  const file = await makeTallPng(400, 800);
+  assert.ok(file, 'ffmpeg 应能生成测试图片');
+  const jpegs = await convertImageFileToVisionJpegs(file, 'image/png');
+  assert.equal(jpegs?.length, 1);
 });

@@ -170,7 +170,7 @@ import { readForwardMessages, readForwardNodesById } from '../onebot/forward-rea
 import {
   OVERSIZE_LIMIT_RE,
   convertGifToStillStrip,
-  convertImageFileToVisionJpeg,
+  convertImageFileToVisionJpegs,
   convertVideoFileToFrameStrip,
   fetchOversizedImageAsJpeg
 } from './image-downsample.js';
@@ -194,11 +194,19 @@ async function toVisionDataUrl(buffer, mime, signal) {
 }
 
 const IMAGE_FETCH_MAX_BYTES = 12 * 1024 * 1024;
+// 一次工具调用最多塞给模型几张图。长图会切成多段，段数也算在内：
+// 不设上限时 4 张长图能膨胀成十几张，请求体和图片 token 都会失控。
+const MAX_VISION_IMAGE_PARTS = 6;
 // 视频上限从 96MiB 降到 32MiB：抽帧只需要开头几分钟的画面，没必要把整段大视频
 // 拉进临时盘/解码器。超限会明确报错，不会静默当成空图。
 const VIDEO_FETCH_MAX_BYTES = 32 * 1024 * 1024;
 
-export async function downloadImageAsDataUrl(url, signal) {
+/**
+ * 下载一张图并转成视觉可用的 data URL 数组。
+ * 普通图/表情只有 1 项；长截图会被竖向切成多段（每段宽 ≤2048、高 ≤4096），
+ * 否则整张长图要么超过上游尺寸/像素限制被 400，要么被模型内部压成窄条读不出字。
+ */
+export async function downloadImagesAsDataUrls(url, signal) {
   signal?.throwIfAborted();
   if (String(url || '').startsWith('base64://')) {
     return withMediaSlot(async () => {
@@ -209,7 +217,7 @@ export async function downloadImageAsDataUrl(url, signal) {
       }
       const mime = detectMime(buffer);
       if (!mime) throw new Error('本地表情图片格式无效');
-      return toVisionDataUrl(buffer, mime, signal);
+      return [await toVisionDataUrl(buffer, mime, signal)];
     });
   }
   const safeUrl = await validateImageUrl(url);
@@ -227,21 +235,30 @@ export async function downloadImageAsDataUrl(url, signal) {
         // 超过常规上限 → 放宽到 32MiB 重拉 + ffmpeg 降采样（Issue #6）。
         // 非超限错误原样抛出，常规 ≤12MiB 路径不受影响。
         if (!OVERSIZE_LIMIT_RE.test(String(error?.message ?? ''))) throw error;
-        const { buffer } = await fetchOversizedImageAsJpeg(safeUrl, error, signal);
-        return `data:image/jpeg;base64,${buffer.toString('base64')}`;
+        const { buffers } = await fetchOversizedImageAsJpeg(safeUrl, error, signal);
+        return buffers.map((buffer) => `data:image/jpeg;base64,${buffer.toString('base64')}`);
       }
       // 先降采样再进内存/base64：产物通常 300KB–1MB，base64 与请求体不会再放大。
-      const jpeg = await convertImageFileToVisionJpeg(inputPath, contentType, signal);
-      if (jpeg?.length) return `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+      const jpegs = await convertImageFileToVisionJpegs(inputPath, contentType, signal);
+      if (jpegs?.length) {
+        return jpegs.map((jpeg) => `data:image/jpeg;base64,${jpeg.toString('base64')}`);
+      }
       // ffmpeg 缺失/失败：回退原始文件（与历史行为一致，不劣化）
       const buffer = fs.readFileSync(inputPath);
       if (!buffer.length) throw new Error('图片内容为空');
       const mime = detectMime(buffer) || String(contentType || 'image/jpeg').split(';')[0];
-      return toVisionDataUrl(buffer, mime, signal);
+      return [await toVisionDataUrl(buffer, mime, signal)];
     } finally {
       try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* 尽力清理 */ }
     }
   });
+}
+
+/** 单张版本（兼容旧调用）：长图只取第一段。 */
+export async function downloadImageAsDataUrl(url, signal) {
+  const [first] = await downloadImagesAsDataUrls(url, signal);
+  if (!first) throw new Error('图片处理失败：没有产出可用的图片');
+  return first;
 }
 
 /**
@@ -631,9 +648,9 @@ export function buildToolDefs() {
           const sticker = await ctx.stickers.findForSend(args.stickerId);
           if (!sticker) return err(`找不到表情。${await stickerLookupHint(ctx, args.stickerId)}`);
           if (!sticker.url) return err('该表情没有图片地址');
-          const dataUrl = await downloadImageAsDataUrl(sticker.url, ctx.signal);
+          const dataUrls = await downloadImagesAsDataUrls(sticker.url, ctx.signal);
           // 备注是"图里文字经视觉判定入库"的内容，可能是别人画的图自带段头（2026-10-12 审查）
-          return { content: imageParts(`表情 ${sticker.id}（你的备注：${sanitizeUserText(String(sticker.localNote || sticker.desc || '无'))}）（先判断情绪/态度再回应）：`, [dataUrl]) };
+          return { content: imageParts(`表情 ${sticker.id}（你的备注：${sanitizeUserText(String(sticker.localNote || sticker.desc || '无'))}）（先判断情绪/态度再回应）：`, dataUrls) };
         } catch (error) {
           return err(error?.message ?? error);
         }
@@ -2247,15 +2264,21 @@ export function buildToolDefs() {
           const failed = [];
           let videoCount = 0;
           let skippedVideo = 0;
+          let slicedImages = 0;
+          let omittedParts = 0;
           for (const item of viewables) {
             ctx.signal?.throwIfAborted();
             if (item.kind === 'video' && !videoFrames) { skippedVideo += 1; continue; }
+            if (dataUrls.length >= MAX_VISION_IMAGE_PARTS) { omittedParts += 1; continue; }
             try {
-              if (item.kind === 'video') {
-                dataUrls.push(await downloadVideoAsFrameStrip(item.url, ctx.signal));
-                videoCount += 1;
-              } else {
-                dataUrls.push(await downloadImageAsDataUrl(item.url, ctx.signal));
+              const parts = item.kind === 'video'
+                ? [await downloadVideoAsFrameStrip(item.url, ctx.signal)]
+                : await downloadImagesAsDataUrls(item.url, ctx.signal);
+              if (item.kind === 'video') videoCount += 1;
+              if (parts.length > 1) slicedImages += 1;
+              for (const dataUrl of parts) {
+                if (dataUrls.length >= MAX_VISION_IMAGE_PARTS) { omittedParts += 1; break; }
+                dataUrls.push(dataUrl);
               }
             } catch (e) { failed.push(String(e?.message ?? e)); }
           }
@@ -2271,7 +2294,8 @@ export function buildToolDefs() {
           // 有图看着、但视频被设置挡下时也要说清（否则模型以为这条消息只有这些图）
           const note = [
             failed.length ? `另有 ${failed.length} 张获取失败` : '',
-            skippedVideo ? `${skippedVideo} 条视频未看（消息类型页关着视频画面）` : ''
+            skippedVideo ? `${skippedVideo} 条视频未看（消息类型页关着视频画面）` : '',
+            omittedParts ? `另有 ${omittedParts} 项未展示（一次最多看 ${MAX_VISION_IMAGE_PARTS} 张/段）` : ''
           ].filter(Boolean).join('；');
           const noteText = note ? `（${note}）` : '';
           // 这张图它之前收藏时已经理解过（库里有备注）→ 直接给出当时的理解，别让它重新描述画面
@@ -2293,9 +2317,16 @@ export function buildToolDefs() {
           const knownHint = known.length
             ? `（这张你之前看过并记过：「${known.join('」「')}」——按这个理解回，别再描述画面）`
             : '';
-          const kindHint = videoCount
-            ? `其中 ${videoCount} 条是视频：2×2 四宫格按时间顺序抽的 4 帧，阅读顺序左上→右上→左下→右下，黑格是填充不是画面内容。要听视频里说了什么再调 get_message_audio。`
-            : '若是 2×2 四宫格：那是动图 GIF 按时间顺序抽的 4 帧，阅读顺序左上→右上→左下→右下，黑格是填充不是画面内容。先判断它想表达的情绪/态度：无语呆滞、嘲讽、卖萌、赞同、挑衅、摆烂、委屈…再针对态度回话，不要复述画面。';
+          // 长图切片后要让模型知道"多段是同一张图"，否则它会当成多张不同的图分别描述。
+          const slicedHint = slicedImages
+            ? `有 ${slicedImages} 张长截图已按从上到下切成多段：请按图片出现顺序从上往下连起来读，接缝处可能重复一行，不是重复内容。`
+            : '';
+          const kindHint = [
+            slicedHint,
+            videoCount
+              ? `其中 ${videoCount} 条是视频：2×2 四宫格按时间顺序抽的 4 帧，阅读顺序左上→右上→左下→右下，黑格是填充不是画面内容。要听视频里说了什么再调 get_message_audio。`
+              : '若是 2×2 四宫格：那是动图 GIF 按时间顺序抽的 4 帧，阅读顺序左上→右上→左下→右下，黑格是填充不是画面内容。先判断它想表达的情绪/态度：无语呆滞、嘲讽、卖萌、赞同、挑衅、摆烂、委屈…再针对态度回话，不要复述画面。'
+          ].filter(Boolean).join(' ');
           return { content: imageParts(`消息 ${args.messageId} 的图片内容${noteText}${knownHint}（${kindHint}）：`, dataUrls) };
         } catch (error) {
           return err(error?.message ?? error);
