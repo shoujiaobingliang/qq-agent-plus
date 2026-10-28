@@ -8,6 +8,9 @@
 
 **新增**
 
+- **每日长期记忆（Phase 1）**：每天抽取前一自然日的重要约定/决定/事实/事件/人物关键事实，写入独立的
+  `data/memory/daily-memory.sqlite`；重要内容逐字保留，日常内容只留摘要并按强度衰减。召回按隐私作用域
+  （knowledge/chat/person/secret）硬过滤后做激活打分，新增 `memory_lookup` 工具。默认关闭。
 - **插件页「管理来源」**：可以在控制台添加/移除自定义插件索引，不用再手改 `config.json`。
   - 支持直接填索引 `index.json` 地址，或填 GitHub 仓库地址（自动尝试 `plugins/index.json`
     与根目录 `index.json`）。

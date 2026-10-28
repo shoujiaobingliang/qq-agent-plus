@@ -1081,6 +1081,23 @@ export class ChatStore {
       .all(chatKey, ...(Number(afterId) > 0 ? [Number(afterId)] : []), Math.max(1, Number(limit) || 1), Math.max(0, Number(offset) || 0)).reverse().map(entry);
   }
 
+  /**
+   * 时间窗口内的消息（每日记忆抽取用）：按 ts 取 [since, until)，再按 id 升序返回。
+   * 子查询先倒序 LIMIT，走 (chat_key, id) 主键，不新增 ts 索引。
+   */
+  recentBetween(chatKey, since, until, { limit = 2000 } = {}) {
+    return this.db.prepare(`
+      SELECT * FROM (
+        SELECT * FROM messages
+        WHERE chat_key=? AND ts>=? AND ts<?
+        ORDER BY id DESC LIMIT ?
+      ) ORDER BY id ASC
+    `).all(
+      String(chatKey), Number(since) || 0, Number(until) || 0,
+      Math.max(1, Number(limit) || 1)
+    ).map(entry);
+  }
+
   findByMid(chatKey, mid) {
     return entry(this.db.prepare('SELECT * FROM messages WHERE chat_key=? AND mid=?').get(chatKey, normalizeMid(mid)));
   }

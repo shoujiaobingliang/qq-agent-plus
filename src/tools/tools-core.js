@@ -2435,6 +2435,65 @@ export function buildToolDefs() {
       }
     },
     {
+      name: 'memory_lookup',
+      feature: 'dailyMemory',
+      description: '按关键词/人物/类型查本会话的长期记忆（约定、决定、事实、事件、人物关键事实）。默认只返回摘要；需要细节时传 includeContent=true。只返回当前会话可见的记忆；标“模糊”的条目是印象，不要补全细节，不要透露来源。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '要查的关键词/话题/人名（可为空：按重要度/最近性列出）' },
+          userId: { type: ['integer', 'string'], description: '可选：只看这个人的记忆' },
+          kind: {
+            type: 'string',
+            enum: ['convention', 'decision', 'fact', 'event', 'person_fact', 'person_preference'],
+            description: '可选：只看某一类'
+          },
+          includeContent: { type: 'boolean', description: '是否返回细节（仅限未淡出的条目）' }
+        }
+      },
+      async execute(ctx, args) {
+        if (!ctx.dailyMemory || typeof ctx.dailyMemory.lookup !== 'function') {
+          return err('长期记忆未启用');
+        }
+        const userId = String(args.userId ?? '').trim();
+        if (userId && !/^\d{1,15}$/.test(userId)) {
+          return err(`userId 必须是数字 QQ 号（收到：${JSON.stringify(args.userId)}）。${memberHint(ctx)}`);
+        }
+        if (userId && !hasParticipant(ctx, userId)) {
+          return err(`${userId} 不是当前会话中出现过的成员，不能按这个号码查记忆。${memberHint(ctx)}`);
+        }
+        const kind = String(args.kind || '').trim();
+        const activeIds = (ctx.store.activeMembers(ctx.chatKey, 20) || [])
+          .map((member) => String(member.userId || ''))
+          .filter((id) => /^\d{1,15}$/.test(id));
+        const entries = ctx.dailyMemory.lookup({
+          chatKey: ctx.chatKey,
+          query: String(args.query || ''),
+          userId,
+          kind,
+          relevantUserIds: userId ? [userId, ...activeIds] : activeIds,
+          includeContent: args.includeContent === true,
+          limit: 10
+        });
+        if (!entries.length) return ok('没有找到匹配的长期记忆。');
+        return ok(sanitizeDeep({
+          entries: entries.map((entry) => ({
+            kind: entry.kind,
+            subject: sanitizeUserText(entry.subject),
+            abstract: sanitizeUserText(entry.abstract),
+            ...(entry.content ? { content: sanitizeUserText(entry.content) } : {}),
+            fidelity: entry.fidelity,
+            importance: entry.importance,
+            confidence: entry.confidence,
+            privacyScope: entry.privacyScope,
+            disclosable: entry.disclosable,
+            updatedAt: entry.updatedAt
+          })),
+          note: '标 gist 的条目是模糊印象，不要补全细节；disclosable=false 的内容只用于理解，不要向群友复述或透露来源。'
+        }));
+      }
+    },
+    {
       name: 'person_memory_lookup',
       feature: 'identityPilot',
       description: '按 QQ 号查询当前聊天对象/群成员的统一身份与人物记忆。适合想确认“这个人是不是以前在别处聊过”“我对他有什么印象”时主动调用。只返回当前会话可见的旧印象和跨会话聚合统计，不会泄露其他群或私聊原文。',

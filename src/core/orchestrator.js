@@ -469,10 +469,12 @@ export class Orchestrator {
     getIncidentPilot = null,
     getPlugins = null,
     mood = null,
+    dailyMemory = null,
     judgeMood = false
   }) {
     this.store = store;
     this.memory = memory;
+    this.dailyMemory = dailyMemory;
     this.stickers = stickers;
     this.sender = sender;
     this.sessions = sessions;
@@ -2439,6 +2441,8 @@ export class Orchestrator {
       if (!platformToolAllowed(d.name, cfg.platform, chatKey)) return false;
       if (d.feature === 'identityPilot' && !identityAvailable) return false;
       if (d.feature === 'friendProposal' && !friendProposalAvailable) return false;
+      if (d.feature === 'dailyMemory'
+        && (!this.dailyMemory || getConfig().dailyMemory?.enabled !== true)) return false;
       return true;
     });
     // 插件工具：**不放进 buildToolDefs()**（那份是内置工具表，另有"每个工具都要有调度分类"
@@ -2680,6 +2684,7 @@ export class Orchestrator {
       onebot: this.onebot,
       store: this.store,
       memory: this.memory,
+      dailyMemory: this.dailyMemory,
       identityPilot,
       stickers: this.stickers,
       sender: this.sender,

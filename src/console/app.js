@@ -27,6 +27,8 @@ import { SendQueue } from '../onebot/sender.js';
 import { SessionRegistry, personaLabelOfPrompt } from '../core/sessions.js';
 import { Orchestrator } from '../core/orchestrator.js';
 import { DailyMomentsManager } from '../features/daily-moments.js';
+import { DailyMemoryManager } from '../features/daily-memory.js';
+import { DailyMemoryStore } from '../memory/daily-memory-store.js';
 import { QzoneInteractionManager } from '../features/qzone-interactions.js';
 import { GroupDigestManager } from '../features/group-digest.js';
 import { GroupGameManager } from '../features/group-game.js';
@@ -603,6 +605,13 @@ export function createApp({
     // 插件声明 send 能力后，发言走机器人自己那条发送队列（禁言/限频/白名单/记账全在里面）
     getSender: () => sender
   });
+  // 每日长期记忆：独立 SQLite；初始化失败只停用该功能，不能拖垮聊天启动。
+  let dailyMemoryStore = null;
+  try {
+    dailyMemoryStore = new DailyMemoryStore({ config: getConfig() });
+  } catch (error) {
+    log('[daily-memory] 存储初始化失败，功能停用：', error?.message ?? error);
+  }
   const orchestrator = new Orchestrator({
     store,
     memory,
@@ -611,6 +620,7 @@ export function createApp({
     sessions,
     onebot,
     reminders,
+    dailyMemory: dailyMemoryStore,
     getGames: () => groupGame,
     getPlugins: () => pluginRegistry,
     emit,
@@ -655,6 +665,15 @@ export function createApp({
     sessions,
     log: moduleLog('group-digest')
   });
+  const dailyMemoryManager = dailyMemoryStore
+    ? new DailyMemoryManager({
+      store: dailyMemoryStore,
+      messageStore: store,
+      sessions,
+      resolveChatName: (groupId) => orchestrator.getChatName(groupId),
+      log: moduleLog('daily-memory')
+    })
+    : null;
   function createIncidentPilot() {
     return new IncidentPilotManager({
       dataDir: DATA_DIR,
@@ -2029,6 +2048,10 @@ export function createApp({
   router.add('GET', '/api/model-prices', async (req, res, params, url) => json(res, 200, modelPricesPayload(url.searchParams.get('model'))));
   router.add('GET', '/api/vision/results', async (req, res) => json(res, 200, { results: { ...builtinVisionResults(currentProviders()), ...visionResults() }, scanning: visionScan.running }));
   router.add('GET', '/api/daily-moments/status', async (req, res) => json(res, 200, dailyMoments.status()));
+  router.add('GET', '/api/daily-memory/status', async (req, res) => {
+    if (!dailyMemoryManager) return json(res, 200, { enabled: false, unavailable: true });
+    return json(res, 200, dailyMemoryManager.status());
+  });
   // 心情：当前快照 + 最近变化流水 + 最近 7 天汇总。顶部栏走 /api/status，设置页走这里。
   router.add('GET', '/api/mood', async (_req, res) => json(res, 200, {
     ok: true,
@@ -4322,6 +4345,7 @@ export function createApp({
     }
     const previousProactive = JSON.stringify(cfgNow.proactive || {});
     const previousDailyMoments = JSON.stringify(cfgNow.dailyMoments || {});
+    const previousDailyMemory = JSON.stringify(cfgNow.dailyMemory || {});
     const previousQzoneInteractions = JSON.stringify(cfgNow.qzoneInteractions || {});
     const previousIdentityPilot = JSON.stringify(cfgNow.identityPilot || {});
     const previousPlugins = JSON.stringify(cfgNow.plugins || {});
@@ -4415,6 +4439,9 @@ export function createApp({
     }
     if (JSON.stringify(next.groupDigest || {}) !== JSON.stringify(cfgNow.groupDigest || {})) {
       groupDigest.reconfigure();
+    }
+    if (JSON.stringify(next.dailyMemory || {}) !== previousDailyMemory) {
+      dailyMemoryManager?.reconfigure();
     }
     // 插件配置动了（总开关 / enabledIds / 插件自己的 settings）→ 重排：停掉再按新配置起。
     // 不 await：控制台保存不该等插件起进程（宿主内部自己 try/catch 并记日志）。
@@ -4663,6 +4690,21 @@ export function createApp({
       return json(res, error.httpStatus || (error.code === 'TIME_CONTROL_INACTIVE' ? 409 : 500), {
         error: String(error?.message ?? error), code: error.code || ''
       });
+    }
+  });
+  router.add('POST', '/api/daily-memory/run', async (req, res) => {
+    if (!dailyMemoryManager) return json(res, 503, { error: '长期记忆未启用' });
+    const body = await readBody(req);
+    try {
+      const result = await dailyMemoryManager.runOnce({
+        ...(body.day ? { day: String(body.day) } : {}),
+        ...(body.chatKey ? { chatKey: String(body.chatKey) } : {}),
+        force: body.force === true,
+        source: 'console'
+      });
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, 500, { error: String(error?.message ?? error) });
     }
   });
   router.add('GET', '/api/models', async (req, res) => {
@@ -5109,6 +5151,7 @@ export function createApp({
     if (getConfig().dailyMoments?.enabled) dailyMoments.start();
     if (getConfig().qzoneInteractions?.enabled) qzoneInteractions.start();
     if (getConfig().groupDigest?.enabled) groupDigest.start();
+    if (getConfig().dailyMemory?.enabled) dailyMemoryManager?.start();
     groupGame.startLoop();   // 内部按配置判断是否推进；重启后从磁盘恢复进行中的局
     if (getConfig().proactive?.enabled) orchestrator.startProactiveLoop();
     orchestrator.startScheduledWakeTicker();
@@ -5179,6 +5222,7 @@ export function createApp({
     // 且群游戏 tick 会把 games.json 再写一遍（2026-10-07 复审 P3）。
     groupGame.stopLoop();
     groupDigest.stop();
+    dailyMemoryManager?.stop();
     // 插件子进程要在 onebot 关闭之前停掉：停机后不该再有插件在读消息
     await pluginRegistry.stop();
     await qzoneInteractions.abort();
@@ -5208,6 +5252,7 @@ export function createApp({
       server.close(done);
       server.closeIdleConnections?.();
     });
+    try { dailyMemoryStore?.close(); } catch { /* 已关闭/未初始化 */ }
     store.close();
     closeUsageIndex();
     // 用量缓存是进程内状态，随实例一起释放：同进程里重建 app（测试/热重启）时

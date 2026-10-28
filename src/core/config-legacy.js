@@ -14,6 +14,7 @@ import {
 import { DEFAULT_TIME_CONTROL, normalizeTimeControl } from './time-control.js';
 import { normalizeTokenSaverMode } from './token-saver.js';   // 零依赖模块，避免循环依赖
 import { ENERGY_MODEL_DEFAULTS } from './energy-model.js';
+import { DEFAULT_DAILY_MEMORY_CONFIG, normalizeDailyMemoryConfig } from './daily-memory-config.js';
 import { normalizeMomentWindows } from '../features/moment-schedule.js';
 import { PLATFORM_GATE_KEYS } from './platform-gates.js';   // 零依赖模块：按群覆盖的键名校验
 import {
@@ -563,6 +564,9 @@ export const DEFAULT_CONFIG = {
     maxResearchCalls: 4,
     maxRounds: 8
   },
+  // 每日长期记忆（拟人记忆 v1）：默认关闭，开启后按天抽取重要内容，
+  // 分级保真度 + 激活召回 + 隐私作用域。详见 docs/requirements/human-like-memory.md。
+  dailyMemory: structuredClone(DEFAULT_DAILY_MEMORY_CONFIG),
   // 好友动态阅览、点赞评论与评论回复。默认关闭，启用后按上海时间周期轮询。
   qzoneInteractions: {
     enabled: false,
@@ -1887,7 +1891,7 @@ export function updateConfig(patch) {
   // 下面这些段是直接写属性用的（next.api.maxRunTokens = …），客户端送来标量或数组时
   // 会抛 TypeError（ESM 是严格模式）→ 整个 /api/config 返回 500。坏输入最该被忽略，
   // 不该把整次保存带崩（2026-10-04 复审 P2）。
-  for (const sec of ['api', 'conversation', 'dailyMoments', 'qzoneInteractions']) {
+  for (const sec of ['api', 'conversation', 'dailyMoments', 'dailyMemory', 'qzoneInteractions']) {
     if (sec in safePatch && !isPlainObject(safePatch[sec])) delete safePatch[sec];
   }
   if ('trigger' in safePatch && !isPlainObject(safePatch.trigger)) delete safePatch.trigger;
@@ -2213,6 +2217,7 @@ export function updateConfig(patch) {
     };
   }
   next.dailyMoments.scheduleWindows = normalizeMomentWindows(next.dailyMoments.scheduleWindows);
+  next.dailyMemory = normalizeDailyMemoryConfig(next.dailyMemory);
   if (!['observe', 'active'].includes(next.runtime?.mode)) throw new Error('Invalid runtime mode');
   if (!['legacy', 'threaded', 'lifecycle'].includes(next.conversation?.mode)) {
     throw new Error('Invalid conversation mode');
