@@ -61,6 +61,7 @@ import {
 import { safeFetch, safeFetchBinary } from '../llm/safe-fetch.js';
 import { DEFAULT_CONFIG } from '../core/config.js';
 import { uiBuildStamp } from './ui-build.js';
+import { getUsageFile, putUsageFile, listFinalUsage, pruneMissingUsageFiles, closeUsageIndex } from './usage-index.js';
 import { installPlugin, uninstallPlugin, fetchPluginIndexes, sha256Of, MAX_PLUGIN_ARCHIVE_BYTES, rollbackPlugin, createIndexRevokedCache, indexResultForDisplay, bundledPluginIndex } from '../plugins/install.js';
 import { MAX_CUSTOM_INDEX_SOURCES, resolveIndexSources } from '../plugins/sources.js';
 import { DEFAULT_MIRROR_PREFIXES, fetchBinaryWithMirrors } from '../plugins/mirrors.js';
@@ -5208,6 +5209,13 @@ export function createApp({
       server.closeIdleConnections?.();
     });
     store.close();
+    closeUsageIndex();
+    // 用量缓存是进程内状态，随实例一起释放：同进程里重建 app（测试/热重启）时
+    // 不能把上一个实例按旧配置算出的结果继续返回。
+    usageStatsCache.clear();
+    usageBreakdownCache.clear();
+    usageDailyCache = null;
+    usageSignatureCache = { at: 0, value: '' };
     // 用量是内存累加 + 定时落盘；停服前强制刷一次，避免最后 15 秒的调用漏账。
     sessions.flushUsage?.();
   }
@@ -5485,13 +5493,15 @@ function buildSessionView(s, store, options = {}) {
 // 保留 mtime 预筛和 usage-today 内存缓冲：窗口外文件仍然不读，today 仍只扫 today。
 const usageStatsCache = new Map();
 const usageBreakdownCache = new Map();
-const usageFileCache = new Map();
+// sessions.js 的终态：finish 落盘后文件不会再被改写（只有保留期会把文件删掉）。
+const FINAL_SESSION_STATUSES = new Set(['done', 'noreply', 'error', 'aborted']);
 const USAGE_RESULT_MAX_KEYS = 8;
 const USAGE_RESULT_TTL_MS = 120000;
-const USAGE_FILE_CACHE_MAX_KEYS = 1000;
-const USAGE_FILE_CACHE_MAX_ROWS = 8000;
-let usageFileCacheRows = 0;
 const USAGE_SIGNATURE_TTL_MS = 30000;
+const USAGE_TODAY_RESULT_TTL_MS = 60 * 60 * 1000;
+const USAGE_DAILY_FILE = path.join(DATA_DIR, 'usage-daily.json');
+const USAGE_DAILY_KEEP_DAYS = 365;
+let usageDailyCache = null;
 let usageSignatureCache = { at: 0, value: '' };
 
 function pruneUsageCache(map, maxKeys) {
@@ -5503,28 +5513,6 @@ function pruneUsageCache(map, maxKeys) {
     if (at < oldestAt) { oldestAt = at; oldestKey = key; }
   }
   if (oldestKey !== null) map.delete(oldestKey);
-}
-
-/**
- * 写单文件解析缓存：同时限制文件数与总 rows 数。
- * rows 是最占内存的部分；只按文件数限制的话，一个大线程会话就能把缓存撑大。
- */
-function storeUsageFileEntry(filePath, entry) {
-  const old = usageFileCache.get(filePath);
-  if (old) usageFileCacheRows -= old.rows.length;
-  usageFileCache.delete(filePath);
-  usageFileCache.set(filePath, entry);
-  usageFileCacheRows += entry.rows.length;
-  while (
-    usageFileCache.size > USAGE_FILE_CACHE_MAX_KEYS
-    || usageFileCacheRows > USAGE_FILE_CACHE_MAX_ROWS
-  ) {
-    if (usageFileCache.size <= 1) break;
-    const oldestKey = usageFileCache.keys().next().value;
-    const removed = usageFileCache.get(oldestKey);
-    usageFileCache.delete(oldestKey);
-    usageFileCacheRows -= removed?.rows?.length || 0;
-  }
 }
 
 /**
@@ -5554,21 +5542,26 @@ function sessionsDirSignature() {
 /**
  * 单个会话文件的解析缓存：跨 range 复用同一份 rows。
  * 文件被 rewrite 时 mtime/size 会变，自动重读；没有变化时不再 readFileSync/JSON.parse。
+ *
+ * 定稿（status 离开 running/waiting）后写入 final，之后统计直接走 SQL，不再 stat/打开。
  */
 function usageForSessionFile(filePath, stat) {
-  const hit = usageFileCache.get(filePath);
-  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit;
+  const hit = getUsageFile(filePath, stat.mtimeMs, stat.size);
+  // 老索引行没有 last_at（迁移前写入）：lastAt=0 说明定稿信息未知，重读一次补上。
+  // 空条目（解析失败/没有 startedAt）写入时用 mtime 占位，避免每次 collect 都重读坏文件。
+  if (hit && hit.lastAt > 0) return hit;
   const emptyEntry = () => {
     const entry = {
-      at: Date.now(),
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       startedAt: 0,
       rows: [],
       searchCount: 0,
-      toolCounts: Object.create(null)
+      toolCounts: Object.create(null),
+      final: false,   // 不是定稿，但文件被改写（mtime/size 变化）后仍会重新解析
+      lastAt: Number(stat.mtimeMs) || 0
     };
-    storeUsageFileEntry(filePath, entry);
+    putUsageFile(filePath, entry);
     return entry;
   };
   let s;
@@ -5583,25 +5576,296 @@ function usageForSessionFile(filePath, stat) {
     const name = m && m.toolCall && m.toolCall.name;
     if (name) toolCounts[String(name)] = (toolCounts[String(name)] || 0) + 1;
   }
+  // 定稿判定与 sessions.js 的生命周期一致：finish 之后文件不再被改写。
+  // 用白名单而不是"非 running/waiting"：未知/未来新增状态按未定稿处理，
+  // 最坏只是多重读几次，不会把仍可能变化的文件当成定稿。
+  const final = FINAL_SESSION_STATUSES.has(s.status);
+  // 会话内容的最晚时间：用于按窗口取索引时判断相交，省掉"为了过滤而打开文件"。
+  let lastAt = Math.max(started, Number(s.endedAt) || 0);
+  for (const row of rows) lastAt = Math.max(lastAt, Number(row.at) || 0);
   const entry = {
-    at: Date.now(),
     mtimeMs: stat.mtimeMs,
     size: stat.size,
     startedAt: started,
     rows,
     searchCount,
-    toolCounts
+    toolCounts,
+    final,
+    lastAt
   };
-  storeUsageFileEntry(filePath, entry);
+  putUsageFile(filePath, entry);
   return entry;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function readUsageDaily() {
+  if (usageDailyCache) return usageDailyCache;
+  let data = null;
+  try {
+    let text = fs.readFileSync(USAGE_DAILY_FILE, 'utf8');
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    data = JSON.parse(text);
+  } catch { /* 首次没有文件 */ }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) data = {};
+  if (!data.days || typeof data.days !== 'object' || Array.isArray(data.days)) data.days = {};
+  if (!data.total || typeof data.total !== 'object' || Array.isArray(data.total)) data.total = {};
+  data.version = 1;
+  usageDailyCache = data;
+  return data;
+}
+
+function writeUsageDaily(data) {
+  usageDailyCache = data;
+  const tmp = `${USAGE_DAILY_FILE}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(USAGE_DAILY_FILE), { recursive: true, mode: 0o700 });
+    fs.rmSync(tmp, { force: true });
+    fs.writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600
+    });
+    fs.renameSync(tmp, USAGE_DAILY_FILE);
+  } catch (error) {
+    console.error('[usage-daily] 写入失败:', error?.message ?? error);
+  }
+}
+
+function mergeUsageTotals(items) {
+  const out = {};
+  const flat = new Map();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    for (const [key, value] of Object.entries(item)) {
+      if (key === 'breakdown') {
+        if (!out.breakdown) out.breakdown = { fresh: 0, cached: 0, output: 0 };
+        for (const [part, amount] of Object.entries(value || {})) {
+          out.breakdown[part] = (Number(out.breakdown[part]) || 0) + (Number(amount) || 0);
+        }
+        continue;
+      }
+      if (key === 'flatItems') {
+        for (const entry of Array.isArray(value) ? value : []) {
+          if (!entry?.key) continue;
+          const cur = flat.get(entry.key) || { ...entry, calls: 0, tokens: 0 };
+          cur.calls = (Number(cur.calls) || 0) + (Number(entry.calls) || 0);
+          cur.tokens = (Number(cur.tokens) || 0) + (Number(entry.tokens) || 0);
+          // 包月费用按“一个账户/模型只算一次”，按天费用才逐日相加。
+          if (cur.period === 'day' || entry.period === 'day') {
+            cur.amount = (Number(cur.amount) || 0) + (Number(entry.amount) || 0);
+            cur.period = 'day';
+          } else {
+            cur.amount = Math.max(Number(cur.amount) || 0, Number(entry.amount) || 0);
+            cur.period = cur.period || entry.period;
+          }
+          flat.set(entry.key, cur);
+        }
+        continue;
+      }
+      if (key === 'hasPeakModel') {
+        out.hasPeakModel = out.hasPeakModel === true || value === true;
+        continue;
+      }
+      if (key === 'cacheHitRate' || key === 'peakRatio') continue;
+      if (typeof value === 'number') out[key] = (Number(out[key]) || 0) + value;
+      else if (out[key] === undefined) out[key] = value;
+    }
+  }
+  out.flatItems = [...flat.values()];
+  const prompt = Number(out.promptTokens) || 0;
+  const cached = Number(out.cachedTokens) || 0;
+  const peakTokens = Number(out.peakTokens) || 0;
+  const offPeakTokens = Number(out.offPeakTokens) || 0;
+  out.cacheHitRate = prompt ? Math.min(1, cached / prompt) : 0;
+  out.peakRatio = (peakTokens + offPeakTokens) ? peakTokens / (peakTokens + offPeakTokens) : 0;
+  return out;
+}
+
+function mergeUsageGroups(groups, keyField = 'key') {
+  const map = new Map();
+  for (const group of Array.isArray(groups) ? groups : []) {
+    if (!group) continue;
+    const key = String(group[keyField] ?? group.key ?? '');
+    if (!key) continue;
+    const old = map.get(key);
+    map.set(key, old ? mergeUsageTotals([old, group]) : { ...group, key });
+  }
+  return [...map.values()].sort((a, b) => (
+    (Number(b.cost) || 0) - (Number(a.cost) || 0)
+    || (Number(b.totalTokens) || 0) - (Number(a.totalTokens) || 0)
+  ));
+}
+
+function mergeUsageStats(list, { range, rangeLabel, mode }) {
+  const stats = list.filter(Boolean);
+  const totals = mergeUsageTotals(stats.map((item) => item.totals || {}));
+  let searchCount = 0;
+  const toolCounts = Object.create(null);
+  for (const item of stats) {
+    searchCount += Number(item.searchCount) || 0;
+    for (const [name, count] of Object.entries(item.toolCounts || {})) {
+      toolCounts[name] = (toolCounts[name] || 0) + (Number(count) || 0);
+    }
+  }
+  const days = mergeUsageGroups(
+    stats.flatMap((item) => (Array.isArray(item.days) ? item.days : [])),
+    'day'
+  ).sort((a, b) => String(a.day).localeCompare(String(b.day)));
+  const chats = mergeUsageGroups(stats.flatMap((item) => (Array.isArray(item.chats) ? item.chats : [])));
+  const models = mergeUsageGroups(stats.flatMap((item) => (Array.isArray(item.models) ? item.models : [])));
+  const byChatModel = mergeUsageGroups(
+    stats.flatMap((item) => (Array.isArray(item.byChatModel) ? item.byChatModel : []))
+  );
+  const unpricedModels = mergeUsageGroups(
+    stats.flatMap((item) => (Array.isArray(item.unpriced?.models) ? item.unpriced.models : []))
+  );
+  return {
+    range: String(range),
+    rangeLabel,
+    mode,
+    totals,
+    searchCount,
+    toolCounts,
+    days,
+    chats,
+    models,
+    byChatModel,
+    billing: {
+      flatCalls: Number(totals.flatCalls) || 0,
+      flatTokens: Number(totals.flatTokens) || 0,
+      flatItems: (totals.flatItems || []).slice(0, 20),
+      localCalls: Number(totals.localCalls) || 0,
+      localTokens: Number(totals.localTokens) || 0
+    },
+    unpriced: {
+      calls: Number(totals.unpricedCalls) || 0,
+      tokens: Number(totals.unpricedTokens) || 0,
+      models: unpricedModels.slice(0, 20),
+      more: Math.max(0, unpricedModels.length - 20)
+    }
+  };
+}
+
+function usageDayWindow(dayKey) {
+  const start = Date.parse(`${dayKey}T00:00:00+08:00`);
+  return { mode: 'days', start, end: start + DAY_MS - 1, label: dayKey };
+}
+
+function usageDayKeys(win) {
+  const keys = [];
+  const end = Math.min(Number(win.end) || Date.now(), Date.now());
+  let cursor = shanghaiDayStart(Number(win.start) || Date.now());
+  const last = shanghaiDayStart(end - 1);
+  for (let guard = 0; cursor <= last && guard < 4000; guard += 1, cursor += DAY_MS) {
+    keys.push(todayKey(cursor));
+  }
+  return keys;
+}
+
+function refreshUsageDailyTotal(data) {
+  const cutoff = todayKey(shanghaiDayStart(Date.now()) - USAGE_DAILY_KEEP_DAYS * DAY_MS);
+  for (const key of Object.keys(data.days || {})) {
+    if (key < cutoff) delete data.days[key];
+  }
+  const days = Object.values(data.days || {});
+  data.total = mergeUsageTotals(days.map((entry) => entry?.totals || {}));
+  data.through = Object.keys(data.days || {}).sort().pop() || '';
+}
+
+function backfillUsageDays(win, data) {
+  const collected = collectUsageRowsForWindow(win);
+  const rowsByDay = new Map();
+  for (const row of collected.rows) {
+    const day = todayKey(row.at);
+    if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+    rowsByDay.get(day).push(row);
+  }
+  const sessionByDay = new Map();
+  for (const session of collected.sessions || []) {
+    const day = todayKey(session.startedAt);
+    if (!sessionByDay.has(day)) sessionByDay.set(day, { searchCount: 0, toolCounts: {} });
+    const bucket = sessionByDay.get(day);
+    bucket.searchCount += Number(session.searchCount) || 0;
+    for (const [name, count] of Object.entries(session.toolCounts || {})) {
+      bucket.toolCounts[name] = (bucket.toolCounts[name] || 0) + (Number(count) || 0);
+    }
+  }
+  const today = todayKey();
+  const yesterday = todayKey(shanghaiDayStart(Date.now()) - DAY_MS);
+  const targetDays = win.mode === 'all'
+    ? new Set([...rowsByDay.keys(), ...sessionByDay.keys()])
+    : usageDayKeys(win);
+  let changed = false;
+  for (const day of targetDays) {
+    if (day === today || data.days[day]) continue;
+    const rows = rowsByDay.get(day) || [];
+    const counts = sessionByDay.get(day) || { searchCount: 0, toolCounts: {} };
+    data.days[day] = buildUsageStatsFromRows(
+      rows,
+      usageDayWindow(day),
+      counts.searchCount,
+      counts.toolCounts,
+      day
+    );
+    changed = true;
+  }
+  if (win.mode === 'all' && (!data.through || data.through < yesterday)) {
+    data.through = yesterday;
+    changed = true;
+  }
+  if (changed) {
+    refreshUsageDailyTotal(data);
+    if (win.mode === 'all') data.through = yesterday;
+    writeUsageDaily(data);
+  }
+}
+
+function usageAddDays(dayKey, days) {
+  const base = Date.parse(`${dayKey}T00:00:00+08:00`);
+  return todayKey(base + Number(days) * DAY_MS);
+}
+
+function ensureUsageDailies(win) {
+  const data = readUsageDaily();
+  const today = todayKey();
+  if (win.mode === 'all') {
+    const yesterday = todayKey(shanghaiDayStart(Date.now()) - DAY_MS);
+    if (!data.through || data.through < yesterday) {
+      // 首次全量回填；之后只补 through 之后缺失的日期，不重扫全部历史。
+      const startKey = data.through ? usageAddDays(data.through, 1) : '';
+      const backfillWin = startKey
+        ? {
+          mode: 'all',
+          start: Date.parse(`${startKey}T00:00:00+08:00`),
+          end: Date.now(),
+          label: '全部'
+        }
+        : win;
+      backfillUsageDays(backfillWin, data);
+    }
+    return data;
+  }
+  const keys = usageDayKeys(win);
+  if (keys.some((day) => day !== today && !data.days[day])) {
+    backfillUsageDays(win, data);
+  }
+  return data;
+}
+
 function collectUsageRows({ range }) {
-  const win = resolveRange(range);
-  // 行由 usageFileCache 按文件复用；这里只做窗口过滤与聚合，重复调用不会重新 parse 文件。
+  return collectUsageRowsForWindow(resolveRange(range));
+}
+
+function collectUsageRowsForWindow(win) {
+  // 已定稿会话（status 离开 running/waiting）的 rows 直接由 usage-index 按窗口取出，
+  // 不 stat、不打开文件 —— 这些文件不会再被改写，重复 IO 纯属浪费。
+  // 只有运行中/新建/解析失败的会话才走 stat → 索引命中 → 必要时 parse。
   const dir = path.join(DATA_DIR, 'sessions');
-  let files = [];
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return { rows: [], win, searchCount: 0, toolCounts: {} }; }
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return { rows: [], win, searchCount: 0, toolCounts: {} }; }
+  const existingFiles = new Set(names.map((f) => path.join(dir, f)));
+  // 保留期清理掉的会话文件：索引行一并删除，口径仍是"文件不在了就不计入"。
+  pruneMissingUsageFiles(existingFiles);
   // mtime 预筛（2026-10-02）：窗口外的会话文件不必读 —— 749 个文件全读 + parse 约 1 秒，
   // 是"用量页打开要等一秒"的主因。会话文件的写入发生在运行期内/之后，mtime 只会晚于
   // startedAt，留 6 小时余量后按 mtime 跳过窗口外文件是安全的。
@@ -5614,29 +5878,49 @@ function collectUsageRows({ range }) {
   // 所以只列数量、绝不参与成本计算（用户明确要求）。
   let searchCount = 0;
   const toolCounts = Object.create(null);
+  const sessions = [];
 
-  for (const f of files) {
-    const filePath = path.join(dir, f);
-    let stat;
-    try { stat = fs.statSync(filePath); } catch { continue; }
-    if (mtimeFloor > 0 && stat.mtimeMs < mtimeFloor) continue;
-    const entry = usageForSessionFile(filePath, stat);
-    if (!entry) continue;
-
+  const addEntry = (entry) => {
     // 这个会话是否落在时间窗口内（工具/搜索计数按会话归属，没有独立时间戳）
     if (entry.startedAt >= win.start && entry.startedAt <= win.end) {
       searchCount += entry.searchCount;
       for (const [name, count] of Object.entries(entry.toolCounts)) {
         toolCounts[name] = (toolCounts[name] || 0) + count;
       }
+      sessions.push({
+        startedAt: entry.startedAt,
+        searchCount: entry.searchCount,
+        toolCounts: entry.toolCounts
+      });
     }
 
     for (const row of entry.rows) {
       if (row.at < win.start || row.at > win.end) continue;
       rows.push({ ...row });
     }
+  };
+
+  // 1) 已定稿：只来自索引（零文件 IO）。文件已被清理的跳过，等 pruneMissing 收尾。
+  const finalized = new Set();
+  for (const entry of listFinalUsage(win.start, win.end)) {
+    if (!existingFiles.has(entry.file)) continue;
+    finalized.add(entry.file);
+    addEntry(entry);
   }
-  return { rows, win, searchCount, toolCounts };
+
+  // 2) 其余文件（运行中/新建/未定稿）：仍要 stat，mtime/size 变化才重新 parse。
+  for (const f of names) {
+    const filePath = path.join(dir, f);
+    if (finalized.has(filePath)) continue;
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { continue; }
+    if (mtimeFloor > 0 && stat.mtimeMs < mtimeFloor) continue;
+    const entry = usageForSessionFile(filePath, stat);
+    if (!entry) continue;
+    addEntry(entry);
+  }
+
+  return { rows, win, searchCount, toolCounts, sessions };
 }
 
 /** 用配置解析价格（成本只与实际调用的模型有关，与当前选中模型无关）。 */
@@ -5753,17 +6037,61 @@ function groupBy(rows, field, limit = 0) {
 /** 主统计：按天 / 按会话 / 按模型三个维度。 */
 function buildUsageStats(options = {}) {
   const range = String(options.range ?? '7');
-  const cacheKey = JSON.stringify([sessionsDirSignature(), range]);
+  const win = resolveRange(range);
+  const live = win.mode === 'today' || win.mode === '24h';
+  const ttl = live ? USAGE_TODAY_RESULT_TTL_MS : USAGE_RESULT_TTL_MS;
+  // 今日/24h 的 1 小时缓存不绑目录签名：否则每个新会话文件都会让今日扫描立刻失效。
+  // 历史缓存仍绑签名，新增会话文件时能及时看到新日期。
+  const cacheKey = live
+    ? JSON.stringify(['live', range])
+    : JSON.stringify([sessionsDirSignature(), range]);
   const hit = usageStatsCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < USAGE_RESULT_TTL_MS) return hit.value;
-  const value = buildUsageStatsUncached({ ...options, range });
-  usageStatsCache.set(cacheKey, { at: Date.now(), value });
+  if (hit && Date.now() - hit.at < (hit.ttl ?? USAGE_RESULT_TTL_MS)) return hit.value;
+
+  let value;
+  if (live) {
+    value = buildUsageStatsUncached({ ...options, range });
+  } else {
+    const data = ensureUsageDailies(win);
+    const dayStats = [];
+    const keys = win.mode === 'all'
+      ? Object.keys(data.days || {}).sort()
+      : usageDayKeys(win);
+    const today = todayKey();
+    for (const day of keys) {
+      if (day === today) continue; // 今天仍在进行，走 live
+      const entry = data.days?.[day];
+      if (entry) dayStats.push(entry);
+    }
+    // 今天不写入日文件/累计，只作为 live 部分追加。
+    const todayStats = buildUsageStats({ range: 'today' });
+    dayStats.push({
+      ...todayStats,
+      days: [{ day: today, ...(todayStats.totals || {}) }]
+    });
+    value = mergeUsageStats(dayStats, {
+      range,
+      rangeLabel: win.label,
+      mode: win.mode
+    });
+  }
+  usageStatsCache.set(cacheKey, { at: Date.now(), value, ttl });
   pruneUsageCache(usageStatsCache, USAGE_RESULT_MAX_KEYS);
   return value;
 }
 
 function buildUsageStatsUncached({ range = '7' } = {}) {
-  const { rows, win, searchCount, toolCounts } = collectUsageRows({ range });
+  const collected = collectUsageRows({ range });
+  return buildUsageStatsFromRows(
+    collected.rows,
+    collected.win,
+    collected.searchCount,
+    collected.toolCounts,
+    range
+  );
+}
+
+function buildUsageStatsFromRows(rows, win, searchCount, toolCounts, range = win?.label || '') {
   const totals = costOfRows(rows);
   // 按天分桶需要 dayKey 字段
   for (const r of rows) r.dayKey = dayKeyOf(r.at);
@@ -5776,6 +6104,17 @@ function buildUsageStatsUncached({ range = '7' } = {}) {
   const models = groupBy(rows, 'modelKey', 0).map((m) => {
     const { vendor, model } = splitModelLabel(m.key);
     return { ...m, vendor, model };
+  });
+  // 三元组（天 × 会话 × 模型）：明细下钻不需要回扫 session。
+  const crossBuckets = new Map();
+  for (const r of rows) {
+    const key = JSON.stringify([r.dayKey, r.chatKey, r.modelKey]);
+    if (!crossBuckets.has(key)) crossBuckets.set(key, []);
+    crossBuckets.get(key).push(r);
+  }
+  const byChatModel = [...crossBuckets.entries()].map(([key, list]) => {
+    const [day, chatKey, modelKey] = JSON.parse(key);
+    return { key, day, chatKey, modelKey, ...costOfRows(list) };
   });
   // 未定价清单：哪些模型没有价格、涉及多少次调用与 token。
   // 页面顶部要把这件事说清楚，否则用户会以为这些调用是免费的。
@@ -5805,6 +6144,7 @@ function buildUsageStatsUncached({ range = '7' } = {}) {
     days: byDay,
     chats,
     models,
+    byChatModel,
     // 包月/本地：不按 token 计价，单独列出（不计入上面的区间成本）
     billing: {
       flatCalls: totals.flatCalls || 0,
@@ -5841,15 +6181,45 @@ function buildUsageBreakdown(options = {}) {
 }
 
 function buildUsageBreakdownUncached({ range = '7', dim = '', key = '', by = '' } = {}) {
+  const stats = buildUsageStats({ range });
+  const hasCross = Array.isArray(stats.byChatModel)
+    && (stats.byChatModel.length > 0 || !(Number(stats.totals?.runs) > 0));
+  if (hasCross) {
+    const fieldOf = (d) => (d === 'day' ? 'day' : d === 'model' ? 'modelKey' : 'chatKey');
+    const subset = dim
+      ? stats.byChatModel.filter((entry) => String(entry[fieldOf(dim)] ?? '') === key)
+      : stats.byChatModel;
+    const groups = mergeUsageGroups(subset, fieldOf(by || 'chat'));
+    const sum = mergeUsageTotals(subset);
+    return {
+      range: String(range),
+      dim, key, by,
+      totals: sum,
+      showPeak: sum.hasPeakModel && (sum.peakCost > 0 || sum.offPeakCost > 0),
+      rows: groups.map((g) => ({
+        key: g.key,
+        cost: g.cost,
+        promptTokens: g.promptTokens,
+        completionTokens: g.completionTokens,
+        cachedTokens: g.cachedTokens,
+        totalTokens: g.totalTokens,
+        cacheHitRate: g.cacheHitRate,
+        runs: g.runs,
+        exactCalls: g.exactCalls,
+        flatCalls: g.flatCalls || 0,
+        flatItems: (g.flatItems || []).slice(0, 5),
+        localCalls: g.localCalls || 0,
+        unpricedCalls: g.unpricedCalls || 0
+      }))
+    };
+  }
+  // 兼容旧缓存：没有 byChatModel 时才回退到 session 扫描。
   const { rows } = collectUsageRows({ range });
   for (const r of rows) r.dayKey = dayKeyOf(r.at);
-  // dim/by 为 model 时按复合身份匹配（模型 + 供应商）
   const fieldOf = (d) => (d === 'day' ? 'dayKey' : d === 'model' ? 'modelKey' : 'chatKey');
   const subset = dim ? rows.filter((r) => String(r[fieldOf(dim)] ?? '') === key) : rows;
-  // 同样不截断：保证明细各项之和 = 该子集总成本
   const groups = groupBy(subset, fieldOf(by) || 'chatKey', 0);
   const sum = costOfRows(subset);
-  // 峰谷信息跟随子集（弹窗外部上方展示用）
   return {
     range: String(range),
     dim, key, by,
@@ -5865,8 +6235,6 @@ function buildUsageBreakdownUncached({ range = '7', dim = '', key = '', by = '' 
       cacheHitRate: g.cacheHitRate,
       runs: g.runs,
       exactCalls: g.exactCalls,
-      // 包月/本地/未定价也要带给明细行：否则这些行的成本列只剩 ¥0.00，
-      // 会被读成"免费"（主表已经用徽标规避了这个问题，明细表同样需要）。
       flatCalls: g.flatCalls || 0,
       flatItems: (g.flatItems || []).slice(0, 5),
       localCalls: g.localCalls || 0,
