@@ -29,7 +29,10 @@ import {
   decidePrivacy,
   disclosureLabel,
   isRecallVisible,
-  privacyRank
+  privacyRank,
+  usableInForScope,
+  PRIVACY_SCOPES,
+  USABLE_IN
 } from './memory-privacy.js';
 import { rankCandidates } from './memory-activation.js';
 import {
@@ -1245,6 +1248,201 @@ export class DailyMemoryStore {
       ORDER BY importance DESC, updated_at DESC LIMIT ? OFFSET ?`;
     params.push(clampInt(limit, 1, 500, 100), clampInt(offset, 0, 100000, 0));
     return this.db.prepare(sql).all(...params).map(entryFromRow);
+  }
+
+  getEntry(id) {
+    return entryFromRow(this.#rowById(id));
+  }
+
+  listVersions(entryId) {
+    const rows = this.db.prepare(`
+      SELECT version, abstract, content, source_date, source_message_ids, reason, created_at
+      FROM memory_entry_versions WHERE entry_id = ? ORDER BY version DESC LIMIT 50
+    `).all(Number(entryId));
+    return rows.map((row) => ({
+      version: Number(row.version) || 1,
+      abstract: String(row.abstract || ''),
+      content: String(row.content || ''),
+      sourceDate: String(row.source_date || ''),
+      sourceMessageIds: jsonArrayOfStrings(row.source_message_ids),
+      reason: String(row.reason || ''),
+      createdAt: Number(row.created_at) || 0
+    }));
+  }
+
+  /** 控制台左侧列表：按会话汇总条目数/最近更新时间/最近总结日。 */
+  listChats() {
+    const rows = this.db.prepare(`
+      SELECT chat_key,
+             COUNT(*) AS total,
+             SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+             MAX(updated_at) AS updatedAt
+      FROM memory_entries GROUP BY chat_key ORDER BY updatedAt DESC
+    `).all();
+    const summaries = this.db.prepare(`
+      SELECT chat_key, MAX(day) AS lastDay FROM daily_summaries GROUP BY chat_key
+    `).all();
+    const lastDay = new Map(summaries.map((row) => [String(row.chat_key), String(row.lastDay || '')]));
+    return rows.map((row) => ({
+      chatKey: String(row.chat_key),
+      total: Number(row.total) || 0,
+      active: Number(row.active) || 0,
+      updatedAt: Number(row.updatedAt) || 0,
+      lastSummaryDay: lastDay.get(String(row.chat_key)) || ''
+    }));
+  }
+
+  listSummaries({ chatKey = '', limit = 30 } = {}) {
+    const rows = chatKey
+      ? this.db.prepare('SELECT * FROM daily_summaries WHERE chat_key = ? ORDER BY day DESC LIMIT ?')
+        .all(String(chatKey), clampInt(limit, 1, 200, 30))
+      : this.db.prepare('SELECT * FROM daily_summaries ORDER BY day DESC LIMIT ?')
+        .all(clampInt(limit, 1, 200, 30));
+    return rows.map((row) => ({
+      chatKey: String(row.chat_key), day: String(row.day),
+      overview: String(row.overview || ''), summary: String(row.summary || ''),
+      details: String(row.details || ''), messageCount: Number(row.message_count) || 0,
+      entryCount: Number(row.entry_count) || 0, updatedAt: Number(row.updated_at) || 0
+    }));
+  }
+
+  /** 最近召回记录（带条目摘要），用于解释“为什么想起它”。 */
+  listRecallLog({ chatKey = '', limit = 50 } = {}) {
+    const rows = this.db.prepare(`
+      SELECT l.id, l.entry_id, l.chat_key, l.query_hash, l.score, l.matched_by, l.injected, l.at,
+             e.kind, e.subject, e.abstract
+      FROM memory_recall_log l
+      LEFT JOIN memory_entries e ON e.id = l.entry_id
+      ${chatKey ? 'WHERE l.chat_key = ?' : ''}
+      ORDER BY l.at DESC LIMIT ?
+    `).all(
+      ...(chatKey ? [String(chatKey)] : []),
+      clampInt(limit, 1, 500, 50)
+    );
+    return rows.map((row) => ({
+      id: Number(row.id) || 0,
+      entryId: Number(row.entry_id) || 0,
+      chatKey: String(row.chat_key || ''),
+      score: Number(row.score) || 0,
+      matchedBy: String(row.matched_by || ''),
+      injected: Boolean(row.injected),
+      at: Number(row.at) || 0,
+      kind: String(row.kind || ''),
+      subject: String(row.subject || ''),
+      abstract: String(row.abstract || '')
+    }));
+  }
+
+  /** 固定为精确记忆：不被自动衰减/细节淡出。 */
+  pinEntry(id) {
+    const row = this.#rowById(id);
+    if (!row) return null;
+    const abstract = String(row.abstract || '');
+    const content = String(row.content || '') || abstract;
+    const keywords = jsonArrayOfStrings(row.keywords);
+    const searchText = buildSearchText({ abstract, content, keywords });
+    this.#update(row.id, {
+      fidelity: 'verbatim',
+      status: 'active',
+      content,
+      strength: Math.max(1.5, Number(row.strength) || 0),
+      detailFadedAt: 0,
+      updatedAt: this.now(),
+      searchText
+    });
+    this.#syncFts(row.id, searchText);
+    return this.getEntry(row.id);
+  }
+
+  /** 软删除（模型不可见；控制台仍可查）。hard=true 时连版本与 FTS 一起删。 */
+  forgetEntry(id, { hard = false } = {}) {
+    const row = this.#rowById(id);
+    if (!row) return false;
+    if (!hard) {
+      this.#update(row.id, { status: 'deleted', updatedAt: this.now() });
+      return true;
+    }
+    this.#tx(() => {
+      this.#deleteFts(row.id);
+      this.db.prepare('DELETE FROM memory_entry_versions WHERE entry_id = ?').run(Number(row.id));
+      this.db.prepare('DELETE FROM memory_recall_log WHERE entry_id = ?').run(Number(row.id));
+      this.db.prepare('DELETE FROM memory_entries WHERE id = ?').run(Number(row.id));
+    });
+    return true;
+  }
+
+  /** 管理员手动改隐私作用域；自动抽取永远不能放宽既往结论。 */
+  setEntryPrivacy(id, changes = {}) {
+    const row = this.#rowById(id);
+    if (!row) throw new Error('记忆条目不存在');
+    const scope = String(changes.privacyScope || row.privacy_scope || 'chat').trim();
+    if (!PRIVACY_SCOPES.includes(scope)) throw new Error(`privacyScope 非法：${scope}`);
+    const subjectUserId = scope === 'person'
+      ? String(changes.subjectUserId || row.subject_user_id || '').trim()
+      : '';
+    if (scope === 'person' && !validUid(subjectUserId)) {
+      throw new Error('person 作用域必须提供有效 subjectUserId');
+    }
+    const usableRaw = String(changes.usableIn || '').trim();
+    let usableIn = USABLE_IN.includes(usableRaw) ? usableRaw : usableInForScope(scope);
+    if (scope === 'secret') usableIn = 'source';
+    const disclosable = scope === 'knowledge' && changes.disclosable !== false;
+    const sensitivity = ['low', 'medium', 'high'].includes(String(changes.sensitivity))
+      ? String(changes.sensitivity)
+      : (scope === 'secret' ? 'high' : scope === 'person' ? 'medium' : 'low');
+    const pathValue = memoryPathFor({
+      privacyScope: scope,
+      storageScope: String(row.scope || 'chat'),
+      chatKey: String(row.chat_key || ''),
+      kind: String(row.kind || 'fact'),
+      subject: String(row.subject || ''),
+      userId: subjectUserId || String(row.user_id || ''),
+      sourceDate: String(row.source_date || ''),
+      now: this.now()
+    });
+    this.#update(row.id, {
+      privacyScope: scope,
+      usableIn,
+      disclosable,
+      subjectUserId,
+      sensitivity,
+      classifiedBy: 'manual',
+      privacyReason: clean(changes.reason, 160) || '管理员手动调整',
+      path: pathValue,
+      updatedAt: this.now()
+    });
+    return this.getEntry(row.id);
+  }
+
+  /**
+   * 保留期清理：软删除/被替代/淡出的旧条目超过 retentionDays 后物理删除；
+   * 同时清理过期的每日总结。返回删除计数。
+   */
+  pruneRetention({
+    now = this.now(), retentionDays = this.dailyConfig.retentionDays, limit = 500
+  } = {}) {
+    const days = clampInt(retentionDays, 7, 3650, 180);
+    const cutoff = Number(now) - days * DAY_MS;
+    const rows = this.db.prepare(`
+      SELECT id FROM memory_entries
+      WHERE status IN ('faded', 'superseded', 'deleted') AND updated_at < ?
+      LIMIT ?
+    `).all(cutoff, clampInt(limit, 1, 5000, 500));
+    let entries = 0;
+    let summaries = 0;
+    this.#tx(() => {
+      for (const row of rows) {
+        this.#deleteFts(row.id);
+        this.db.prepare('DELETE FROM memory_entry_versions WHERE entry_id = ?').run(Number(row.id));
+        this.db.prepare('DELETE FROM memory_recall_log WHERE entry_id = ?').run(Number(row.id));
+        this.db.prepare('DELETE FROM memory_entries WHERE id = ?').run(Number(row.id));
+        entries += 1;
+      }
+      const dayCutoff = todayKey(cutoff);
+      const removed = this.db.prepare('DELETE FROM daily_summaries WHERE day < ?').run(dayCutoff);
+      summaries = Number(removed.changes) || 0;
+    });
+    return { entries, summaries };
   }
 
   stats() {

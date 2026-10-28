@@ -58,6 +58,20 @@ curl -H "Cookie: qq_agent_token=..." http://127.0.0.1:3210/api/daily-memory/stat
 curl -X POST -H "Cookie: qq_agent_token=..." -H "content-type: application/json" \
   -d '{"day":"2026-10-01","force":true}' \
   http://127.0.0.1:3210/api/daily-memory/run
+
+# 条目 / 召回记录 / 每日总结
+GET  /api/daily-memory/entries?chatKey=group:123&status=active
+GET  /api/daily-memory/entries/:id
+GET  /api/daily-memory/recall-log?chatKey=group:123&limit=50
+GET  /api/daily-memory/summaries?chatKey=group:123
+GET  /api/daily-memory/chats
+
+# 管理动作
+POST /api/daily-memory/entries/:id/pin        # 固定为精确记忆
+POST /api/daily-memory/entries/:id/forget     # {hard:true} 才物理删除
+POST /api/daily-memory/entries/:id/privacy    # {privacyScope, subjectUserId}
+POST /api/daily-memory/consolidate            # {chatKey?}
+POST /api/daily-memory/prune                  # 按保留期清理
 ```
 
 ## 模型怎么用
@@ -78,9 +92,12 @@ curl -X POST -H "Cookie: qq_agent_token=..." -H "content-type: application/json"
 - 失败（模型不可用、坏 JSON）只把当天任务标 `failed`/`interrupted`，不阻塞聊天；
   下次定时/手动运行会重试。
 
-## Phase 1 边界
+## Phase 1/2 边界
 
 - 不做 embedding/向量召回；先走结构化作用域 + FTS/关键词 + 激活分数。
 - 不做聊天内实时抽取；暗号等当天要用的内容仍由模型 `memory_append` 或当轮上下文处理。
-- 控制台的长期记忆浏览/编辑页尚未接入，目前用 `GET /api/daily-memory/status` 与数据库查看。
+- 持久化配置：控制台「设置 → 记忆 → 每日长期记忆」已接入开关、运行时间、最少消息、会话上限、
+  模糊记忆开关、细节保留天数、召回阈值与跨会话知识开关。
+- 会话记忆页已接入长期记忆列表、固定为精确、忘记、修改隐私作用域与最近召回记录。
 - 旧人物印象（`data/memory/people/<QQ>.json`）继续独立运行；长期事实与印象在注入时去重。
+- 目录级 L1 概览、`memory_dirs` 与抽象级 embedding 属于 Phase 3。

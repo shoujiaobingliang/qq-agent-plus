@@ -2052,6 +2052,100 @@ export function createApp({
     if (!dailyMemoryManager) return json(res, 200, { enabled: false, unavailable: true });
     return json(res, 200, dailyMemoryManager.status());
   });
+  const dailyMemoryEntryView = (entry) => {
+    if (!entry) return null;
+    const { embedding, ...rest } = entry;
+    return rest;
+  };
+  router.add('GET', '/api/daily-memory/chats', async (req, res) => {
+    if (!dailyMemoryStore) return json(res, 200, { chats: [] });
+    return json(res, 200, { chats: dailyMemoryStore.listChats() });
+  });
+  router.add('GET', '/api/daily-memory/entries', async (req, res, params, url) => {
+    if (!dailyMemoryStore) return json(res, 200, { entries: [] });
+    const entries = dailyMemoryStore.listEntries({
+      chatKey: String(url.searchParams.get('chatKey') || ''),
+      query: String(url.searchParams.get('query') || ''),
+      kind: String(url.searchParams.get('kind') || ''),
+      fidelity: String(url.searchParams.get('fidelity') || ''),
+      privacyScope: String(url.searchParams.get('privacyScope') || ''),
+      status: String(url.searchParams.get('status') || 'active'),
+      limit: Number(url.searchParams.get('limit')) || 100,
+      offset: Number(url.searchParams.get('offset')) || 0
+    });
+    return json(res, 200, { entries: entries.map(dailyMemoryEntryView) });
+  });
+  router.add('GET', '/api/daily-memory/entries/:id', async (req, res, params) => {
+    if (!dailyMemoryStore) return json(res, 404, { error: '长期记忆未启用' });
+    const entry = dailyMemoryStore.getEntry(Number(params.id));
+    if (!entry) return json(res, 404, { error: '记忆条目不存在' });
+    return json(res, 200, {
+      entry: dailyMemoryEntryView(entry),
+      versions: dailyMemoryStore.listVersions ? dailyMemoryStore.listVersions(entry.id) : []
+    });
+  });
+  router.add('POST', '/api/daily-memory/entries/:id/pin', async (req, res, params) => {
+    if (!dailyMemoryStore) return json(res, 503, { error: '长期记忆未启用' });
+    const entry = dailyMemoryStore.pinEntry(Number(params.id));
+    if (!entry) return json(res, 404, { error: '记忆条目不存在' });
+    return json(res, 200, { entry: dailyMemoryEntryView(entry) });
+  });
+  router.add('POST', '/api/daily-memory/entries/:id/forget', async (req, res, params) => {
+    if (!dailyMemoryStore) return json(res, 503, { error: '长期记忆未启用' });
+    const body = await readBody(req);
+    const ok = dailyMemoryStore.forgetEntry(Number(params.id), { hard: body.hard === true });
+    if (!ok) return json(res, 404, { error: '记忆条目不存在' });
+    return json(res, 200, { ok: true, hard: body.hard === true });
+  });
+  router.add('POST', '/api/daily-memory/entries/:id/privacy', async (req, res, params) => {
+    if (!dailyMemoryStore) return json(res, 503, { error: '长期记忆未启用' });
+    const body = await readBody(req);
+    try {
+      const entry = dailyMemoryStore.setEntryPrivacy(Number(params.id), body);
+      return json(res, 200, { entry: dailyMemoryEntryView(entry) });
+    } catch (error) {
+      return json(res, 400, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('GET', '/api/daily-memory/recall-log', async (req, res, params, url) => {
+    if (!dailyMemoryStore) return json(res, 200, { entries: [] });
+    return json(res, 200, {
+      entries: dailyMemoryStore.listRecallLog({
+        chatKey: String(url.searchParams.get('chatKey') || ''),
+        limit: Number(url.searchParams.get('limit')) || 50
+      })
+    });
+  });
+  router.add('GET', '/api/daily-memory/summaries', async (req, res, params, url) => {
+    if (!dailyMemoryStore) return json(res, 200, { summaries: [] });
+    return json(res, 200, {
+      summaries: dailyMemoryStore.listSummaries({
+        chatKey: String(url.searchParams.get('chatKey') || ''),
+        limit: Number(url.searchParams.get('limit')) || 30
+      })
+    });
+  });
+  router.add('POST', '/api/daily-memory/consolidate', async (req, res) => {
+    if (!dailyMemoryStore) return json(res, 503, { error: '长期记忆未启用' });
+    const body = await readBody(req);
+    try {
+      const result = dailyMemoryStore.consolidate({
+        chatKey: String(body.chatKey || ''),
+        now: Date.now()
+      });
+      return json(res, 200, result);
+    } catch (error) {
+      return json(res, 500, { error: String(error?.message ?? error) });
+    }
+  });
+  router.add('POST', '/api/daily-memory/prune', async (req, res) => {
+    if (!dailyMemoryStore) return json(res, 503, { error: '长期记忆未启用' });
+    try {
+      return json(res, 200, dailyMemoryStore.pruneRetention({ now: Date.now() }));
+    } catch (error) {
+      return json(res, 500, { error: String(error?.message ?? error) });
+    }
+  });
   // 心情：当前快照 + 最近变化流水 + 最近 7 天汇总。顶部栏走 /api/status，设置页走这里。
   router.add('GET', '/api/mood', async (_req, res) => json(res, 200, {
     ok: true,

@@ -1,6 +1,6 @@
 # 拟人记忆系统落地设计（Human-like Memory v1）
 
-> 状态：Phase 1 已实现（默认关闭），用户向说明见 [`../DAILY-MEMORY.md`](../DAILY-MEMORY.md)；本文保留完整设计与后续阶段。
+> 状态：Phase 1 已实现（默认关闭），Phase 2 的条目管理/召回日志/作用域修正已接入；用户向说明见 [`../DAILY-MEMORY.md`](../DAILY-MEMORY.md)。
 > 基础方案见 [`daily-memory.md`](daily-memory.md)；本文在其之上补“像人一样记、像人一样忘、像人一样想起”的层。
 > 目标不是做知识库，而是让机器人对群聊形成**重要的事记得准、日常的事记得糊、由线索自然想起**的记忆。
 

@@ -190,6 +190,45 @@ test('formatForPrompt：固定约定 + 模糊/只用不说标记', () => {
   assert.match(text, /模糊|只用不说/);
 });
 
+test('listVersions 能查到 supersede 前的版本', () => {
+  const old = store.listEntries({ chatKey: 'group:1', status: 'superseded', limit: 10 })[0];
+  assert.ok(old);
+  const versions = store.listVersions(old.id);
+  assert.ok(versions.length >= 1);
+  assert.ok(versions[0].abstract);
+});
+
+test('pin / privacy / forget / listChats / recall log', () => {
+  const entry = store.listEntries({ chatKey: 'group:1', status: '', limit: 50 })
+    .find((item) => item.subject === '重复测试');
+  assert.ok(entry);
+
+  const pinned = store.pinEntry(entry.id);
+  assert.equal(pinned.fidelity, 'verbatim');
+  assert.ok(pinned.content.length > 0);
+
+  assert.throws(
+    () => store.setEntryPrivacy(entry.id, { privacyScope: 'person' }),
+    /subjectUserId/
+  );
+  const adjusted = store.setEntryPrivacy(entry.id, {
+    privacyScope: 'person', subjectUserId: '10001', reason: '管理员调整'
+  });
+  assert.equal(adjusted.privacyScope, 'person');
+  assert.equal(adjusted.usableIn, 'person');
+  assert.equal(adjusted.disclosable, false);
+  assert.equal(adjusted.classifiedBy, 'manual');
+
+  const chats = store.listChats();
+  assert.ok(chats.some((chat) => chat.chatKey === 'group:1' && chat.total >= 1));
+  assert.ok(Array.isArray(store.listRecallLog({ limit: 10 })));
+
+  assert.equal(store.forgetEntry(entry.id), true);
+  assert.equal(store.getEntry(entry.id).status, 'deleted');
+  assert.ok(!store.listEntries({ chatKey: 'group:1', status: 'active', limit: 50 })
+    .some((item) => item.id === entry.id));
+});
+
 test('lookup：按关键词查摘要，默认不返回 content', () => {
   const found = store.lookup({
     chatKey: 'group:1', query: '开黑', relevantUserIds: [], record: false
@@ -215,4 +254,13 @@ test('stats 能给出状态/保真度/隐私分布', () => {
   assert.ok(stats.active >= 1);
   assert.ok(stats.byFidelity.verbatim >= 1);
   assert.ok(stats.byPrivacy.knowledge >= 1);
+});
+
+test('pruneRetention 物理删除超过保留期的软删除条目', () => {
+  const deleted = store.listEntries({ status: 'deleted', limit: 10 })[0];
+  assert.ok(deleted);
+  clock += 200 * DAY;
+  const result = store.pruneRetention({ now: clock, retentionDays: 180 });
+  assert.ok(result.entries >= 1);
+  assert.equal(store.getEntry(deleted.id), null);
 });

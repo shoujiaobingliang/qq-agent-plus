@@ -109,6 +109,33 @@ async function saveConfig({ quiet = false } = {}) {
         hidePrivateInGroup: chk('#cfg-mem-hideprivate', c.memory?.visibility?.hidePrivateInGroup === true)
       }
     };
+    const dmActivation = Number(val('#cfg-dm-activation', c.dailyMemory?.human?.activationMin ?? 0.25));
+    patch.dailyMemory = {
+      ...(c.dailyMemory || {}),
+      enabled: chk('#cfg-dm-enabled', c.dailyMemory?.enabled === true),
+      time: val('#cfg-dm-time', c.dailyMemory?.time || '04:10').trim() || '04:10',
+      minMessages: memThreshold(val('#cfg-dm-min', c.dailyMemory?.minMessages ?? 2), c.dailyMemory?.minMessages, 100, 2),
+      maxChats: memThreshold(val('#cfg-dm-maxchats', c.dailyMemory?.maxChats ?? 20), c.dailyMemory?.maxChats, 100, 20),
+      human: {
+        ...(c.dailyMemory?.human || {}),
+        enabled: chk('#cfg-dm-human', c.dailyMemory?.human?.enabled !== false),
+        gistDetailDays: memThreshold(
+          val('#cfg-dm-gist-days', c.dailyMemory?.human?.gistDetailDays ?? 30),
+          c.dailyMemory?.human?.gistDetailDays, 365, 30
+        ),
+        activationMin: Number.isFinite(dmActivation) ? Math.min(1, Math.max(0, dmActivation)) : 0.25,
+        maxRecall: memThreshold(
+          val('#cfg-dm-max-recall', c.dailyMemory?.human?.maxRecall ?? 8),
+          c.dailyMemory?.human?.maxRecall, 20, 8
+        ),
+        privacy: {
+          ...(c.dailyMemory?.human?.privacy || {}),
+          allowKnowledgeAcrossChats: chk(
+            '#cfg-dm-knowledge', c.dailyMemory?.human?.privacy?.allowKnowledgeAcrossChats !== false
+          )
+        }
+      }
+    };
   }
 
   if (sec === 'experiments') {

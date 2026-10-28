@@ -100,9 +100,11 @@ async function loadMemoryDetail(chatKey) {
   const seq = (state.memoryDetailSeq = (state.memoryDetailSeq || 0) + 1);
   detail.innerHTML = '<div class="empty-hint">加载中…</div>';
   try {
-    const [mem, cfg] = await Promise.all([
+    const [mem, cfg, daily, dailyLog] = await Promise.all([
       api(`/api/memory-files/${chatKey.replace(':', '_')}`),
-      api('/api/config')
+      api('/api/config'),
+      api(`/api/daily-memory/entries?chatKey=${encodeURIComponent(chatKey)}&status=active&limit=200`).catch(() => ({ entries: [] })),
+      api(`/api/daily-memory/recall-log?chatKey=${encodeURIComponent(chatKey)}&limit=20`).catch(() => ({ entries: [] }))
     ]);
     if (seq !== state.memoryDetailSeq) return;
     const notes = cfg.memberNotes || {};
@@ -178,6 +180,40 @@ async function loadMemoryDetail(chatKey) {
     } else {
       consolidateStatusHtml = `<span id="mem-consolidate-status" class="muted"></span>`;
     }
+    const dailyEntries = Array.isArray(daily?.entries) ? daily.entries : [];
+    const recallLog = Array.isArray(dailyLog?.entries) ? dailyLog.entries : [];
+    const fidelityLabel = { verbatim: '精确', gist: '模糊', transient: '临时' };
+    const privacyLabel = { knowledge: '通用知识', chat: '本群', person: '某人', secret: '私密' };
+    const scopeOptions = (current) => ['knowledge', 'chat', 'person', 'secret'].map((scope) =>
+      `<option value="${scope}" ${scope === current ? 'selected' : ''}>${privacyLabel[scope] || scope}</option>`).join('');
+    const dailyRows = dailyEntries.map((entry) => `
+      <div class="daily-memory-item collapsible" data-id="${entry.id}" data-user-id="${esc(entry.subjectUserId || '')}" data-scope="${esc(entry.privacyScope || 'chat')}">
+        <summary>
+          <strong>${esc(entry.subject || entry.kind)}</strong>
+          <span class="muted">${esc(entry.kind)} · ${fidelityLabel[entry.fidelity] || entry.fidelity} · ${privacyLabel[entry.privacyScope] || entry.privacyScope} · 重要度 ${entry.importance} · 强度 ${Number(entry.strength || 0).toFixed(2)}</span>
+        </summary>
+        <div class="coll-body">
+          <div>${esc(entry.abstract)}</div>
+          ${entry.content ? `<details><summary>细节</summary><div class="muted">${esc(entry.content)}</div></details>` : ''}
+          <div class="memory-handoff-actions">
+            <select class="dm-scope" title="修改隐私作用域">${scopeOptions(entry.privacyScope)}</select>
+            <button class="btn btn-small dm-pin">固定为精确</button>
+            <button class="btn btn-danger btn-small dm-forget">忘记</button>
+            <span class="muted">更新于 ${fmtTime(entry.updatedAt || 0)}</span>
+          </div>
+        </div>
+      </div>`).join('');
+    const recallRows = recallLog.map((item) => `
+      <div class="muted">${fmtTime(item.at || 0)} · ${esc(item.subject || item.kind || '记忆')} · ${esc(item.matchedBy || '')} · ${Number(item.score || 0).toFixed(2)}</div>
+    `).join('');
+    const dailyHtml = `
+      <details class="collapsible memory-daily" open>
+        <summary>长期记忆（${dailyEntries.length} 条）</summary>
+        <div class="coll-body">
+          ${dailyRows || '<div class="muted">还没有长期记忆（开启「每日长期记忆」后会按天抽取；也可以手动运行一次）</div>'}
+          ${recallRows ? `<details><summary>最近召回</summary><div class="coll-body">${recallRows}</div></details>` : ''}
+        </div>
+      </details>`;
     detail.innerHTML = `
       <div class="detail-header">
         <h2>${esc(formatChatTitle(chatKey, chatNameOf(chatKey)))} 的记忆</h2>
@@ -189,6 +225,7 @@ async function loadMemoryDetail(chatKey) {
         </div>
       </div>
       ${handoffHtml}
+      ${dailyHtml}
       ${membersHtml}
       ${rows || '<div class="muted" style="padding:10px">还没有任何群友印象（可点右上角「＋ 添加印象」手动记，或点「整理本群记忆」让模型从聊天记录里提炼）。</div>'}
     `;
@@ -308,6 +345,65 @@ async function loadMemoryDetail(chatKey) {
         if (btn) { btn.disabled = false; btn.textContent = '整理本群记忆'; }
         renderMemoryList();
       }
+    });
+    $$('.dm-pin', detail).forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const item = btn.closest('.daily-memory-item');
+        if (!item) return;
+        btn.disabled = true;
+        try {
+          await api(`/api/daily-memory/entries/${item.dataset.id}/pin`, { method: 'POST', body: '{}' });
+          await loadMemoryDetail(chatKey);
+        } catch (err) {
+          btn.disabled = false;
+          alert(`固定失败：${err.message}`);
+        }
+      });
+    });
+    $$('.dm-forget', detail).forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const item = btn.closest('.daily-memory-item');
+        if (!item) return;
+        if (!await askForConfirmation('确定忘记这条长期记忆？模型之后不会再召回它，控制台仍可在“已删除”里查到。')) return;
+        btn.disabled = true;
+        try {
+          await api(`/api/daily-memory/entries/${item.dataset.id}/forget`, {
+            method: 'POST', body: '{}'
+          });
+          await loadMemoryDetail(chatKey);
+        } catch (err) {
+          btn.disabled = false;
+          alert(`忘记失败：${err.message}`);
+        }
+      });
+    });
+    $$('.dm-scope', detail).forEach((select) => {
+      select.addEventListener('change', async () => {
+        const item = select.closest('.daily-memory-item');
+        if (!item) return;
+        const scope = select.value;
+        const userId = String(item.dataset.userId || '').trim();
+        if (scope === 'person' && !/^\d{1,15}$/.test(userId)) {
+          alert('这条记忆没有关联 QQ，不能设为“某人”；请先补上人物记忆。');
+          select.value = item.dataset.scope || 'chat';
+          return;
+        }
+        select.disabled = true;
+        try {
+          await api(`/api/daily-memory/entries/${item.dataset.id}/privacy`, {
+            method: 'POST',
+            body: JSON.stringify({ privacyScope: scope, subjectUserId: userId })
+          });
+          await loadMemoryDetail(chatKey);
+        } catch (err) {
+          select.disabled = false;
+          alert(`修改作用域失败：${err.message}`);
+        }
+      });
     });
     // 若本群正在整理，启动计时刷新（切回来时也能接着走）
     if (state.consolidating[chatKey]) startConsolidateTicker();

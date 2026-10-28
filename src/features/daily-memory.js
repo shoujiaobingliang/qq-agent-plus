@@ -256,6 +256,9 @@ export class DailyMemoryManager {
       for (const key of chats) {
         results.push(await this.#runChat(key, targetDay, window, cfg, { force }));
       }
+      if (!chatKey) {
+        try { this.store.pruneRetention?.({ now: this.now() }); } catch { /* 清理失败不影响抽取结果 */ }
+      }
     } finally {
       this.running = false;
       this.abortController = null;

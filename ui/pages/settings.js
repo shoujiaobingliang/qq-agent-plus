@@ -543,6 +543,9 @@ function renderSearchSection(c) {
 function renderMemorySettingsSection(c) {
   const mem = c.memory || {};
   const vis = mem.visibility || {};   // #13 可见性策略（默认 global + 不隐藏）
+  const dm = c.dailyMemory || {};
+  const human = dm.human || {};
+  const dmPrivacy = human.privacy || {};
   const providers = state.providers || [];
   const useChat = mem.useChatModel !== false;
   const selP = providers.find((p) => p.id === mem.provider);
@@ -580,7 +583,32 @@ function renderMemorySettingsSection(c) {
       <div class="hint">改成「仅本会话」后，模型在群里只看得到这个群里观察到的印象；控制台人物记忆页仍可查全部（来源不交给模型）。</div>
     </div>
     <div class="checkbox-row"><input type="checkbox" id="cfg-mem-hideprivate" ${vis.hidePrivateInGroup ? 'checked' : ''} />
-      <label for="cfg-mem-hideprivate">群聊里隐藏「私聊来源」的印象</label></div>`;
+      <label for="cfg-mem-hideprivate">群聊里隐藏「私聊来源」的印象</label></div>
+
+    <h3 id="settings-daily-memory">每日长期记忆</h3>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-dm-enabled" ${dm.enabled === true ? 'checked' : ''} />
+      <label for="cfg-dm-enabled">启用（每天抽取前一自然日的重要约定/事实/事件）</label></div>
+    <div class="field-row">
+      <div class="field"><label>运行时间（上海时间）</label>
+        <input type="time" id="cfg-dm-time" value="${esc(dm.time || '04:10')}" /></div>
+      <div class="field"><label>最少消息数</label>
+        <input type="number" id="cfg-dm-min" min="1" max="100" value="${esc(dm.minMessages ?? 2)}" /></div>
+      <div class="field"><label>每天最多处理会话数</label>
+        <input type="number" id="cfg-dm-maxchats" min="1" max="100" value="${esc(dm.maxChats ?? 20)}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-dm-human" ${human.enabled !== false ? 'checked' : ''} />
+      <label for="cfg-dm-human">启用模糊记忆、激活召回与强度衰减</label></div>
+    <div class="field-row">
+      <div class="field"><label>日常细节保留天数</label>
+        <input type="number" id="cfg-dm-gist-days" min="0" max="365" value="${esc(human.gistDetailDays ?? 30)}" /></div>
+      <div class="field"><label>召回阈值（0-1）</label>
+        <input type="number" id="cfg-dm-activation" min="0" max="1" step="0.05" value="${esc(human.activationMin ?? 0.25)}" /></div>
+      <div class="field"><label>每次召回上限</label>
+        <input type="number" id="cfg-dm-max-recall" min="1" max="20" value="${esc(human.maxRecall ?? 8)}" /></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="cfg-dm-knowledge" ${dmPrivacy.allowKnowledgeAcrossChats !== false ? 'checked' : ''} />
+      <label for="cfg-dm-knowledge">允许私聊学到的通用知识在群里使用（个人秘密仍不会跨会话）</label></div>
+    <div class="hint">长期记忆写在 data/memory/daily-memory.sqlite；默认关闭。每次运行会调用一次模型，按 maxChats 封顶。条目管理与召回记录在「记忆」页查看。</div>`;
 }
 
 function renderTimeControlSection(c) {
