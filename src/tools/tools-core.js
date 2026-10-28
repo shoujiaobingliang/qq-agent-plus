@@ -2466,15 +2466,20 @@ export function buildToolDefs() {
         const activeIds = (ctx.store.activeMembers(ctx.chatKey, 20) || [])
           .map((member) => String(member.userId || ''))
           .filter((id) => /^\d{1,15}$/.test(id));
-        const entries = ctx.dailyMemory.lookup({
-          chatKey: ctx.chatKey,
-          query: String(args.query || ''),
-          userId,
-          kind,
-          relevantUserIds: userId ? [userId, ...activeIds] : activeIds,
-          includeContent: args.includeContent === true,
-          limit: 10
-        });
+        let entries = [];
+        try {
+          entries = ctx.dailyMemory.lookup({
+            chatKey: ctx.chatKey,
+            query: String(args.query || ''),
+            userId,
+            kind,
+            relevantUserIds: userId ? [userId, ...activeIds] : activeIds,
+            includeContent: args.includeContent === true,
+            limit: 10
+          });
+        } catch (error) {
+          return err(`长期记忆读取失败：${error?.message ?? error}`);
+        }
         if (!entries.length) return ok('没有找到匹配的长期记忆。');
         return ok(sanitizeDeep({
           entries: entries.map((entry) => ({

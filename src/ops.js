@@ -967,6 +967,12 @@ async function auditServer(args) {
     }
     noteLine(`${name.padEnd(26)} integrity=${sqliteIntegrity(file)}`);
   }
+  const dailyMemoryFile = path.join(cfg.dataDir, 'memory', 'daily-memory.sqlite');
+  if (exists(dailyMemoryFile)) {
+    noteLine(`daily-memory.sqlite${' '.repeat(10)} integrity=${sqliteIntegrity(dailyMemoryFile)}`);
+  } else {
+    noteLine('（缺 daily-memory.sqlite；每日长期记忆未启用或尚未运行）');
+  }
   const sessionsDir = path.join(cfg.dataDir, 'sessions');
   let sessionCount = 0;
   if (exists(sessionsDir)) {

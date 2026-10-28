@@ -89,7 +89,6 @@ export class DailyMemoryManager {
     if (this.abortController) {
       try { this.abortController.abort(); } catch { /* 已中止 */ }
     }
-    this.abortController = null;
   }
 
   #schedule() {
@@ -154,7 +153,7 @@ export class DailyMemoryManager {
     };
   }
 
-  async #runChat(chatKey, day, window, cfg, { force = false } = {}) {
+  async #runChat(chatKey, day, window, cfg, { force = false, signal = null } = {}) {
     const job = this.store.getJob(chatKey, day);
     if (!force && (job?.status === 'done' || job?.status === 'empty')) {
       return { chatKey, status: 'skipped', reason: 'already done' };
@@ -198,7 +197,7 @@ export class DailyMemoryManager {
       });
       const result = await this.complete({
         messages: prompt,
-        signal: this.abortController?.signal || null,
+        signal,
         overrides: this.#overrides(cfg)
       });
       const parsed = parseExtractionResult(result?.text || '', {
@@ -226,7 +225,7 @@ export class DailyMemoryManager {
         rejected: parsed.rejected.length
       };
     } catch (error) {
-      const aborted = this.abortController?.signal?.aborted === true || error?.name === 'AbortError';
+      const aborted = signal?.aborted === true || error?.name === 'AbortError';
       this.store.setJob(chatKey, day, {
         status: aborted ? 'interrupted' : 'failed',
         error: String(error?.message ?? error).slice(0, 300),
@@ -282,19 +281,21 @@ export class DailyMemoryManager {
     if (!chats.length) return { day: targetDay, source, results: [] };
 
     this.running = true;
-    this.abortController = new AbortController();
+    const controller = new AbortController();
+    this.abortController = controller;
+    const signal = controller.signal;
     const results = [];
     try {
       for (const key of chats) {
-        if (this.abortController?.signal?.aborted) break;
-        results.push(await this.#runChat(key, targetDay, window, runCfg, { force }));
+        if (signal.aborted) break;
+        results.push(await this.#runChat(key, targetDay, window, runCfg, { force, signal }));
       }
       if (!chatKey) {
         try { this.store.pruneRetention?.({ now: this.now() }); } catch { /* 清理失败不影响抽取结果 */ }
       }
     } finally {
       this.running = false;
-      this.abortController = null;
+      if (this.abortController === controller) this.abortController = null;
     }
     this.lastRun = { day: targetDay, at: this.now(), source, results };
     return { day: targetDay, source, results };

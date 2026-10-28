@@ -504,6 +504,7 @@ export class DailyMemoryStore {
         case 'source_message_ids': return JSON.stringify(candidate.sourceMessageIds || []);
         case 'keywords': return JSON.stringify(candidate.keywords || []);
         case 'disclosable': return candidate.disclosable ? 1 : 0;
+        case 'embedding': return candidate.embedding ?? null;
         default: return candidate[Object.keys(COLUMN_MAP).find((key) => COLUMN_MAP[key] === column)] ?? '';
       }
     });
@@ -1134,9 +1135,15 @@ export class DailyMemoryStore {
   formatForPrompt(chatKey, {
     relevantUserIds = [], mentionedUserIds = [], query = '', now = this.now(), maxChars = null
   } = {}) {
-    const entries = this.recall({
-      chatKey, relevantUserIds, mentionedUserIds, query, now, record: true, includeContent: false
-    });
+    let entries;
+    try {
+      entries = this.recall({
+        chatKey, relevantUserIds, mentionedUserIds, query, now, record: true, includeContent: false
+      });
+    } catch {
+      // 记忆库损坏/占用不能拖垮聊天：读失败就当这次没有长期记忆。
+      return '';
+    }
     if (!entries.length) return '';
     const lines = ['【长期记忆】'];
     for (const entry of entries) {

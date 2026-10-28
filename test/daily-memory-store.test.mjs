@@ -264,3 +264,9 @@ test('pruneRetention 物理删除超过保留期的软删除条目', () => {
   assert.ok(result.entries >= 1);
   assert.equal(store.getEntry(deleted.id), null);
 });
+
+test('数据库关闭后 formatForPrompt 返回空串而不是把异常抛进聊天', () => {
+  const isolated = makeStore();
+  isolated.close();
+  assert.equal(isolated.formatForPrompt('group:1'), '');
+});

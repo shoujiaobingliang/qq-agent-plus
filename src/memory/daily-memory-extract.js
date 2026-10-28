@@ -227,13 +227,16 @@ function normalizePrivacyGuess(raw, kind, scope) {
   const validScope = ['knowledge', 'chat', 'person', 'secret'].includes(scopeGuess)
     ? scopeGuess
     : (scope === 'person' || String(kind).startsWith('person_') ? 'person' : 'chat');
+  const hasConfidence = value.confidence !== undefined && value.confidence !== null
+    && String(value.confidence).trim() !== '';
   return {
     scope_guess: validScope,
     subject_user_id: clean(value.subject_user_id || value.userId || '', 20),
     sensitivity: ['low', 'medium', 'high'].includes(String(value.sensitivity))
       ? String(value.sensitivity)
       : 'low',
-    confidence: clamp01(value.confidence, 0),
+    // 模型常省略 confidence；有明确 scope_guess 时按“尚可”处理，而不是一律当 0 降成 secret。
+    confidence: hasConfidence ? clamp01(value.confidence, 0) : 0.7,
     reason: clean(value.reason, 160)
   };
 }
