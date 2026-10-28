@@ -4,7 +4,7 @@
 [`docs/CHANGES.md`](docs/CHANGES.md)，发布说明以
 [GitHub Releases](https://github.com/sakurawwwxh/qq-agent-plus/releases) 为准。
 
-## 0.9.4（未发布）
+## 0.9.4（2026-10-28）
 
 **新增**
 
@@ -38,6 +38,12 @@
 - 控制台 IO：用量按会话文件解析缓存（1000 文件 / 8000 行预算，超限淘汰）+ 统计结果缓存（2 分钟）+
   目录签名短缓存；前端构建戳 30 秒缓存、资产概览 10 秒缓存、handoff 读取按 mtime 复用；
   静态资源 304 命中时不再读取正文。
+- 用量历史改为 `data/usage-daily.json` 日汇总 + 截至前一天累计；今天不写入累计，今日明细最多每小时扫描一次；
+  历史统计与下钻只读日汇总，不再扫 session 文件。
+- 已读固定 session 的用量索引落 `data/usage-index.sqlite`（按 file + mtime + size 命中），
+  跨重启/切换 range 不再重复打开已固定的 session 文件。
+- 定稿会话（status 离开 running/waiting）在索引里打 `final` 标记：统计按窗口直接从 SQLite 取行，
+  不再 stat / 打开这些文件；只有运行中会话仍按 mtime/size 复用。保留期删除的文件会同步清索引行。
   保留原有 `mtime` 预筛、`usage-today.json` 内存缓冲与 today 只扫 today 的策略。
 
 ## 0.9.3（2026-10-22）
