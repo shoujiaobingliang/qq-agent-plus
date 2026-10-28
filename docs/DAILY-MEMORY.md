@@ -92,6 +92,25 @@ POST /api/daily-memory/prune                  # 按保留期清理
 - 失败（模型不可用、坏 JSON）只把当天任务标 `failed`/`interrupted`，不阻塞聊天；
   下次定时/手动运行会重试。
 
+## 部署检查清单
+
+1. Node ≥ 22.19（`node:sqlite` 可用；项目其他 SQLite 存储已依赖它）。
+2. 模型 API 已配置；`dailyMemory.enabled` 默认关闭，在控制台「设置 → 记忆 → 每日长期记忆」打开。
+3. 运行模式必须是 `active` 且未暂停；会话要在群/私聊白名单内。observe/暂停下即使手动运行也不会写库。
+4. 先手动跑一次昨天：
+
+   ```bash
+   curl -X POST -H "x-console-token: <token>" -H "content-type: application/json" \
+     -d '{"day":"YYYY-MM-DD","force":true}' \
+     http://127.0.0.1:3210/api/daily-memory/run
+   ```
+
+   然后查 `GET /api/daily-memory/status` 与 `GET /api/daily-memory/entries?chatKey=...`。
+5. 在群里发一条明确的约定/暗号，确认第二天或手动运行后 `【长期记忆】` 能按原文注入。
+6. 备份：`manage.sh backup` 会复制整个 `data/`，`memory/daily-memory.sqlite` 随之备份；
+   数据库不启用 WAL，整目录复制与现有备份口径一致。
+7. 若开启每日预算：超限 `block` 会跳过整轮，`degrade` 最多处理 3 个会话。
+
 ## Phase 1/2 边界
 
 - 不做 embedding/向量召回；先走结构化作用域 + FTS/关键词 + 激活分数。
