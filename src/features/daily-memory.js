@@ -6,6 +6,7 @@ import { normalizeDailyMemoryConfig } from '../core/daily-memory-config.js';
 import { todayKey } from '../core/util.js';
 import { nextAtFromHHMM } from '../core/reminders.js';
 import { addUsage, emptyUsage } from '../llm/llm.js';
+import { budgetStatus } from '../core/budget.js';
 import { currentProviders } from '../core/providers.js';
 import { completeMemoryExtraction } from '../llm/memory-chat.js';
 import {
@@ -57,10 +58,15 @@ export class DailyMemoryManager {
     this.stop();
     const cfg = this.#cfg();
     if (!cfg.enabled) return;
-    if (cfg.startupCatchup) {
-      const day = todayKey(this.now() - DAY_MS);
+    if (cfg.startupCatchup && cfg.maxCatchupDays > 0) {
+      const days = [];
+      for (let i = 1; i <= cfg.maxCatchupDays; i += 1) {
+        days.push(todayKey(this.now() - i * DAY_MS));
+      }
       Promise.resolve()
-        .then(() => this.runOnce({ day, source: 'catchup' }))
+        .then(async () => {
+          for (const day of days.reverse()) await this.runOnce({ day, source: 'catchup' });
+        })
         .catch((error) => this.log('[daily-memory] 启动补跑失败:', error?.message ?? error));
     }
     this.#schedule();
@@ -241,12 +247,38 @@ export class DailyMemoryManager {
     if (this.running) return { skipped: 'running' };
     const cfg = this.#cfg();
     if (!cfg.enabled && !force) return { skipped: 'disabled' };
+    const budget = budgetStatus(
+      this.configFn(),
+      this.sessions?.todayUsage?.(todayKey(this.now())) || {}
+    );
+    if (budget.exceeded && budget.onExceed === 'block') {
+      return { skipped: 'budget' };
+    }
+    const runCfg = budget.exceeded && budget.onExceed === 'degrade'
+      ? { ...cfg, maxChats: Math.min(cfg.maxChats, 3) }
+      : cfg;
     const targetDay = String(day || todayKey(this.now() - DAY_MS));
     const window = dayWindow(targetDay);
     if (!window) throw new Error(`日期格式非法：${targetDay}`);
+    const root = this.configFn();
+    const blocked = !root || root.runtime?.mode !== 'active' || root.runtime?.paused === true;
+    if (chatKey) {
+      if (blocked) {
+        return {
+          day: targetDay, source,
+          results: [{ chatKey: String(chatKey), status: 'skipped', reason: 'observe/paused' }]
+        };
+      }
+      if (!chatAllowed(String(chatKey), root)) {
+        return {
+          day: targetDay, source,
+          results: [{ chatKey: String(chatKey), status: 'skipped', reason: 'chat not allowed' }]
+        };
+      }
+    }
     const chats = chatKey
       ? [String(chatKey)]
-      : this.#candidateChats(cfg, window);
+      : this.#candidateChats(runCfg, window);
     if (!chats.length) return { day: targetDay, source, results: [] };
 
     this.running = true;
@@ -254,7 +286,8 @@ export class DailyMemoryManager {
     const results = [];
     try {
       for (const key of chats) {
-        results.push(await this.#runChat(key, targetDay, window, cfg, { force }));
+        if (this.abortController?.signal?.aborted) break;
+        results.push(await this.#runChat(key, targetDay, window, runCfg, { force }));
       }
       if (!chatKey) {
         try { this.store.pruneRetention?.({ now: this.now() }); } catch { /* 清理失败不影响抽取结果 */ }

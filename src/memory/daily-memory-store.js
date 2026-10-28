@@ -785,7 +785,8 @@ export class DailyMemoryStore {
           counts.created += 1;
         }
       }
-      if (result?.summary && typeof result.summary === 'object') {
+      if (result?.summary && typeof result.summary === 'object'
+        && (result.summary.overview || result.summary.summary || result.summary.details)) {
         this.upsertSummary(chatKey, day, result.summary, { now });
       }
     });

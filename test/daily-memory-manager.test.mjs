@@ -58,7 +58,7 @@ const validResult = JSON.stringify({
   }]
 });
 
-function makeManager({ cfg = makeConfig(), messages = { 'group:1': [msg(1, '本群暗号是菠萝')] }, complete } = {}) {
+function makeManager({ cfg = makeConfig(), messages = { 'group:1': [msg(1, '本群暗号是菠萝')] }, complete, sessions = null } = {}) {
   const store = new DailyMemoryStore({
     file, now: () => clock,
     config: { memory: cfg.memory, dailyMemory: cfg.dailyMemory }
@@ -66,6 +66,7 @@ function makeManager({ cfg = makeConfig(), messages = { 'group:1': [msg(1, '本�
   const manager = new DailyMemoryManager({
     store,
     messageStore: messageStore(messages),
+    sessions,
     config: () => cfg,
     now: () => clock,
     log: () => {},
@@ -142,4 +143,40 @@ test('非白名单会话不参与整日运行', async () => {
   const result = await manager.runOnce({ day: DAY });
   assert.deepEqual(result.results, []);
   store.close();
+});
+
+test('observe/暂停模式下即使手动指定会话也不写库', async () => {
+  const cfg = makeConfig();
+  cfg.runtime = { mode: 'observe', paused: false };
+  const { store, manager } = makeManager({
+    cfg,
+    messages: { 'group:99': [msg(1, '本群暗号是菠萝')] }
+  });
+  const result = await manager.runOnce({ day: DAY, chatKey: 'group:99', force: true });
+  assert.equal(result.results[0].status, 'skipped');
+  assert.equal(store.getJob('group:99', DAY), null);
+  store.close();
+});
+
+test('预算 block 时跳过整轮，degrade 时最多处理 3 个会话', async () => {
+  const cfg = makeConfig();
+  cfg.api = { budget: { enabled: true, dailyYuan: 1, onExceed: 'block', notify: false } };
+  const blocked = makeManager({
+    cfg,
+    sessions: { todayUsage: () => ({ estimatedYuan: 2 }) }
+  });
+  assert.deepEqual(await blocked.manager.runOnce({ day: DAY }), { skipped: 'budget' });
+  blocked.store.close();
+
+  const degradeCfg = makeConfig();
+  degradeCfg.api = { budget: { enabled: true, dailyYuan: 1, onExceed: 'degrade', notify: false } };
+  const messages = Object.fromEntries([1, 2, 3, 4, 5].map((n) => [`group:${n}`, [msg(n, `暗号${n}`)]]));
+  const degraded = makeManager({
+    cfg: degradeCfg,
+    messages,
+    sessions: { todayUsage: () => ({ estimatedYuan: 2 }) }
+  });
+  const result = await degraded.manager.runOnce({ day: DAY });
+  assert.equal(result.results.length, 3);
+  degraded.store.close();
 });
