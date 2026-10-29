@@ -300,7 +300,8 @@ async function saveConfig({ quiet = false } = {}) {
           enabled: chk('#cfg-mood-schedule-enabled', schedule.enabled !== false),
           sleepAt,
           wakeAt,
-          allowStayUp: chk('#cfg-mood-allow-stay-up', schedule.allowStayUp !== false)
+          allowStayUp: chk('#cfg-mood-allow-stay-up', schedule.allowStayUp !== false),
+          morningGreeting: chk('#cfg-mood-morning-greeting', schedule.morningGreeting !== false)
         }
       },
       energyModel: {

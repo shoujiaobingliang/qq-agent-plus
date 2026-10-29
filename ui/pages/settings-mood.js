@@ -214,6 +214,10 @@ function renderMoodSection(c) {
         <input type="checkbox" id="cfg-mood-allow-stay-up" ${schedule.allowStayUp !== false ? 'checked' : ''} />
         <label for="cfg-mood-allow-stay-up">到点提示建议睡觉（关闭后不再提示）</label>
       </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="cfg-mood-morning-greeting" ${schedule.morningGreeting !== false ? 'checked' : ''} />
+        <label for="cfg-mood-morning-greeting">作息自然醒后说早安</label>
+      </div>
 
       <h4>精力模型</h4>
       <div class="checkbox-row">

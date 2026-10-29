@@ -366,7 +366,9 @@ export const DEFAULT_CONFIG = {
         enabled: true,
         sleepAt: '23:30',
         wakeAt: '07:30',
-        allowStayUp: true
+        allowStayUp: true,
+        // 作息整晚自然醒后，回到睡前会话说一句早安；管理员强制叫醒/小睡不触发。
+        morningGreeting: true
       }
     },
     // 精力模型 P1：只 shadow 计算，不参与决策；字段含义见 docs/requirements/energy.md。
@@ -2093,7 +2095,8 @@ export function updateConfig(patch) {
           enabled: scheduleCfg.enabled !== false,
           sleepAt: scheduleSleepAt,
           wakeAt: scheduleWakeAt,
-          allowStayUp: scheduleCfg.allowStayUp !== false
+          allowStayUp: scheduleCfg.allowStayUp !== false,
+          morningGreeting: scheduleCfg.morningGreeting !== false
         }
       },
       energyModel: {

@@ -188,22 +188,32 @@ test('take_break：把休息参数交给心情管理器；状态不够低时返�
   assert.match(rejected.content, /还不能休息/);
 });
 
-test('take_break：有人说话时先回一句再睡', async () => {
-  const mood = { startRest: () => ({ rest: { kind: 'sleep', remainingMinutes: 60 } }) };
+test('take_break：有会话上下文时先回一句再睡（主动唤醒也算）', async () => {
+  let called = null;
+  const mood = {
+    startRest: (args) => {
+      called = args;
+      return { rest: { kind: 'sleep', remainingMinutes: 60 } };
+    }
+  };
+  // 主动唤醒没有 triggerEntries，但有 chatKey —— 同样必须先发一句
   const blocked = await tool('take_break').execute({
     mood,
-    triggerEntries: [{ senderId: '1', senderName: '群友', self: false }],
+    chatKey: 'group:1',
+    triggerEntries: [],
     session: { sent: [] }
   }, { kind: 'sleep' });
   assert.equal(blocked.isError, true);
-  assert.match(blocked.content, /先.*回一句/);
+  assert.match(blocked.content, /先.*发一句/);
 
   const ok = parse(await tool('take_break').execute({
     mood,
+    chatKey: 'group:1',
     triggerEntries: [{ senderId: '1', senderName: '群友', self: false }],
     session: { sent: [{ text: '晚安' }] }
   }, { kind: 'sleep' }));
   assert.equal(ok.kind, 'sleep');
+  assert.equal(called.chatKey, 'group:1', '睡觉所在会话要交给心情管理器，醒来后发早安');
 });
 
 test('take_break：睡前可私聊管理员一句短话', async () => {
@@ -212,6 +222,7 @@ test('take_break：睡前可私聊管理员一句短话', async () => {
   const result = parse(await tool('take_break').execute({
     mood,
     chatKey: 'group:1',
+    session: { sent: [{ text: '晚安' }] },
     notifyAdmin: async (text) => { sent.push(text); }
   }, { kind: 'sleep', adminMessage: '我先去睡了，晚安' }));
   assert.deepEqual(result.announcements, ['已私聊管理员']);

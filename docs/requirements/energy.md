@@ -235,8 +235,10 @@ E' = clip(E + (k_r*u_sleep*(1 - α*S')*(1 - E) - k_c*a*E - k_s*S') * Δt, E_MIN,
 - 在下一次模型请求的**用户提示词**里注入一条“作息建议”（`mood-prompt.js` 的【当前心情】块，**不进 system/persona**）：到点了，建议睡觉；如果还在聊/还有事，可以继续熬夜；
   - 原因：作息窗口是动态状态，放进 system/persona 会改 `promptPrefixHash`、关闭生命周期线程并破坏前缀缓存（与 `docs/MOOD.md` 的心情块同一口径）；
 - **只有模型自己调用 `take_break({kind:'sleep'})` 才进入硬暂停**；
-- 模型决定睡时：**先按人设用 `send_message` 回一句**（如“晚安，我先去睡了”），再调用 `take_break(kind=sleep)`；
-  本轮有人说话但还没回时，`take_break` 会拒绝并要求先回一句；没有对话对象（主动唤醒/管理员操作）可以直接睡；
+- 模型决定睡时：**只要存在会话上下文，先按人设用 `send_message` 在当前会话回一句**（如“晚安，我先去睡了”），再调用 `take_break(kind=sleep)`；
+  主动唤醒/本轮没有新消息时同样要求先发一句；只有没有会话上下文的内部调用才能直接睡；
+- 作息整晚自然醒（`scheduled` 睡到 `wakeAt`）后，回到睡前会话主动说一句早安；管理员强制叫醒、白天小睡和摸鱼不触发；
+  `schedule.morningGreeting=false` 可关闭；
 - 在作息窗口内模型调用 `take_break(kind=sleep)` 时：
   - 允许绕过 `maxMoodForRest` / `maxEnergyForRest` 门槛；
   - 默认睡到 `wakeAt`（不是固定 90 分钟），总时长按窗口计算；
@@ -386,7 +388,8 @@ lastTickAt = now
         "enabled": true,
         "sleepAt": "23:30",
         "wakeAt": "07:30",
-        "allowStayUp": true
+        "allowStayUp": true,
+        "morningGreeting": true
       }
     }
   }
@@ -431,7 +434,7 @@ lastTickAt = now
 - 连续清醒 24h：`E_obs < 0.5`；36h：`< 0.2`；
 - 作息建议：到 `sleepAt` 不自动进入 `rest`、不拦截消息；下一次模型请求带建议文案；
 - 模型在窗口内调用 `take_break(sleep)` 可绕过低状态门槛，并默认睡到 `wakeAt`；
-- 本轮有人说话但还没发消息时，`take_break(sleep)` 被拒绝；先 `send_message` 后允许；
+- 只要存在会话上下文，没发消息时 `take_break(sleep)` 被拒绝（包括主动唤醒/没有新消息）；先 `send_message` 后允许；
 - 进程重启：`lastTickAt` 正确补算，不出现“重启即满血/重启即累死”；
 - Shadow 期间行为与现状逐字/逐概率一致；
 - 关闭 `energyModel.enabled` 可回退旧精力逻辑。

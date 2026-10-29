@@ -78,7 +78,7 @@ export function buildMoodPromptBlock(snapshot, { context = 'chat' } = {}) {
   const scheduleLine = schedule?.suggestsSleep
     ? `【作息建议】现在是你设定的作息时间（${schedule.sleepAt}–${schedule.wakeAt}）。`
       + '建议睡觉；如果还有人在聊、或你自己还想继续，可以继续熬夜，但精力会持续下降。'
-      + '想睡就先按人设用 send_message 回一句（如“晚安，我先去睡了”），再调用 take_break(kind="sleep")；'
+      + '想睡就先按人设用 send_message 在当前会话回一句（如“晚安，我先去睡了”，即使没人说话也要发），再调用 take_break(kind="sleep")；'
       + '调用后进入硬暂停，消息会在醒来后统一补。'
     : '';
   const restEnergy = modelActive ? displayEnergy : energy;

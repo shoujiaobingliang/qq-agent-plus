@@ -535,6 +535,8 @@ export class Orchestrator {
     this.proactiveSuppressions = new Set();
     // 模型自己安排的「稍后主动发言」：chatKey -> { at, note, timer }
     this.scheduledWakes = new Map();
+    // 作息整晚睡醒后的早安：单独一槽，避免覆盖模型自己留下的 scheduledWakes。
+    this.morningWakes = new Map();
     this.scheduledWakeTicker = null;
     this.restTimer = null;
     this.aborted = false;
@@ -2615,11 +2617,14 @@ export class Orchestrator {
     this.sessions.update(session.id);
     this.emit('session-update', session.id);
 
-    const wakeLead = wakeNote
-      ? (String(wakeNote).startsWith('【系统提醒】')
-        ? safeSlice(String(wakeNote), 300)
-        : `这是你自己之前安排的：${safeSlice(String(wakeNote), 300)}。现在时间到了，看看当前情况决定要不要说话。`)
-      : '（主动机会）群里已经安静了一会儿。';
+    const isMorningNote = String(wakeNote).startsWith('【早安】');
+    const wakeLead = isMorningNote
+      ? safeSlice(String(wakeNote).replace(/^【早安】/, ''), 300)
+      : (wakeNote
+        ? (String(wakeNote).startsWith('【系统提醒】')
+          ? safeSlice(String(wakeNote), 300)
+          : `这是你自己之前安排的：${safeSlice(String(wakeNote), 300)}。现在时间到了，看看当前情况决定要不要说话。`)
+        : '（主动机会）群里已经安静了一会儿。');
     const selfWakeOn = cfg.proactive?.selfWakeEnabled !== false;
     // 600 而不是 200：定时提醒合并派发时 note 可能有多条（单条正文上限 200），
     // 这里截到 200 会把第二条整体截掉，而它们已经被 markFired（2026-09-29 审查 P2）
@@ -2638,9 +2643,11 @@ export class Orchestrator {
           + (selfWakeOn
             ? '，并用 schedule_wake 给自己安排下一次醒来的时间（比如几分钟后、或二三十分钟后）。'
             : '。（自安排唤醒已关闭，不用安排下次唤醒，系统会按配置的节奏再唤醒你。）'));
-    const wakeTail = String(wakeNote).startsWith('【系统提醒】')
-      ? '就按上面那条提醒处理：想补就补一句很短的，补完就放下；不想补就安静结束。'
-      : '你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。';
+    const wakeTail = isMorningNote
+      ? '按人设自然地说一句早安就好；没人接也没关系，不要解释系统或作息。'
+      : (String(wakeNote).startsWith('【系统提醒】')
+        ? '就按上面那条提醒处理：想补就补一句很短的，补完就放下；不想补就安静结束。'
+        : '你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。');
     const currentUserMessage = {
       role: 'user',
       content: proactive && !manual
@@ -3111,6 +3118,8 @@ export class Orchestrator {
     if (!result?.finished) return;
     this.#emitMood(result.snapshot);
     log.info(`[mood] ${result.kind === 'slack' ? '摸鱼' : '睡觉'}结束，恢复处理消息`);
+    // 作息整晚自然醒：回到睡前会话说句早安。独立于 scheduledWakes，不覆盖模型留的安排。
+    this.#scheduleMorningGreeting(result);
     this.#drainAfterRest();
     // 睡觉期间没派发的提醒与自安排唤醒，醒来后再走一次。
     try { this.fireDueScheduledWakes(); } catch (error) {
@@ -3118,6 +3127,60 @@ export class Orchestrator {
     }
     try { this.fireDueReminders(); } catch (error) {
       log.warn('[mood] 休息结束后派发提醒失败：', error?.message ?? error);
+    }
+  }
+
+  /**
+   * 作息整晚睡醒后的早安：只在自然醒且 rest.scheduled 的睡眠后触发，
+   * 回到睡前会话主动说一句；管理员强制叫醒、小睡、摸鱼都不触发。
+   * 用独立队列，避免 scheduleInitiativeWake 的单槽覆盖模型自己留下的安排。
+   */
+  #scheduleMorningGreeting(result) {
+    if (result?.kind !== 'sleep' || result.forced || result.scheduled !== true) return;
+    const chatKey = String(result.chatKey || '');
+    if (!chatKey) return;
+    if (getConfig().mood?.rest?.schedule?.morningGreeting === false) return;
+    if (!chatAllowed(chatKey)) return;
+    const note = '【早安】你刚睡醒，按人设自然地跟这个会话里的人说一句早安/早上好（简短、像随口说的）。'
+      + '不要提作息、系统或“刚睡醒”这些设定；如果实在不适合说话，就安静结束。';
+    this.#armMorningWake(chatKey, { note }, Date.now() + 60 * 1000);
+    log.info(`[mood] 睡醒后的早安已安排：${chatKey}`);
+  }
+
+  #armMorningWake(chatKey, item, at) {
+    const prev = this.morningWakes.get(chatKey);
+    if (prev?.timer) clearTimeout(prev.timer);
+    const timer = setTimeout(() => {
+      try { this.#fireMorningWakes(); } catch { /* 单次失败不影响后续 */ }
+    }, Math.max(0, at - Date.now()) + 50);
+    timer.unref?.();
+    this.morningWakes.set(chatKey, { ...item, at, timer });
+  }
+
+  #fireMorningWakes() {
+    if (this.aborted || this.paused) return;
+    const now = Date.now();
+    for (const [chatKey, item] of [...this.morningWakes.entries()]) {
+      if (!item || item.at > now) continue;
+      this.morningWakes.delete(chatKey);
+      if (this.mood?.sleeping?.()) continue;
+      if (!chatAllowed(chatKey)) continue;
+      if (this.#wakeTimeBlocked(chatKey)) {
+        // 与自安排唤醒同口径：观察模式作废，静默段顺延到窗口恢复。
+        if (getConfig().runtime?.mode !== 'active') {
+          log.info(`[mood] ${chatKey} 观察模式下早安无法兑现，已作废`);
+          continue;
+        }
+        const wait = Math.max(60000, timeUntilActive(chatKey));
+        this.#armMorningWake(chatKey, item, now + Math.min(wait, 24 * 60 * 60 * 1000));
+        continue;
+      }
+      if (this.#wakeBlockedNow(chatKey)) {
+        this.#armMorningWake(chatKey, item, now + WAKE_RETRY_MS);
+        continue;
+      }
+      this.wake(chatKey, { proactive: true, wakeNote: item.note })
+        .catch((error) => log.error('[mood] 早安唤醒出错:', error?.message ?? error));
     }
   }
 
@@ -3188,7 +3251,8 @@ export class Orchestrator {
       }
       // 系统提醒的补话：等待期间有人说话了（正常流程已经在处理），这次就不必再唤一次
       if (String(item.note || '').startsWith('【系统提醒】') && this.store.unreadCount(chatKey) > 0) continue;
-      if (!item.paced) {
+      // 早安是刚睡醒的一句问候，不适用“主动开话题”的活跃时段限制（时间管控仍然有效）。
+      if (!item.paced && kind !== 'morning') {
         const window = proactiveWindowState(cfgNow.proactive?.activeHours, now);
         if (!window.active) {
           // 静默时段不主动开口：顺延到下一个活跃窗口
@@ -4116,6 +4180,8 @@ export class Orchestrator {
     this.restTimer = null;
     for (const item of this.scheduledWakes.values()) item?.timer && clearTimeout(item.timer);
     this.scheduledWakes.clear();
+    for (const item of this.morningWakes.values()) item?.timer && clearTimeout(item.timer);
+    this.morningWakes.clear();
     await Promise.allSettled([...this.runTasks]);
   }
 

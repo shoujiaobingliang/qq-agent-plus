@@ -21,13 +21,14 @@ const snapshot = {
   lastChange: null
 };
 
-function makeRunner({ sleeping = false } = {}) {
+function makeRunner({ sleeping = false, finishDueRest = () => ({ finished: false }) } = {}) {
   const events = [];
   const mood = {
     enabled: () => true,
     sleeping: () => sleeping,
     slacking: () => false,
     resting: () => sleeping,
+    finishDueRest,
     applyJudge: (decision) => ({ ...snapshot, lastChange: decision }),
     observeIgnored: () => null,
     reset: () => snapshot,
@@ -79,4 +80,25 @@ test('睡觉期间不建唤醒', () => {
   runner.scheduleWake = () => { scheduled += 1; };
   runner.onIncoming('group:1');
   assert.equal(scheduled, 0, '睡觉时 onIncoming 不应排唤醒');
+});
+
+test('作息整晚自然醒后安排早安；管理员强制叫醒不安排', async () => {
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  cfg.runtime.mode = 'active';
+  cfg.allow.groups = ['1'];
+  cfg.mood.rest.schedule.morningGreeting = true;
+  setRuntimeConfig(cfg);
+
+  const natural = {
+    finished: true, kind: 'sleep', forced: false, scheduled: true, chatKey: 'group:1', snapshot
+  };
+  const awake = makeRunner({ finishDueRest: () => natural });
+  awake.runner.startRestTicker();
+  assert.equal(awake.runner.morningWakes.has('group:1'), true, '自然醒后要安排早安');
+  await awake.runner.abortAll();
+
+  const forced = makeRunner({ finishDueRest: () => ({ ...natural, forced: true }) });
+  forced.runner.startRestTicker();
+  assert.equal(forced.runner.morningWakes.has('group:1'), false, '强制叫醒不发早安');
+  await forced.runner.abortAll();
 });

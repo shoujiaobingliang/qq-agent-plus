@@ -100,9 +100,9 @@
   不建唤醒、不派发提醒、不主动开话题；醒来后补处理积压消息。
 - **摸鱼 `kind=slack`**：软暂停。仍会看消息，但回复概率乘 `rest.slackReplyFactor`，
   不主动开话题、不安排补话；只选择性回复一些（以后会接入小黑盒刷帖等摸鱼内容）。
-- **睡前告别**：决定睡觉时先按人设用 `send_message` 回一句（如“晚安，我先去睡了”），再调用
-  `take_break(kind=sleep)`；本轮有人说话但还没回时，工具会拒绝并要求先回一句。
-  没有对话对象（主动唤醒/管理员操作）可以直接睡。
+- **睡前告别**：决定睡觉时先按人设用 `send_message` 在当前会话回一句（如“晚安，我先去睡了”），再调用
+  `take_break(kind=sleep)`；只要存在会话上下文，即使本轮没有新消息（主动唤醒、作息建议触发的主动机会）
+  也会拒绝直接睡，要求先发一句。只有没有会话上下文的内部调用才可以直接睡。
 - 睡前可选：在 `take_break` 里填 `status` 改 QQ 在线状态、`signature` 改个性签名、
   `adminMessage` 私聊管理员一句短话。都失败也不影响休息本身，结果会回在工具返回里。
 - 两种休息结束都会恢复心情，但**只有睡觉恢复精力**（摸鱼不恢复精力）；管理员在控制台提前叫醒时，
@@ -119,6 +119,8 @@
 - 晚睡/早醒：按实际睡眠时长占整晚窗口的比例恢复——
   `精力 += (100 - 精力) × 比例`，心情同样按比例给 `sleepMoodGain`；
 - 管理员提前叫醒也按同一比例结算；
+- 作息整晚自然醒（睡到 `wakeAt`）后，会在睡前所在会话主动说一句早安；管理员提前叫醒、白天小睡和摸鱼
+  不会触发。控制台「作息睡觉」下的「作息自然醒后说早安」可关闭（`morningGreeting`）。
 - 模型不睡：消息照常处理，精力/疲劳继续累积；系统不强制叫醒、不强制拦截；
 - 睡醒后连续清醒时间清零（打盹也算睡过），精力消耗速度从基础值重新累积；
 - 摸鱼不恢复精力；只有睡觉可以。
@@ -174,7 +176,8 @@
         "enabled": true,
         "sleepAt": "23:30",
         "wakeAt": "07:30",
-        "allowStayUp": true
+        "allowStayUp": true,
+        "morningGreeting": true
       }
     }
   }
@@ -191,7 +194,7 @@
 - `followUpMinEnergy`：低于该精力不安排补话。
 - `historyLimit` / `dailyKeepDays`：变化流水与每日汇总的保留量。
 - `judge`：心情评审。`enabled=false` 时完全不做模型判断（客观事件仍生效）；`provider/model` 留空跟随聊天模型；`maxCallsPerDay`、`timeoutMs`、`maxInputChars` 控制成本与输入体积。
-- `rest`：睡觉/摸鱼。`enabled=false` 时 `take_break` 工具不注入；时长、恢复量、触发门槛与摸鱼回复系数都在这里。`schedule` 是作息建议：`sleepAt`/`wakeAt`（本地时间）、`allowStayUp`（是否注入建议，不是强制睡眠）。
+- `rest`：睡觉/摸鱼。`enabled=false` 时 `take_break` 工具不注入；时长、恢复量、触发门槛与摸鱼回复系数都在这里。`schedule` 是作息建议：`sleepAt`/`wakeAt`（本地时间）、`allowStayUp`（是否注入建议，不是强制睡眠）、`morningGreeting`（作息整晚自然醒后是否回睡前会话说早安）。
 
 ## 控制台
 

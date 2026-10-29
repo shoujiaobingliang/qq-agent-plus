@@ -101,6 +101,12 @@ function normalizeEnergyModel(value, { now = Date.now() } = {}) {
   };
 }
 
+/** 只保留真实会话 key，避免把任意字符串写进状态文件。 */
+export function normalizeRestChatKey(value) {
+  const key = String(value ?? '').trim();
+  return /^(group|private):\d{1,15}$/.test(key) ? key : '';
+}
+
 function normalizeRest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const until = Number(value.until);
@@ -110,6 +116,7 @@ function normalizeRest(value) {
   return {
     kind,
     scheduled: value.scheduled === true,
+    chatKey: normalizeRestChatKey(value.chatKey),
     windowStart: Number(value.windowStart) || 0,
     windowEnd: Number(value.windowEnd) || 0,
     startedAt: Number(value.startedAt) || 0,

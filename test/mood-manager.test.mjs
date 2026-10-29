@@ -319,7 +319,7 @@ test('作息窗口内主动睡：绕过低状态门槛，默认睡到起床时�
   const dir = fs.mkdtempSync(path.join(root, 'schedule-rest-'));
   let now = new Date(2026, 9, 23, 11, 30, 0, 0).getTime();
   const manager = new MoodManager({ dataDir: dir, now: () => now });
-  const started = manager.startRest({ kind: 'sleep', reason: '到点了' });
+  const started = manager.startRest({ kind: 'sleep', reason: '到点了', chatKey: 'group:1' });
   assert.ok(started, '状态很好也允许主动睡');
   assert.equal(started.rest.kind, 'sleep');
   assert.equal(started.rest.scheduled, true);
@@ -327,6 +327,8 @@ test('作息窗口内主动睡：绕过低状态门槛，默认睡到起床时�
   now = new Date(2026, 9, 23, 13, 30, 0, 0).getTime();
   const done = manager.finishDueRest();
   assert.equal(done.finished, true);
+  assert.equal(done.scheduled, true);
+  assert.equal(done.chatKey, 'group:1', '结算时带出睡前会话，供醒后发早安');
   assert.equal(done.snapshot.energy, 100, '睡满窗口恢复到 100');
 });
 

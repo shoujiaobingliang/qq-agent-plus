@@ -26,6 +26,7 @@ import {
   decayMood,
   defaultMoodState,
   moodSnapshot,
+  normalizeRestChatKey,
   readMoodState,
   resetMoodState,
   writeMoodState
@@ -485,19 +486,21 @@ export class MoodManager {
    * 窗口内且未指定 minutes：睡到 wakeAt（按作息结算恢复）。
    * 返回快照；不可休息（未启用/已休息/状态还很好）返回 null。
    */
-  startRest({ kind = 'sleep', minutes, reason = '' } = {}) {
+  startRest({ kind = 'sleep', minutes, reason = '', chatKey = '' } = {}) {
     if (!this.restEnabled()) return null;
     if (this.restStatus()?.active) return null;
     // 上一次休息已经到期但 ticker 还没结算：先结算，避免把上一次的恢复量吞掉。
     if (this.#current().rest) this.finishDueRest();
     const safeKind = kind === 'slack' ? 'slack' : 'sleep';
+    const restChatKey = normalizeRestChatKey(chatKey);
     const window = safeKind === 'sleep' ? this.scheduledSleepWindow() : null;
     // 作息窗口内、模型没指定时长：按作息睡到起床时间。
     if (window?.active && minutes === undefined) {
       return this.startScheduledSleep({
         windowStart: window.start,
         windowEnd: window.end,
-        reason: reason || '按作息睡觉'
+        reason: reason || '按作息睡觉',
+        chatKey: restChatKey
       });
     }
     const state = this.#current();
@@ -520,6 +523,7 @@ export class MoodManager {
       ...state,
       rest: {
         kind: safeKind,
+        chatKey: restChatKey,
         startedAt: at,
         until: at + duration * 60000,
         reason: reasonText
@@ -548,7 +552,7 @@ export class MoodManager {
    * 按作息开始睡觉：不受“心情/精力低”门槛限制，睡到窗口结束。
    * 只由编排器的休息 ticker 调用；窗口已过/已在休息中返回 null。
    */
-  startScheduledSleep({ windowStart, windowEnd, reason = '按作息睡觉' } = {}) {
+  startScheduledSleep({ windowStart, windowEnd, reason = '按作息睡觉', chatKey = '' } = {}) {
     if (!this.restEnabled()) return null;
     const cfg = this.#scheduleConfig();
     if (cfg.enabled === false) return null;
@@ -566,6 +570,7 @@ export class MoodManager {
       rest: {
         kind: 'sleep',
         scheduled: true,
+        chatKey: normalizeRestChatKey(chatKey),
         windowStart: start,
         windowEnd: end,
         startedAt: now,
@@ -659,7 +664,14 @@ export class MoodManager {
     } catch (error) {
       this.log(`[mood] 休息结算写入失败（内存值继续可用）：${error?.message ?? error}`);
     }
-    return { finished: true, kind, forced: force, snapshot: this.snapshot() };
+    return {
+      finished: true,
+      kind,
+      forced: force,
+      scheduled,
+      chatKey: rest.chatKey || '',
+      snapshot: this.snapshot()
+    };
   }
 
   /** 管理员强制叫醒/结束摸鱼。 */

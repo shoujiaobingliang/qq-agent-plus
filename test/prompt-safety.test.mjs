@@ -174,7 +174,7 @@ test('提示词里的每个段头都能被弱化（清洗白名单不许落后�
     'src/onebot/qzone-feed.js'
   ];
   // 只豁免"我们自己生成、且不授予任何权限"的普通标记
-  const ALLOW = new Set(['【拍一拍】', '【图片】', '【合并转发聊天记录】']);
+  const ALLOW = new Set(['【拍一拍】', '【图片】', '【合并转发聊天记录】', '【早安】']);
   const headers = new Set();
   for (const rel of modules) {
     const src = fs.readFileSync(path.join(repoRoot, rel), 'utf8');

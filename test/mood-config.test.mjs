@@ -28,7 +28,8 @@ test('心情配置有默认值', () => {
     enabled: true,
     sleepAt: '23:30',
     wakeAt: '07:30',
-    allowStayUp: true
+    allowStayUp: true,
+    morningGreeting: true
   });
   assert.equal(mood.energyModel.enabled, true);
   assert.equal(mood.energyModel.shadow, true);
@@ -75,7 +76,8 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
           enabled: false,
           sleepAt: '25:99',
           wakeAt: '07:30',
-          allowStayUp: false
+          allowStayUp: false,
+          morningGreeting: false
         }
       },
       energyModel: {
@@ -112,6 +114,7 @@ test('updateConfig 把坏值夹回安全区间，显式关闭会保留', () => {
   assert.equal(cfg.mood.rest.schedule.sleepAt, '23:30');
   assert.equal(cfg.mood.rest.schedule.wakeAt, '07:30');
   assert.equal(cfg.mood.rest.schedule.allowStayUp, false);
+  assert.equal(cfg.mood.rest.schedule.morningGreeting, false);
   assert.equal(cfg.mood.energyModel.enabled, false);
   assert.equal(cfg.mood.energyModel.shadow, false);
   assert.equal(cfg.mood.energyModel.kr, 1);
