@@ -242,6 +242,33 @@ test('普通搜索失败时自动回退梗来源', async (t) => {
   assert.equal(result.saved.term, '典中典');
 });
 
+test('梗来源无结果时返回可读负结果，不抛错', async (t) => {
+  const dir = tempDir(t);
+  resetMemeLookupState();
+  const result = await runMemeLookup({ term: '不存在的梗', mode: 'source' }, {
+    dataDir: dir,
+    sourceSearchFn: async () => ({ results: [] })
+  });
+  assert.equal(result.stage, 'source');
+  assert.equal(result.found, false);
+  assert.deepEqual(result.results, []);
+  assert.match(result.note, /没有返回可用结果/);
+});
+
+test('普通搜索与梗来源都失败时返回可读负结果，不抛错', async (t) => {
+  const dir = tempDir(t);
+  resetMemeLookupState();
+  const result = await runMemeLookup({ term: '不存在的梗' }, {
+    dataDir: dir,
+    webSearchFn: async () => { throw new Error('搜索服务 HTTP 503'); },
+    sourceSearchFn: async () => { throw new Error('梗站 HTTP 502'); }
+  });
+  assert.equal(result.found, false);
+  assert.match(result.webError, /503/);
+  assert.match(result.sourceError, /502/);
+  assert.match(result.note, /都没有查成/);
+});
+
 test('工具表里有 meme_lookup，且描述教模型在普通搜索读不通时升级到梗来源', async () => {
   const { buildToolDefs } = await import('../src/tools/tools-core.js');
   const tool = buildToolDefs().find((entry) => entry.name === 'meme_lookup');

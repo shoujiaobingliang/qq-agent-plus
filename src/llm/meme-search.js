@@ -253,5 +253,7 @@ export async function searchMemeSources(term, { webSearchFn = webSearch } = {}) 
       errors.push(`普通搜索回退失败：${error?.message ?? error}`);
     }
   }
-  throw new Error(`梗来源没有返回结果${errors.length ? `：${errors.join('；').slice(0, 300)}` : ''}`);
+  // 没有结果不是异常：梗站被挡、词条不存在、搜索回退也空，都返回空结果，
+  // 由调用方把“没查到”交给模型（换词/普通搜索/直接问群友），不要把内部错误抛给聊天。
+  return { term: clean, results: [], errors, found: false };
 }

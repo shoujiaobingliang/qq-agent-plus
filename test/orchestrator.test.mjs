@@ -846,6 +846,7 @@ describe('Orchestrator', () => {
     assert.match(latest.personaPrompt, /【角色设定/);
     assert.doesNotMatch(latest.personaPrompt, /【技能：qq-core】/);
     assert.match(latest.systemPrompt, /【技能：qq-core】/, '审计串保留完整 system + 技能');
+    assert.doesNotMatch(latest.systemPrompt, /#\s*角色卡/, 'systemPrompt 不再拼人设正文，避免与 personaPrompt 重复');
     assert.equal(latest.personaIntro, '', '缓存为空时没有额外 assistant 轮');
   });
 
@@ -1104,9 +1105,10 @@ describe('Orchestrator', () => {
     };
     append(1, '哈哈', '42');
     await runner.wake('group:1');
-    assert.match(system, /stickerId：st-1/, '常用的要在清单里');
-    assert.match(system, /（没用过）（stickerId：st-\d+）/, '没用过的也要有机会进清单');
-    assert.equal([...system.matchAll(/stickerId：/g)].length, 10, '条数按配置取满');
+    const stickerBlock = blockUntilNextSkill(system, '【可用表情包】');
+    assert.match(stickerBlock, /常用备注1/, '常用的要在清单里');
+    assert.match(stickerBlock, /\[新\]/, '没用过的也要有机会进清单');
+    assert.equal((stickerBlock.match(/^- /gm) || []).length, 10, '条数按配置取满');
   });
 
   it('语音回复/提醒关掉时：工具表与提示词同步撤（send_voice 必失败、remind 不会被派发）', async (t) => {
@@ -1170,12 +1172,12 @@ describe('Orchestrator', () => {
     // 只看【可用表情包】那一段（角色卡正文是管理员内容，可能仍提到这个工具，不归这里管）：
     // 清单不能再说"可以先 get_sticker_image 看一眼"——那句话指向一个不存在的工具
     const listBlock = blockUntilNextSkill(system, '【可用表情包】');
-    assert.ok(listBlock.includes('stickerId：'), '清单段要在');
+    assert.ok(listBlock.includes('样本'), '清单段要在');
     // 只断言"教它去看"的那句不在；工具名本身会出现在后面的机制说明里
     //（"get_sticker_image 不在工具表里"），那是刻意保留的覆盖说明
     assert.equal(listBlock.includes('先 get_sticker_image 看一眼'), false, '清单里不该再教它去调这个工具');
-    assert.equal(listBlock.includes('st-2（'), false, '没备注的（看不明白也用不了看图工具）不该列出来');
-    assert.ok(listBlock.includes('st-1'), '有备注的照常列');
+    assert.equal(listBlock.includes('无备注'), false, '没备注的（看不明白也用不了看图工具）不该列出来');
+    assert.ok(listBlock.includes('备注1'), '有备注的照常列');
     assert.match(system, /看不到图/, '看不到图时的口径要在');
     // 视频那条引导也要跟着 vision 走：关掉图片输入时 get_message_images 不在工具表里，
     // 不能教模型"用 get_message_images 看画面"（2026-09-26 审查：同类问题在贴纸清单上修过一次）

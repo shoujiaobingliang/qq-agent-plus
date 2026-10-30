@@ -5610,9 +5610,9 @@ function buildSessionView(s, store, options = {}) {
   const lifecycle = sessionLifecycleView(s, store, options);
   return {
     ...s,
-    // 列表走索引摘要（带 persona）；详情拿的是完整会话对象，只有 systemPrompt —— 这里补算，
-    // 否则详情头部永远显示"没记录到角色卡"。
-    persona: s.persona || personaLabelOfPrompt(s.systemPrompt),
+    // 列表走索引摘要（带 persona）；详情拿的是完整会话对象，人设单独在 personaPrompt 里 —— 这里补算。
+    // 老会话没有 personaPrompt 时回退到 systemPrompt（当时两者是拼在一起的）。
+    persona: s.persona || personaLabelOfPrompt(s.personaPrompt || s.systemPrompt),
     threadState: lifecycle?.state || s.threadState || null,
     lifecycle,
     sessionMetrics: buildSessionMetrics(s)

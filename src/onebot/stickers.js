@@ -247,10 +247,9 @@ export function formatStickerList(entries, query = '', limit = 48) {
 }
 
 /** 提示词里的【可用表情包】摘要（不暴露完整 URL，控制上下文体积）。 */
-// 单行长度上限：条数上限 60 × 每行 300 字 = 最坏 1.8 万字符常驻系统提示（2026-09-26 审查）。
-// 60 字足够让模型认出是哪一张，超出的截断加省略号；标签单独再短一些（它只是辅助）。
+// 单行只保留短标签（24 字）+ 最多两个标签，不再放完整 stickerId：
+// send_sticker 直接接受备注名，需要 id 时 list_stickers 会返回（2026-10-30 复盘）。
 const LABEL_CHARS = 60;
-const TAG_CHARS = 30;
 
 /** 截断到 max 字（含省略号），别让一条超长备注吃满整段提示词。 */
 function clipLine(text, max = LABEL_CHARS) {
@@ -299,36 +298,57 @@ export function buildStickerContext(entries, max = 10, { vision = true } = {}) {
       || String(a.id).localeCompare(String(b.id)))
     .slice(0, limit - familiar.length);
   const top = [...familiar, ...rotation];
+  // 每行只留“能让人挑图”的信息：短标签 + 标签 + 新/常用 + 表情/图片。
+  // 不再带完整 stickerId：send_sticker 直接接受备注名，需要 id 时 list_stickers 会返回；
+  // 完整 id 每行 50+ 字符，是这段常驻提示里最大的一笔无谓开销（2026-10-30 复盘）。
+  const labelOf = (e) => {
+    const raw = sanitizeUserText(String(e.desc || e.localNote || '')).trim();
+    if (!raw) return '无备注';
+    const first = raw.split(/[，。；、,.;\n]/)[0].trim() || raw;
+    return clipLine(first, 24);
+  };
+  const tagOf = (e) => {
+    const tags = (Array.isArray(e.tags) ? e.tags : [])
+      .map((tag) => sanitizeUserText(String(tag || '').trim()))
+      .filter(Boolean)
+      .slice(0, 2);
+    return tags.length ? `（${clipLine(tags.join('/'), 16)}）` : '';
+  };
   const lines = top.map((e) => {
-    // 备注/标签由模型按群友暗示写入（sticker_note 工具可写），最终拼进**系统提示**的
-    // 【可用表情包】段 —— 不过清洗就是一个可持久化的注入位（写了每轮都在）。
-    const label = clipLine(sanitizeUserText(e.desc || e.localNote || '')) || '（无备注，可先看图）';
-    const extra = e.tags?.length ? ` [${clipLine(e.tags.map((t) => sanitizeUserText(t)).join('/'), TAG_CHARS)}]` : '';
-    const used = e.useCount ? `（用过${e.useCount}次）` : '（没用过）';
-    // 两类来源在 QQ 里的呈现完全不同：QQ 收藏表情发出去是"表情"，本地图库（收藏/上传的图）
-    // 只能当图片发 —— 标出来，模型才知道"要发表情"时该挑哪种（2026-09-27 用户反馈"只发出图片"）。
-    const kindTag = (e.localFile || e.source !== 'qq') ? '〔本地图库·发出去是图片〕' : '〔QQ收藏表情〕';
-    return `- ${label}${extra}${used}（stickerId：${e.id}）${kindTag}`;
+    // 两类来源在 QQ 里的呈现完全不同：QQ 收藏表情发出去是“表情”，本地图库（收藏/上传的图）
+    // 只能当图片发 —— 标出来，模型才知道“要发表情”时该挑哪种。
+    const kind = (e.localFile || e.source !== 'qq') ? '[图]' : '[表情]';
+    const used = e.useCount ? '（常用）' : '[新]';
+    return `- ${labelOf(e)}${tagOf(e)}${used} ${kind}`;
   });
-  // 库刚建起来时"常用的一半"也全是没用过的：那时别写"前几个是常用的"，
-  // 否则和逐行的（没用过）标记自相矛盾（2026-09-26 审查）。
+  // 标签索引：让模型知道全库的主题分布；样本里没贴合的，用 list_stickers 按标签/关键词查。
+  const tagCounts = new Map();
+  for (const e of list) {
+    for (const raw of (Array.isArray(e.tags) ? e.tags : [])) {
+      const tag = sanitizeUserText(String(raw || '').trim());
+      if (!tag) continue;
+      tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+    }
+  }
+  const tagIndex = [...tagCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 12)
+    .map(([tag, n]) => `${clipLine(tag, 12)}${n}`)
+    .join('/');
   const unusedTotal = list.filter((e) => !(e.useCount || 0)).length;
   const topUsed = top.filter((e) => (e.useCount || 0) > 0).length;
-  // 抬头只看"清单里到底有什么"，别按 rotation 是否为空下结论 —— 那两个边界（清单只有一个、
-  // 或全库都用过）原来会和逐行的（没用过）标记打架（2026-09-26 审查 P2）
   const scope = topUsed === 0
-    ? `这 ${top.length} 个都还没用过（用掉一张，下一张会自动顶上来）`
+    ? `样本 ${top.length} 张都还没用过，[新] 优先试`
     : (unusedTotal > 0
-      ? `前 ${familiar.filter((e) => (e.useCount || 0) > 0).length} 个是常用的，后 ${top.length - familiar.filter((e) => (e.useCount || 0) > 0).length} 个是没用过/很久没用的`
-        + ` —— 优先挑后面这批没见过的用（库里还有 ${unusedTotal} 张没发过；一张用过了就像老图一样可以一直用，别老是那两三张）`
-      : `前 ${topUsed} 个是常用的，后 ${top.length - topUsed} 个是最近没用过的（换着用，别老是那两三张；库里暂时没有没用过的了）`);
-  // 关闭图片输入时不能提 get_sticker_image（那个工具已经不在工具表里了）
-  const tail = vision
-    ? '，完整列表可用 list_stickers 查询；没用过的可以先 get_sticker_image 看一眼再用'
-    : '，完整列表可用 list_stickers 查询';
-  return `【可用表情包】你的表情库里有 ${list.length} 个表情包（${scope}${tail}）。`
-    + '标〔QQ收藏表情〕的发出去是表情，标〔本地图库〕的是一张图片（QQ 里显示为图片）——'
-    + `群里要"发表情"时优先挑前者：\n${lines.join('\n')}`;
+      ? `前 ${topUsed} 张常用，后 ${top.length - topUsed} 张没用过/[新]，优先试[新]`
+      : `前 ${topUsed} 张常用，其余是最近没用的，换着用`);
+  const tail = '样本只是一部分：没贴合的用 list_stickers 按关键词/标签查（最多100条），'
+    + '再 send_sticker 传备注名；[表情]=QQ收藏表情，[图]=本地图库（发出去是图片）'
+    + (vision ? '；没用过的可以先 get_sticker_image 看一眼' : '');
+  const head = `【可用表情包】库 ${list.length} 张。${scope}。`
+    + (tagIndex ? `标签：${tagIndex}。` : '')
+    + '\n';
+  return `${head}${lines.join('\n')}\n${tail}`;
 }
 
 /** 发送前的表情包策略提示（软策略）。 */
@@ -354,7 +374,7 @@ export function buildStickerStrategyHint(level = 1, { vision = true } = {}) {
       ? '- 清单里标「没用过」的也可以直接用，不确定是什么就先 get_sticker_image 看一眼；用掉一张，下一张没用过的会自己顶上来。'
       : '- 清单里标「没用过」的挑有备注的用（清单里没备注的不会列出来）；看不到图，别对没把握的图硬发挥。',
     '- 发送：用 send_sticker；一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话先用 send_message 作为单独气泡发出，再单独发表情。',
-    '- 选图很简单：stickerId 直接填【可用表情包】里那行开头的备注名（不要背长 id），备注里独特的一小段也行，系统会自动匹配；命中不唯一时才需要完整 id（可用 list_stickers 看全库）。',
+    '- 选图：stickerId 直接填【可用表情包】里那行开头的备注名（不要背长 id）；清单只是样本，没贴合的用 list_stickers 按关键词/标签搜（它也会返回完整 id），再 send_sticker。',
     '- 不要：在严肃/正式/敏感话题硬塞表情；不要每次都用同一个；不要一条消息里塞多个表情；不要把文字和表情混在同一个气泡里。'
   ].join('\n');
 }

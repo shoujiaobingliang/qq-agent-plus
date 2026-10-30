@@ -119,7 +119,7 @@ test('提示词：关掉表情查看后，表情清单与策略段也不再教 g
   updateConfig({ api: { vision: true }, sticker: { enabled: true }, messageTypes: { stickers: true } });
   const on = buildSystemPrompt({ persona: { botName: '测试', roleText: '' }, stickerEntries: entries });
   assert.ok(on.includes('get_sticker_image'), '默认（开）时清单尾注要说明可以先看图');
-  assert.ok(on.includes('s-bare'), '默认（开）时没备注的图也在清单里');
+  assert.ok(on.includes('无备注'), '默认（开）时没备注的图也在清单里');
 
   updateConfig({ messageTypes: { stickers: false } });
   try {
@@ -127,8 +127,8 @@ test('提示词：关掉表情查看后，表情清单与策略段也不再教 g
     assert.ok(!off.includes('先 get_sticker_image 看一眼'), '关掉后清单尾注与策略段都不该再教它看图');
     assert.ok(off.includes('get_sticker_image 不在工具表里'), '但要明确告诉模型这个工具确实没有');
     assert.ok(off.includes('list_stickers'), '列表工具仍可用');
-    assert.ok(!off.includes('s-bare'), '没备注的图看不到，不该留在清单里（省 token，也避免诱导调不存在的工具）');
-    assert.ok(off.includes('s-note'), '有备注的图仍要列出来（按备注名可以发）');
+    assert.ok(!off.includes('无备注'), '没备注的图看不到，不该留在清单里（省 token，也避免诱导调不存在的工具）');
+    assert.ok(off.includes('无语'), '有备注的图仍要列出来（按备注名可以发）');
   } finally {
     updateConfig({ messageTypes: { stickers: true } });
   }

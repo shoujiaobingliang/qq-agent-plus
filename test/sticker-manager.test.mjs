@@ -139,13 +139,14 @@ test('reports pending cleanup when a deleted sticker image cannot be removed', (
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'stickers.json'), 'utf8')), []);
 });
 
-test('prompt exposes sticker IDs and exact unique labels remain compatible', () => {
+test('prompt exposes compact labels and exact unique labels remain compatible', () => {
   const entries = [
     { id: 'sticker-1', desc: '无语团子', localNote: '', url: 'https://example.com/1.png' },
     { id: 'sticker-2', desc: '开心团子', localNote: '庆祝', url: 'https://example.com/2.png' }
   ];
   const prompt = buildStickerContext(entries, 10);
-  assert.match(prompt, /无语团子.*stickerId：sticker-1/);
+  assert.match(prompt, /^- 无语团子.*\[表情\]/m);
+  assert.equal(prompt.includes('stickerId'), false, '清单不再常驻完整 id');
   assert.equal(findSticker(entries, '无语团子')?.id, 'sticker-1');
   assert.equal(findSticker(entries, '庆祝')?.id, 'sticker-2');
   assert.equal(findSticker([
@@ -168,7 +169,8 @@ test('sticker list keeps familiar ones and rotates unused ones in', () => {
       createdAt: new Date(1_700_000_000_000 + i).toISOString()
     });
   }
-  const ids = (text) => [...text.matchAll(/stickerId：([\w-]+)/g)].map((m) => m[1]);
+  const ids = (text) => [...text.matchAll(/^- 备注(\d+)/gm)].map((m) => `st-${m[1].padStart(2, '0')}`);
+  const lineCount = (text) => (text.match(/^- /gm) || []).length;
   const prompt = buildStickerContext(entries, 10);
   const shown = ids(prompt);
   assert.equal(shown.length, 10, '清单条数按 max 取满');
@@ -178,7 +180,7 @@ test('sticker list keeps familiar ones and rotates unused ones in', () => {
   assert.ok(shown.slice(5).every((id) => Number(id.slice(3)) > 6),
     `轮换位应全是没用过的，实际：${shown.join(',')}`);
   // 没用过的会标出来，模型才知道可以直接试
-  assert.match(prompt, /（没用过）（stickerId：st-\d+）/);
+  assert.match(prompt, /\[新\]/);
   // 幂等：同一份库连着渲染两次结果完全一致（这段清单常驻系统提示、属于缓存前缀）
   assert.equal(buildStickerContext(entries, 10), prompt);
   // 用掉一张轮换位上的图 → 下一张没用过的顶上来
@@ -190,8 +192,8 @@ test('sticker list keeps familiar ones and rotates unused ones in', () => {
   // 上限 60：手改配置写大了也不会把整库塞进提示词
   const big = [];
   for (let i = 0; i < 200; i++) big.push({ id: `b-${i}`, url: `https://example.com/b${i}.png` });
-  assert.equal(ids(buildStickerContext(big, 500)).length, 60);
-  assert.equal(ids(buildStickerContext(entries, 500)).length, 40);
+  assert.equal(lineCount(buildStickerContext(big, 500)), 60);
+  assert.equal(lineCount(buildStickerContext(entries, 500)), 40);
 });
 
 test('全新表情库：不说"前几个是常用的"，也不让超长备注吃满提示词', () => {
@@ -204,11 +206,11 @@ test('全新表情库：不说"前几个是常用的"，也不让超长备注吃
   assert.equal(prompt.includes('是常用的'), false, '一句"常用的"都不能有');
   assert.match(prompt, /都还没用过/);
 
-  // 单行上限：备注 300 字（入库上限）也不该原样进提示词，否则 60 条 × 300 字 ≈ 1.8 万字符
+  // 单行上限：备注 300 字（入库上限）也不该原样进提示词；新格式只留 24 字短标签
   const long = [{ id: 'long-1', desc: '长'.repeat(300), url: 'https://example.com/l.png', useCount: 1, lastUsedAt: 1 }];
   const line = buildStickerContext(long, 1);
-  assert.ok(line.includes('长'.repeat(60)), '前 60 字保留');
-  assert.equal(line.includes('长'.repeat(61)), false, '第 61 字起截断');
+  assert.ok(line.includes('长'.repeat(24)), '前 24 字保留');
+  assert.equal(line.includes('长'.repeat(25)), false, '第 25 字起截断');
   assert.match(line, /…/);
 });
 
@@ -221,12 +223,12 @@ test('prompt never teaches get_sticker_image when image input is off', () => {
   ];
   const withVision = buildStickerContext(entries, 10);
   assert.match(withVision, /get_sticker_image/);
-  assert.match(withVision, /可先看图/, '能看图时才说"可先看图"');
+  assert.match(withVision, /没用过的可以先 get_sticker_image/, '能看图时才说先看图');
   const noVision = buildStickerContext(entries, 10, { vision: false });
   assert.doesNotMatch(noVision, /get_sticker_image/);
-  assert.doesNotMatch(noVision, /可先看图/);
+  assert.doesNotMatch(noVision, /没用过的可以先 get_sticker_image/);
   assert.match(noVision, /无语团子/, '有备注的仍然要列出来');
-  assert.doesNotMatch(noVision, /st-2/, '没备注且看不到图的图不占清单名额');
+  assert.doesNotMatch(noVision, /无备注/, '没备注且看不到图的图不占清单名额');
   // 一张有备注的都没有时整段不出现（否则会留下一串看不懂的 id）
   assert.equal(buildStickerContext([{ id: 'st-9', url: 'https://example.com/9.png' }], 10, { vision: false }), '');
   // 策略段同理：两种配置都不能提那个工具
@@ -245,15 +247,14 @@ test('库大而用过的少时，清单多带没用过的进来（用户反馈"�
       createdAt: new Date(1_700_000_000_000 + i).toISOString()
     });
   }
-  const ids = (text) => [...text.matchAll(/stickerId：([\w-]+)/g)].map((m) => m[1]);
+  const ids = (text) => [...text.matchAll(/^- 备注(\d+)/gm)].map((m) => `s${m[1].padStart(2, '0')}`);
   const prompt = buildStickerContext(entries, 30);
   const shown = ids(prompt);
   assert.equal(shown.length, 30, '条数按上限取满');
   const usedShown = shown.filter((id) => Number(id.slice(1)) <= 11);
   assert.equal(usedShown.length, 11, '用过的都还在（常用保底），但不占没有意义的名额');
   assert.equal(shown.length - usedShown.length, 19, '剩下的名额全给没用过的');
-  assert.match(prompt, /库里还有 28 张没发过/, '抬头要写出库里还有多少张没用过');
-  assert.match(prompt, /优先挑后面这批没见过的用/);
+  assert.match(prompt, /优先试\[新\]/);
   // 幂等（这段清单常驻系统提示、属于缓存前缀）
   assert.equal(buildStickerContext(entries, 30), prompt);
 });
@@ -280,7 +281,7 @@ test('抬头在"只有一个/全都没用过"与"全都用过"两个边界不再
   const p2 = buildStickerContext(allUsed, 4);
   assert.equal(p2.includes('没见过的'), false, '库里没有没用过的，就别劝它挑新的');
   assert.equal(p2.includes('还有 0 张没发过'), false);
-  assert.match(p2, /最近没用过的/);
+  assert.match(p2, /最近没用的/);
 });
 
 
@@ -291,10 +292,10 @@ test('清单把两类来源标出来：QQ 收藏表情 vs 本地图库（发出�
     { id: 'manual_abc', desc: '手动上传的图', localFile: 'sticker-assets/manual_abc.png', source: 'manual', useCount: 0 }
   ];
   const prompt = buildStickerContext(entries, 10);
-  assert.match(prompt, /真表情.*〔QQ收藏表情〕/);
-  assert.match(prompt, /收藏的图片.*〔本地图库·发出去是图片〕/);
-  assert.match(prompt, /手动上传的图.*〔本地图库·发出去是图片〕/);
-  assert.match(prompt, /标〔QQ收藏表情〕的发出去是表情/);
+  assert.match(prompt, /真表情.*\[表情\]/);
+  assert.match(prompt, /收藏的图片.*\[图\]/);
+  assert.match(prompt, /手动上传的图.*\[图\]/);
+  assert.match(prompt, /\[表情\]=QQ收藏表情，\[图\]=本地图库/);
 });
 
 test('收藏入库即落盘：发送走 base64（不再依赖会过期的消息链接）', async (t) => {

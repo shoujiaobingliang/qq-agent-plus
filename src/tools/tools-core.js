@@ -501,7 +501,7 @@ function memeLookupDescription() {
   if (!search) {
     return '查本地梗库里的网络用语/梗/黑话/缩写。当前联网搜索已关闭：只能查本地库，查不到就照实说不知道或问一句，不要编造；管理员可以在控制台补充词条。';
   }
-  return '查网络用语/梗/黑话/圈内缩写/看不懂的词。先查本地梗库，没有再普通联网搜索。拿到结果后先把摘要代回原句：能理解就直接用；如果仍然读不通（只有字面意思、是无关新闻/商品页、结果互相矛盾，或 signals.likelyInsufficient=true），不要硬猜，再用 mode="source" 查萌娘百科等梗来源。看懂后可用 mode="memorize" 传一句短解释存入本地候选库（管理员确认后长期生效，下次直接命中）。聊天里遇到不确定的词先用它。';
+  return '查网络用语/梗/黑话/圈内缩写/看不懂的词。先查本地梗库，没有再普通联网搜索。拿到结果后先把摘要代回原句：能理解就直接用；如果仍然读不通（只有字面意思、是无关新闻/商品页、结果互相矛盾，或 signals.likelyInsufficient=true），不要硬猜，再用 mode="source" 查萌娘百科等梗来源。看懂后可用 mode="memorize" 传一句短解释存入本地候选库（管理员确认后长期生效，下次直接命中）。聊天里遇到不确定的词先用它。如果返回 found=false 或没有可用结果，不要反复用同一个词查：换关键词、用 web_search 搜来源，或直接问群友/照实说不知道；不要把工具内部报错原样说给群友。';
 }
 
 export function buildToolDefs() {
@@ -552,7 +552,7 @@ export function buildToolDefs() {
     },
     {
       name: 'send_sticker',
-      description: '发送一个收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 直接填【可用表情包】里那行开头的备注名即可，也接受完整 id。',
+      description: '发送一个收藏表情（一条消息只能一张表情，不能附带文字；想说的话先用 send_message 单独发）。stickerId 填【可用表情包】里那行开头的备注名即可；清单只是样本，没有合适的先用 list_stickers 按关键词/标签查（它也会返回完整 id），再发送。也接受完整 id。',
       parameters: {
         type: 'object',
         properties: {

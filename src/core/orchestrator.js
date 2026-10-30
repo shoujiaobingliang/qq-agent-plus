@@ -2591,14 +2591,14 @@ export class Orchestrator {
       session
     });
 
-    // 审计/会话详情：system 含常驻技能；人设单独作为 user 消息，但审计串仍把两者拼在一起，
-    // 控制台的“这次用了哪张卡”靠 personaLabelOfPrompt(systemPrompt) 识别。
-    const auditSystemPrompt = personaPrompt ? `${systemPrompt}\n\n${personaPrompt}` : systemPrompt;
-    session.systemPrompt = auditSystemPrompt;
+    // 审计/会话详情：system 与人设分开存，避免同一份内容在 systemPrompt 和
+    // personaPrompt 里各存一遍（systemPrompt 仍等于 messages[0]，那是请求本身的审计副本）。
+    // 控制台的“这次用了哪张卡”改读 personaPrompt（老会话回退到 systemPrompt）。
+    session.systemPrompt = systemPrompt;
     session.personaPrompt = personaPrompt;
     session.personaIntro = personaIntro;
     session.userPrompt = userPrompt;
-    session.promptChars = auditSystemPrompt.length + personaIntro.length
+    session.promptChars = systemPrompt.length + personaPrompt.length + personaIntro.length
       + userPrompt.length + JSON.stringify(priorProviderMessages).length;
     session.model = cfg.api.model;
     session.conversationMode = conversationCfg.mode;

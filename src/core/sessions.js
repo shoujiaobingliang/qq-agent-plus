@@ -153,7 +153,7 @@ export class SessionRegistry {
       threadExpiresAt: s.threadExpiresAt ?? 0,
       threadCloseReason: s.threadCloseReason ?? '',
       promptLayout: s.promptLayout ?? '',
-      persona: personaLabelOfPrompt(s.systemPrompt),
+      persona: personaLabelOfPrompt(s.personaPrompt || s.systemPrompt),
       lifecycleContinuation: s.lifecycleContinuation === true,
       callUsage: s.callUsage ?? []
     };
