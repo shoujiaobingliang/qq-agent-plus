@@ -105,7 +105,8 @@ for (const srcFile of htmlFilesUpToApp()) {
   new vm.Script(toClassicScript(raw, srcFile), { filename: `ui/${srcFile}` }).runInContext(ctx);
 }
 
-const CHAT_MSG_PAGE_GUESS = 500;
+const CHAT_MSG_PAGE = vm.runInContext('CHAT_MSG_PAGE', ctx);
+const CHAT_MSG_MORE = vm.runInContext('CHAT_MSG_MORE', ctx);
 const state_currentChatKey = 'group:test';
 
 // 造 1200 条消息
@@ -138,11 +139,11 @@ const scrollToBottom = () => { chatDetail.scrollTop = chatDetail.scrollHeight - 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 console.log('\n=== ② 加载更多时滚动位置保持 ===');
-// 首屏 500 条
-check('首屏显示 500 条', (tbody.innerHTML.match(/<tr/g) || []).length === 500,
+// 首屏 CHAT_MSG_PAGE 条
+check(`首屏显示 ${CHAT_MSG_PAGE} 条`, (tbody.innerHTML.match(/<tr/g) || []).length === CHAT_MSG_PAGE,
   String((tbody.innerHTML.match(/<tr/g) || []).length));
 
-// 模拟用户滚到底部（内容 500 条 → 给一个合理的高度）
+// 模拟用户滚到底部（内容满一页 → 给一个合理的高度）
 chatDetail.scrollHeight = 8000;
 scrollToBottom();
 const beforeHeight = chatDetail.scrollHeight;
@@ -159,9 +160,9 @@ chatDetail.scrollHeight = beforeHeight + 3000;   // 新增 200 条 → 高度增
 // 关键断言：scrollTop 没被重置为 0（原 bug 就是这里被重置）
 check('加载后 scrollTop 未被重置为 0', chatDetail.scrollTop !== 0,
   `scrollTop=${chatDetail.scrollTop}（原 bug 会变成 0）`);
-check('加载后显示了 700 条', (tbody.innerHTML.match(/<tr/g) || []).length === 700,
+check(`加载后显示了 ${CHAT_MSG_PAGE + CHAT_MSG_MORE} 条`, (tbody.innerHTML.match(/<tr/g) || []).length === CHAT_MSG_PAGE + CHAT_MSG_MORE,
   String((tbody.innerHTML.match(/<tr/g) || []).length));
-// 追加式渲染：已有 500 行的 HTML 必须原样保留（前缀不变），只往下接新行。
+// 追加式渲染：已有行的 HTML 必须原样保留（前缀不变），只往下接新行。
 // 全量重建时浏览器会重排已有行 —— 那就是"临界线滚动迟钝"的根源之一。
 check('加载更多是追加（已有行未重建）', tbody.innerHTML.startsWith(tbodyHtmlBefore),
   '已有行的 HTML 被重写了（说明还在全量重建）');
@@ -173,7 +174,7 @@ scrollFns[0]();
 await sleep(150);
 check('连续加载仍不重置（可继续滚）', chatDetail.scrollTop >= topBefore2,
   `${topBefore2} -> ${chatDetail.scrollTop}`);
-check('第二次加载后 900 条', (tbody.innerHTML.match(/<tr/g) || []).length === 900,
+check(`第二次加载后 ${CHAT_MSG_PAGE + 2 * CHAT_MSG_MORE} 条`, (tbody.innerHTML.match(/<tr/g) || []).length === CHAT_MSG_PAGE + 2 * CHAT_MSG_MORE,
   String((tbody.innerHTML.match(/<tr/g) || []).length));
 
 console.log('\n=== ③ 外层结构不重建（工具栏事件不重复绑）===');
@@ -222,7 +223,7 @@ console.log('\n=== ⑤ 轮询刷新保持已加载内容与位置 ===');
   chatDetail.scrollHeight = 8000;
   const scrollFns = listeners.get(chatDetail).scroll;
 
-  // 滚两次，加载出 900 条
+  // 滚两次，加载出 CHAT_MSG_PAGE + 2×CHAT_MSG_MORE 条
   scrollToBottom(); scrollFns[0]();
   await sleep(150);
   scrollToBottom(); scrollFns[0]();
@@ -243,11 +244,12 @@ console.log('\n=== ⑤ 轮询刷新保持已加载内容与位置 ===');
   vm.runInContext('api = globalThis.__origApi;', ctx);
 
   const rowsAfter = (tbody.innerHTML.match(/<tr/g) || []).length;
-  check('轮询后已加载条数不变（900）', rowsAfter === rowsBefore && rowsBefore === 900,
+  const expectedRows = CHAT_MSG_PAGE + 2 * CHAT_MSG_MORE;
+  check(`轮询后已加载条数不变（${expectedRows}）`, rowsAfter === rowsBefore && rowsBefore === expectedRows,
     `${rowsBefore} -> ${rowsAfter}`);
   check('轮询后滚动位置不变', chatDetail.scrollTop === topBefore,
     `${topBefore} -> ${chatDetail.scrollTop}`);
-  check('轮询后没有回到第一页（不是 500）', rowsAfter !== CHAT_MSG_PAGE_GUESS,
+  check(`轮询后没有回到第一页（不是 ${CHAT_MSG_PAGE}）`, rowsAfter !== CHAT_MSG_PAGE,
     `实际 ${rowsAfter}`);
 }
 
@@ -259,7 +261,7 @@ console.log('\n=== ⑥ 快速滚到底：被节流的尾部事件必须补触发
 {
   const fns = listeners.get(chatDetail).scroll;
   await sleep(150);                              // 先让节流窗口过去
-  const rowsBefore = (tbody.innerHTML.match(/<tr/g) || []).length;   // 900（⑤ 之后）
+  const rowsBefore = (tbody.innerHTML.match(/<tr/g) || []).length;   // ⑤ 之后
   chatDetail.scrollHeight = 20000;
 
   // 第一次事件：不在底部 → 立即处理但不加载，同时刷新节流时间戳
@@ -274,7 +276,7 @@ console.log('\n=== ⑥ 快速滚到底：被节流的尾部事件必须补触发
 
   await sleep(200);                              // 等尾随调用执行
   const rowsAfter = (tbody.innerHTML.match(/<tr/g) || []).length;
-  check('尾随调用补上了加载（900 → 1100）', rowsAfter === rowsBefore + 200,
+  check(`尾随调用补上了加载（${rowsBefore} → ${rowsBefore + CHAT_MSG_MORE}）`, rowsAfter === rowsBefore + CHAT_MSG_MORE,
     `${rowsBefore} -> ${rowsAfter}（没补上就是"滚得快滚不下去"那个 bug）`);
 }
 

@@ -19,7 +19,6 @@ import {
   lifecycleRemainingText, lifecycleRunsFor, lifecycleStateOf, triggerKindLabel
 } from '../core/lifecycle-labels.js';
 import { state } from '../core/state.js';
-import { loadChats } from './chat.js';
 import { loadExperimentalFeatureStatuses } from './features.js';
 import { loadDailyMomentsStatus, loadQzoneInteractionStatus } from './moments.js';
 function lifecycleAggregate(s) {
@@ -92,7 +91,6 @@ async function resumePause({ skipBacklog = false } = {}) {
       await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused: false }) });
     }
     await refreshStatus();
-    if (state.tab === 'chats') loadChats({ quiet: true });
   } catch (e) {
     console.error('恢复失败:', e);
   }

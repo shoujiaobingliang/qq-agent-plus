@@ -3985,9 +3985,9 @@ try {
       + `备注写入走 __replace__（新增=${okSet}，删除=${okDel}，未加载/多写方时不误清=${okGuard}）`);
   }
 
-  // ── 存档页 / 顶栏刷新的合并（2026-09-29 审查 P2）──
-  //    chat-update 是"每条落库消息推一次"：不合并的话存档页会为每条消息重拉整段历史并重建表格，
-  //    人物印象/异常处理页还会各自整页重拉。这里连推 5 次，断言只发生一轮刷新。
+  // ── 存档页 / 顶栏刷新（2026-10-29 磁盘风暴复盘）──
+  //    chat-update 是"每条落库消息推一次"：存档页不再跟着刷新（会把云盘读满），
+  //    顶栏仍合并成一轮。这里连推 5 次，断言存档页 0 次、顶栏 1 次。
   {
     ctx.connectSSE();
     const originalFetch = sandbox.fetch;
@@ -4001,8 +4001,7 @@ try {
     const originalRefreshStatus2 = originalRefreshStatus;
     let statusCalls = 0;
     sandbox.refreshStatus = () => { statusCalls++; };
-    // 存档页另有一条每 4 秒的列表轮询（startListPoller，ui/app.js 里启动的那个）：不把它挪开，
-    // 它就会在观测窗口里插一脚，"5 次事件只刷一轮"的断言会变成看运气。
+    // 列表轮询已不再刷新存档页（2026-10-29）；这里仍把间隔拉长，避免其他轮询干扰观测。
     sandbox.refreshIntervalMs = () => 3600 * 1000;
     ctx.startListPoller();
     vm.runInContext("state.tab = 'chats'; state.currentChatKey = '';", ctx);
@@ -4020,10 +4019,10 @@ try {
     ctx.startListPoller();                           // 恢复原来的轮询间隔
     vm.runInContext("state.tab = '';", ctx);
 
-    const ok = chatCalls === 1 && statusCalls === 1;
+    const ok = chatCalls === 0 && statusCalls === 1;
     ok ? pass++ : fail++;
     console.log('  ' + (ok ? 'OK   ' : 'FAIL ')
-      + `连推 5 次 chat-update 只刷新一轮（存档页 ${chatCalls} 次、顶栏 ${statusCalls} 次，期望各 1 次）`
+      + `连推 5 次 chat-update 不刷新存档、只刷新顶栏（存档页 ${chatCalls} 次、顶栏 ${statusCalls} 次，期望 0 / 1 次）`
       + (ok ? '' : ' -> ' + JSON.stringify(paths)));
   }
 

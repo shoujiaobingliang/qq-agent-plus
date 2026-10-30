@@ -8,7 +8,7 @@ const SESSION_PAGE = 50;      // 会话页：一次渲染多少条
 
 const SESSION_KEEP = 400;     // 会话页：内存里最多保留多少条（与请求量一致）
 
-const CHAT_MSG_PAGE = 500;    // 存档页：首次加载条数
+const CHAT_MSG_PAGE = 200;    // 存档页：首次加载条数（也是单次拉取上限，2026-10-29 磁盘风暴复盘）
 
 const CHAT_MSG_MORE = 200;    // 存档页：每次滚动追加
 

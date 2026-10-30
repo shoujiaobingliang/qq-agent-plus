@@ -26,6 +26,19 @@ describe('ChatStore', () => {
     assert.deepEqual(store.recent('group:1', { limit: 1, offset: 1 }).map((m) => m.mid), ['1']);
   });
 
+  it('chatMetas matches per-chat getChatMeta', (t) => {
+    const { store } = fixture(t);
+    store.appendIncoming('group:1', { mid: 1, text: 'g1', senderId: '42', senderName: 'member' });
+    store.appendIncoming('group:1', { mid: 2, text: 'g2', senderId: '42', senderName: 'member' });
+    store.appendIncoming('private:42', { mid: 3, text: 'p1', senderId: '42', senderName: 'member' });
+    const metas = store.chatMetas();
+    const keys = store.listChats();
+    assert.deepEqual([...metas.keys()].sort(), keys.slice().sort());
+    for (const key of keys) {
+      assert.deepEqual(metas.get(key), store.getChatMeta(key));
+    }
+  });
+
   it('claims a snapshot without acknowledging it and keeps later messages pending', (t) => {
     const { store } = fixture(t);
     append(store, 1);

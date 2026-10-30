@@ -20,7 +20,7 @@ import {
   uiServiceOfUrl
 } from '../core/format.js';
 import { refreshIntervalMs, state } from '../core/state.js';
-import { loadChats, renderChatSection } from './chat.js';
+import { renderChatSection } from './chat.js';
 import {
   renderDailyMomentsSection, renderGroupGameSection, renderQzoneInteractionSection, renderRemindersSection
 } from './moments.js';
@@ -53,7 +53,6 @@ function startListPoller() {
   state.listPoller = setInterval(() => {
     if (state.tab === 'control') refreshAutoUpdateStatus();
     if (state.tab === 'sessions') loadSessions({ quiet: true });
-    if (state.tab === 'chats') loadChats({ quiet: true });
     if (state.tab === 'usage') loadUsageView();   // 无 force：只更新数值，不重建 DOM
     if (state.tab === 'settings') refreshStatus();
   }, refreshIntervalMs());

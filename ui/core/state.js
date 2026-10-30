@@ -112,15 +112,12 @@ const pendingSessionDetail = new Map();   // sessionId -> 合并后的 patch
 
 state.sessionRenderScheduled = false;
 
-// 存档页的刷新合并：chat-update 是"每条落库消息推一次"，而选中某个群时每次都会重拉
-// 该会话整段历史（limit=100000）并重建整张消息表 —— 活跃群里等于每分钟几十次全量
-// 下载 + 重绘，界面明显卡顿（2026-09-29 审查 P2）。合并到 1.5 秒一次；
-// keepView 仍然生效，所以滚出来的内容不会被刷回去。
-state.chatsRefreshTimer = null;
+// 存档页不再跟随 chat-update 自动刷新：每条消息一次全量重拉会把云盘读满
+//（2026-10-29 磁盘风暴复盘）。列表/消息只在点开会话或手动刷新时读取。
 
-// 顶栏状态同样合并：chat-update 是每条消息一次，而 status-refresh.js 重写过的 refreshStatus
+// 顶栏状态做合并：chat-update 是每条消息一次，而 status-refresh.js 重写过的 refreshStatus
 // 在人物印象 / 异常处理页会各自整页重拉（5 个接口 / 2 个接口 + 整串模板重算）——
-// 只合并存档页的话，这两个页面的请求量一点没少（2026-09-29 审查 P2）。
+// 不合并的话这两个页面会被每条消息拖垮（2026-09-29 审查 P2）。
 state.statusRefreshTimer = null;
 
 // 会话列表定时刷新：只要停在会话页，就持续更新列表（运行中会话也会轮询详情）

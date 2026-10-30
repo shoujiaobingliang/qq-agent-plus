@@ -4822,8 +4822,10 @@ export function createApp({
   });
   router.add('GET', '/api/chats', async (req, res) => {
     const cfgNow = getConfig();
+    // 批量口径：消息/outbox/线程各扫一次库，避免逐会话 getChatMeta 的 861×4 条 SQL。
+    const metas = store.chatMetas();
     const chats = store.listChats().map((key) => {
-      const meta = store.getChatMeta(key);
+      const meta = metas.get(key) || store.getChatMeta(key);
       return {
         key,
         ...meta,

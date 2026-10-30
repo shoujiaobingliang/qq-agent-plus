@@ -16,7 +16,7 @@ import {
 } from './core/constants.js';
 import {
   afterRender, askForConfirmation, bindPeekToggle, closeDialog, hideLoading, initSessionScrollLoader,
-  pollUntilReady, revealLoadingIfSlow, scheduleChatsRefresh, scheduleSessionRender, setBoxError,
+  pollUntilReady, revealLoadingIfSlow, scheduleSessionRender, setBoxError,
   setLoadingStatus, syncGraduatedFeatureNavigation, updateMoodStatus
 } from './core/dom-util.js';
 import { $, $$, esc } from './core/dom.js';
@@ -848,7 +848,6 @@ function connectSSE() {
     let data = {};
     try { data = JSON.parse(ev.data); } catch { /* 数据坏了也照常刷列表 */ }
     loadSessions();
-    if (state.tab === 'chats') loadChats({ quiet: true });
     refreshStatus();
     // ⚠️ 会话刚结束必须主动重拉一次详情：轮询只刷 running/waiting 的会话，
     //    最终态（sent / finishReason / error）之后再也不来 —— 不重拉的话，
@@ -860,7 +859,8 @@ function connectSSE() {
     }
   });
   es.addEventListener('chat-update', () => {
-    if (state.tab === 'chats') scheduleChatsRefresh();
+    // 存档页不再随消息流自动刷新：只在点开会话/手动刷新时读取。
+    // 旧行为每来一条消息就重拉整段历史（活跃群 = 持续全库扫描，2026-10-29 复盘）。
     scheduleStatusRefresh();
   });
   es.addEventListener('memory-update', (ev) => {
@@ -983,7 +983,6 @@ function connectSSE() {
       loadExperimentalFeatureStatuses();
     }
     if (state.tab === 'incidents') loadIncidentFeaturePage();
-    if (state.tab === 'chats') loadChats({ quiet: true });
   });
   es.addEventListener('auto-update', () => {
     if (state.tab === 'control') loadControlHub({ force: true });

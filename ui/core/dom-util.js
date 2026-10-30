@@ -20,7 +20,7 @@ import {
 import { QARegistry } from './registry.js';
 import { scheduleSideNav } from './side-nav.js';
 import { loadingLogs, loadingStatus, pendingSessionDetail, state } from './state.js';
-import { appendChatMessageRows, loadChats, updateChatMessagesBody } from '../pages/chat.js';
+import { appendChatMessageRows, updateChatMessagesBody } from '../pages/chat.js';
 import { renderSessionDetail, renderSessionList } from '../pages/sessions.js';
 function afterRender(name, impl, args) {
   const result = impl(...args);
@@ -415,14 +415,6 @@ function scheduleSessionRender() {
   }, 80);
 }
 
-function scheduleChatsRefresh() {
-  if (state.chatsRefreshTimer) return;
-  state.chatsRefreshTimer = setTimeout(() => {
-    state.chatsRefreshTimer = null;
-    if (state.tab === 'chats') loadChats({ quiet: true });
-  }, 1500);
-}
-
 /**
  * 给滚动容器挂"滚到底部就加载更多"的监听。
  *
@@ -787,7 +779,7 @@ export {
   afterRender, askForConfirmation, bindPeekToggle, experimentalFeatureLaunchPatch, extraBodyText, hideLoading,
   identityPilotSettingsPatch, impressionMetaLabel, initChatScrollLoader, initSessionScrollLoader,
   patchKeyedList, pollUntilReady, readAssetImage, requestExperimentOwnerUin, revealLoadingIfSlow,
-  scheduleChatsRefresh, scheduleSessionRender, setBoxError, setHtmlIfChanged, setLoadingStatus,
+  scheduleSessionRender, setBoxError, setHtmlIfChanged, setLoadingStatus,
   closeDialog, setStatusLabel, splitRowsHtml, syncClampedInputs, syncGraduatedFeatureNavigation,
   updateMoodStatus, updateOnebotStatusLine
 };

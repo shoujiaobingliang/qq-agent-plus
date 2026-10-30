@@ -365,12 +365,9 @@ async function loadChats({ quiet = false } = {}) {
     const data = await api('/api/chats');
     state.chats = data.chats || [];
     renderChatList();
-    if (state.currentChatKey) {
-      // 打开着某群详情时也刷新该群消息。
-      // keepView=true：只更新内容，不动分页与滚动位置 ——
-      // 否则用户滚出来的内容会被每 15 秒的轮询刷回去。
-      loadChatMessages(state.currentChatKey, { keepView: true });
-    }
+    // 存档页不再自动重拉消息：消息只在 selectChat() / 手动刷新 / 操作后加载。
+    // 旧行为会随 chat-update 每条消息触发一次整段历史重拉，活跃群等于持续全库扫描
+    //（2026-10-29 磁盘风暴：vda 143MB/s、97% util 持续到重启）。
   } catch (e) { if (!quiet) console.error(e); }
 }
 
@@ -491,6 +488,11 @@ function renderChatList() {
     box.__archiveFilterBound = true;
     $('#archive-search')?.addEventListener('input', () => renderChatList());
     $('#archive-filter-type')?.addEventListener('change', () => renderChatList());
+    // 存档页只在用户点"刷新"时重新读取；不再跟随消息流自动刷新。
+    $('#archive-refresh')?.addEventListener('click', async () => {
+      await loadChats();
+      if (state.currentChatKey) await loadChatMessages(state.currentChatKey);
+    });
   }
   const q = String($('#archive-search')?.value || '').trim().toLowerCase();
   const ftype = String($('#archive-filter-type')?.value || 'all');
@@ -571,17 +573,16 @@ async function selectChat(key) {
  * 拉取并渲染某会话的存档消息。
  *
  * @param {string} key
- * @param {boolean} keepView  true = 保留当前分页与滚动位置（轮询刷新用）；
- *                            false = 重置为第一页并重建结构（切换会话用）。
+ * @param {boolean} keepView  true = 保留当前分页与滚动位置（标记已读等操作后刷新用）；
+ *                            false = 重置为第一页并重建结构（切换会话/手动刷新用）。
  *
  * ⚠️ 这个参数是修"滚动被冲掉"的关键：
- *    轮询每 15 秒一次、每次 SSE 事件也会触发，如果都走"重置分页 + 重建 DOM"，
- *    用户辛辛苦苦滚出来的内容会瞬间被刷回前 500 条，滚动位置也回到顶部
- *    —— 表现为"明明滚下去了，过一会儿自己弹回上面"。
+ *    操作后刷新如果走"重置分页 + 重建 DOM"，用户滚出来的内容会瞬间刷回第一页，
+ *    滚动位置也回到顶部 —— 表现为"明明滚下去了，过一会儿自己弹回上面"。
  */
 async function loadChatMessages(key, { keepView = false } = {}) {
   try {
-    const data = await api(`/api/chats/${key.replace(':', '_')}/messages?limit=100000`);
+    const data = await api(`/api/chats/${key.replace(':', '_')}/messages?limit=${CHAT_MSG_PAGE}`);
     // 期间用户可能切走了会话，那就别覆盖当前视图
     if (state.currentChatKey !== key) return;
     state.chatMessages = data.messages || [];
@@ -787,20 +788,23 @@ function chatMsgRowHtml(m) {
 /** 更新底部"还有 N 条"与顶部计数文案（全量渲染与追加都要刷这两处）。 */
 function updateChatMessagesMeta(newestFirst) {
   const total = newestFirst.length;
+  const meta = state.chats.find((c) => c.key === state.currentChatKey) || {};
+  const archiveTotal = Number(meta.total) || total;
   const shownCount = Math.min(Math.max(CHAT_MSG_PAGE, Number(state.chatMsgLimit) || CHAT_MSG_PAGE), total);
   const rest = total - shownCount;
   const more = $('#chat-msg-more');
   if (more) {
     more.textContent = rest > 0
       ? `向下滚动加载更早的（还有 ${rest} 条）`
-      : (total > CHAT_MSG_PAGE ? `已显示全部 ${total} 条` : '');
+      : (archiveTotal > shownCount
+          // 单次只拉 CHAT_MSG_PAGE 条：存档里还有更早的，但当前不再自动加载
+          ? `仅显示最近 ${shownCount} 条（存档共 ${archiveTotal} 条）`
+          : (total > CHAT_MSG_PAGE ? `已显示全部 ${total} 条` : ''));
   }
   const cnt = $('#chat-detail')?.querySelector('[data-field="chat-msg-count"]');
   if (cnt) {
-    const meta = state.chats.find((c) => c.key === state.currentChatKey) || {};
-    const t = meta.total || total || 0;
-    cnt.textContent = t
-      ? `共 ${t} 条 · 已显示 ${shownCount} 条 · 存储于 data/messages/`
+    cnt.textContent = archiveTotal
+      ? `共 ${archiveTotal} 条 · 已显示 ${shownCount} 条 · 存储于 data/messages/`
       : '暂无消息';
   }
 }

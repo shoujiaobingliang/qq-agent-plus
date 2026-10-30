@@ -56,6 +56,25 @@ function threadEntry(row) {
   };
 }
 
+/** 控制台列表用的精简线程视图（getChatMeta 与 chatMetas 共用同一口径）。 */
+function threadSummary(thread) {
+  return thread ? {
+    threadId: thread.threadId,
+    mode: thread.mode,
+    state: thread.state,
+    disposition: thread.disposition,
+    topic: thread.topic,
+    participantCount: thread.participantIds.length,
+    engagedUntil: thread.engagedUntil,
+    idleDeadline: thread.idleDeadline,
+    hardDeadline: thread.hardDeadline,
+    resumeArmedUntil: thread.resumeArmedUntil,
+    expiresAt: thread.expiresAt,
+    transcriptChars: thread.transcriptChars,
+    version: thread.version
+  } : null;
+}
+
 function ensureColumn(db, table, name, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
   if (columns.some((column) => column.name === name)) return;
@@ -332,22 +351,73 @@ export class ChatStore {
     return {
       chatKey, total, unread, failed, held: Math.max(heldMessages, uncertain),
       lastTs: last?.ts || 0, lastText: last?.text || '',
-      thread: thread ? {
-        threadId: thread.threadId,
-        mode: thread.mode,
-        state: thread.state,
-        disposition: thread.disposition,
-        topic: thread.topic,
-        participantCount: thread.participantIds.length,
-        engagedUntil: thread.engagedUntil,
-        idleDeadline: thread.idleDeadline,
-        hardDeadline: thread.hardDeadline,
-        resumeArmedUntil: thread.resumeArmedUntil,
-        expiresAt: thread.expiresAt,
-        transcriptChars: thread.transcriptChars,
-        version: thread.version
-      } : null
+      thread: threadSummary(thread)
     };
+  }
+
+  /**
+   * 控制台存档列表的批量版 getChatMeta：消息/outbox/线程各扫一次库，
+   * 避免 861 个会话 × 4 条 SQL 的逐会话扫描（2026-10-29 磁盘风暴复盘）。
+   * 返回 Map<chatKey, meta>，字段与 getChatMeta 完全一致。
+   */
+  chatMetas() {
+    const now = Date.now();
+    // 线程过期是一次性的批量操作；随后一把取回，避免逐会话 getConversationThread。
+    this.expireConversationThreads(now);
+    const metas = new Map();
+    const ensure = (key) => {
+      let meta = metas.get(key);
+      if (!meta) {
+        meta = {
+          chatKey: key, total: 0, unread: 0, failed: 0,
+          heldMessages: 0, uncertain: 0, lastTs: 0, lastText: ''
+        };
+        metas.set(key, meta);
+      }
+      return meta;
+    };
+    for (const key of this.listChats()) ensure(key);
+    for (const row of this.db.prepare(
+      'SELECT chat_key, state, COUNT(*) AS n FROM messages GROUP BY chat_key, state'
+    ).all()) {
+      const meta = ensure(row.chat_key);
+      const n = Number(row.n) || 0;
+      meta.total += n;
+      if (row.state === 'pending' || row.state === 'leased') meta.unread += n;
+      else if (row.state === 'failed') meta.failed += n;
+      else if (row.state === 'held') meta.heldMessages += n;
+    }
+    for (const row of this.db.prepare(`SELECT chat_key,
+      COUNT(DISTINCT COALESCE(run_id,id)) AS held
+      FROM outbox WHERE state IN ('sending','unknown') GROUP BY chat_key`).all()) {
+      ensure(row.chat_key).uncertain = Number(row.held) || 0;
+    }
+    for (const row of this.db.prepare(`SELECT m.chat_key, m.ts, m.text
+      FROM messages m
+      JOIN (SELECT chat_key, MAX(id) AS maxId FROM messages GROUP BY chat_key) t
+        ON t.chat_key=m.chat_key AND t.maxId=m.id`).all()) {
+      const meta = ensure(row.chat_key);
+      meta.lastTs = Number(row.ts) || 0;
+      meta.lastText = row.text || '';
+    }
+    const threads = new Map();
+    for (const row of this.db.prepare('SELECT * FROM conversation_threads').all()) {
+      if (row.state !== 'closed') threads.set(row.chat_key, threadEntry(row));
+    }
+    const out = new Map();
+    for (const [key, meta] of metas) {
+      out.set(key, {
+        chatKey: key,
+        total: meta.total,
+        unread: meta.unread,
+        failed: meta.failed,
+        held: Math.max(meta.heldMessages, meta.uncertain),
+        lastTs: meta.lastTs,
+        lastText: meta.lastText,
+        thread: threadSummary(threads.get(key))
+      });
+    }
+    return out;
   }
 
   unreadCount(chatKey) {
