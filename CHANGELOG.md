@@ -4,6 +4,22 @@
 [`docs/CHANGES.md`](docs/CHANGES.md)，发布说明以
 [GitHub Releases](https://github.com/sakurawwwxh/qq-agent-plus/releases) 为准。
 
+## 0.9.5（2026-11-02）
+
+**新增**
+
+- **自动更新仅检查模式（checkOnly）**：定时任务只检查最新已发布 Release，不再执行
+  `git fetch`、`npm ci`、测试或 `deploy.sh`；发现新版本时写 `update-available`，
+  由管理员在维护窗口手动部署。
+- `autoUpdate.notifyOnUpdate` 控制 checkOnly 发现新版本时是否私聊管理员；关闭后只保留
+  控制台「发现新版本」弹窗，且不要求配置管理员 QQ。
+- 控制台「控制 → 更新部署」新增「仅检查新版本，不自动部署」与「发现新版本时通知管理员」
+  两个开关；checkOnly 模式下按钮文案改为「立即检查 / 暂停检查 / 恢复检查」。
+
+**修复**
+
+- 自动更新的通知文案区分「发现新版本」与「更新部署失败」，checkOnly 不再发送失败告警。
+
 ## 0.9.4（2026-10-28）
 
 **新增**
