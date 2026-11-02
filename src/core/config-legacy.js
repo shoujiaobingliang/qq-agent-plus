@@ -496,6 +496,10 @@ export const DEFAULT_CONFIG = {
   // GitHub 自动更新。外部 systemd timer 只负责唤醒，是否实际检查由 enabled 控制。
   autoUpdate: {
     enabled: false,
+    // 仅检查并通知，不自动部署；默认关，保持现有自动部署行为。
+    checkOnly: false,
+    // checkOnly 发现新版本时是否私聊管理员；默认开。
+    notifyOnUpdate: true,
     ownerUin: '',
     // 留空 = 跟随当前部署来源（.deployment.json / git origin / 环境变量）；
     // 从 fork 部署时默认指向 fork，而不是上游。手动保存后 repositoryPinned=true。
@@ -2459,6 +2463,8 @@ export function updateConfig(patch) {
   next.autoUpdate = {
     ...autoUpdate,
     enabled: autoUpdate.enabled === true,
+    checkOnly: autoUpdate.checkOnly === true,
+    notifyOnUpdate: autoUpdate.notifyOnUpdate !== false,
     ownerUin: /^\d{5,15}$/.test(String(autoUpdate.ownerUin || '').trim())
       ? String(autoUpdate.ownerUin).trim()
       : '',
@@ -2472,7 +2478,9 @@ export function updateConfig(patch) {
       Math.max(1, Math.round(Number(autoUpdate.intervalHours) || 6))
     )
   };
-  if (next.autoUpdate.enabled) {
+  // checkOnly 且关闭通知时不需要管理员 QQ；正常自动部署仍需要失败告警联系人。
+  if (next.autoUpdate.enabled
+    && (next.autoUpdate.checkOnly !== true || next.autoUpdate.notifyOnUpdate !== false)) {
     if (!next.autoUpdate.ownerUin) {
       throw new Error('自动更新需要配置告警管理员 QQ');
     }

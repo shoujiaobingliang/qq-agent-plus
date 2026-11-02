@@ -124,6 +124,39 @@ test('launch failure can keep automatic updates enabled by policy', async (t) =>
   assert.match(f.notifications[0].text, /保持启用/);
 });
 
+test('check-only update notice does not claim a deployment failure', async (t) => {
+  const f = fixture(t);
+  writeAutoUpdateState(f.dataDir, {
+    status: 'update-available',
+    mode: 'scheduled',
+    targetVersion: 'v0.9.5',
+    currentVersion: '0.9.4',
+    updateNotice: { localVersion: '0.9.4', url: 'https://example.com/v0.9.5' },
+    notification: { pending: true, ownerUin: '900001', sentAt: 0, error: '' }
+  });
+
+  await f.manager.resumeNotifications();
+
+  assert.equal(f.notifications.length, 1);
+  assert.match(f.notifications[0].text, /发现新版本/);
+  assert.match(f.notifications[0].text, /v0\.9\.5/);
+  assert.match(f.notifications[0].text, /未执行部署/);
+  assert.doesNotMatch(f.notifications[0].text, /更新部署失败/);
+  assert.equal(readAutoUpdateState(f.dataDir).notification.pending, false);
+});
+
+test('checkOnly without notifications can run a manual check without an admin QQ', (t) => {
+  const f = fixture(t);
+  f.setAdmin('');
+  f.setAllowPrivate([]);
+  f.setAutoUpdate({ enabled: true, checkOnly: true, notifyOnUpdate: false });
+
+  const status = f.manager.requestManual();
+  assert.equal(status.status, 'queued');
+  const request = consumeAutoUpdateRequest(f.dataDir);
+  assert.equal(request.mode, 'manual');
+});
+
 test('manual update queues the independent systemd updater', (t) => {
   const f = fixture(t);
   const status = f.manager.requestManual();

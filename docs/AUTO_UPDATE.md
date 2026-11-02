@@ -50,6 +50,8 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
 {
   "autoUpdate": {
     "enabled": false,
+    "checkOnly": false,
+    "notifyOnUpdate": true,
     "ownerUin": "",
     "repository": "",
     "repositoryPinned": false,
@@ -72,6 +74,10 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
 ```
 
 - 仓库只接受 GitHub HTTPS 地址。
+- `checkOnly`：只检查最新已发布 Release。发现新版本时写状态并按 `notifyOnUpdate` 通知管理员，
+  **不执行 git fetch、`npm ci`、测试或 `deploy.sh`**；部署由管理员手动执行。
+- `notifyOnUpdate`：`checkOnly` 发现新版本时是否私聊管理员，默认 `true`。关闭后只在控制台
+  「控制 → 更新部署」显示状态；`checkOnly + notifyOnUpdate=false` 不要求配置管理员 QQ。
 - `repository` 留空（或仍是旧版写死的上游默认值）时，按**当前部署来源**解析：`.deployment.json` → 当前 checkout 的 `git origin` → `package.json` → 最后才回落到上游。从 fork 部署时默认检查 fork，而不是上游；`QQ_AGENT_REPOSITORY` 可显式覆盖。
 - 在控制页显式修改并保存目标仓库后 `repositoryPinned=true`，后续不再跟随部署来源；把仓库清空再保存可恢复跟随。
 - 分支名经过格式校验，默认 `main`；控制页可直接修改目标仓库和分支。
@@ -87,6 +93,29 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
 - `snowluma.followBaseline`（**默认开**）：**协议端随本体版本对齐** —— 部署新版本后、主服务
   以新代码启动时，若新版带的协议端基线比当前镜像高就自动升级一次；基线没变（发版没动协议端）
   时不会有任何动作。设了 `snowluma.image`（自定义镜像）的机器永不被自动动到（锁版本优先）。
+
+## 仅检查模式（checkOnly）
+
+开启 `checkOnly` 后，定时器每次只做：
+
+1. 读取最新**已发布 Release**（GitHub API，带超时）；
+2. 与本地 `package.json` 版本/部署基线比较；
+3. 有新版本时写 `status=update-available`，并按 `notifyOnUpdate` 私聊管理员；
+4. 结束。
+
+不会执行 `git fetch`、`npm ci`、测试或 `deploy.sh`，也不创建 `data/update-work/checkout-*`。
+部署仍由管理员在维护窗口手动执行：
+
+```bash
+cd /data/qq-agent/app
+git fetch --tags origin
+git checkout <tag-or-commit>
+bash deploy.sh --install-dir /data/qq-agent/app --data-dir /data/qq-agent/data \
+  --host 127.0.0.1 --port 3210 --service qq-agent-linux
+```
+
+`notifyOnUpdate=false` 时只在控制台「控制 → 更新部署」显示状态，不发送 QQ 通知；
+此时 `checkOnly` 不要求配置管理员 QQ。
 
 ## 更新流程
 
@@ -165,6 +194,9 @@ timer 每小时唤醒一次，应用配置中的 `intervalHours` 决定是否已
 ## 失败策略
 
 检查、测试或部署失败都会在 `data/auto-update.json` 保存失败阶段、脱敏错误和目标提交，并在服务可用且协议端（OneBot）已连接后向管理员发送一次通知。
+
+`checkOnly` 发现新版本时复用同一条通知通道，但发送的是「发现新版本」而不是失败告警；它不改变
+`autoUpdate.enabled`，也不触发 `disableOnFailure`。`notifyOnUpdate=false` 时不排队通知。
 
 `disableOnFailure=true` 时：
 

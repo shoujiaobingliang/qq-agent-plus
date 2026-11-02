@@ -329,6 +329,8 @@ export class AutoUpdateManager {
       repositoryPinned: settings.repositoryPinned === true,
       branch: String(settings.branch || 'main'),
       intervalHours: Number(settings.intervalHours) || 6,
+      checkOnly: settings.checkOnly === true,
+      notifyOnUpdate: settings.notifyOnUpdate !== false,
       ...network,
       nextCheckAt: settings.enabled === true
         ? Math.max(Date.now(), Number(state.lastCheckAt || 0) + intervalMs)
@@ -364,7 +366,9 @@ export class AutoUpdateManager {
       'connectivityTimeoutSeconds',
       'fetchTimeoutSeconds',
       'forceHttp11',
-      'disableOnFailure'
+      'disableOnFailure',
+      'checkOnly',
+      'notifyOnUpdate'
     ]) {
       if (options[key] !== undefined) next[key] = options[key];
     }
@@ -384,7 +388,7 @@ export class AutoUpdateManager {
     return cfg.autoUpdate;
   }
 
-  resume({ ownerUin, intervalHours = 6, repository, branch } = {}) {
+  resume({ ownerUin, intervalHours = 6, repository, branch, checkOnly, notifyOnUpdate } = {}) {
     const current = this.config();
     const adminPatch = ownerUin === undefined
       ? null
@@ -394,6 +398,8 @@ export class AutoUpdateManager {
       enabled: true,
       intervalHours
     };
+    if (checkOnly !== undefined) next.checkOnly = checkOnly === true;
+    if (notifyOnUpdate !== undefined) next.notifyOnUpdate = notifyOnUpdate !== false;
     if (repository !== undefined) {
       const previousRepository = String(current.autoUpdate?.repository || '').trim();
       const nextRepository = String(repository || '').trim();
@@ -458,7 +464,9 @@ export class AutoUpdateManager {
       });
     }
     const ownerUin = autoUpdateOwner(cfg);
-    if (!probeOnly) {
+    const checkOnlyWithoutNotice = cfg.autoUpdate?.checkOnly === true
+      && cfg.autoUpdate?.notifyOnUpdate === false;
+    if (!probeOnly && !checkOnlyWithoutNotice) {
       if (!/^\d{5,15}$/.test(ownerUin)) {
         throw updateError('请先配置全局管理员 QQ', 400);
       }
@@ -618,25 +626,50 @@ export class AutoUpdateManager {
         }
       });
     }
-    const mode = state.mode === 'manual' ? '手动更新' : '定时更新';
+    const checkNotice = state.status === 'update-available';
+    const mode = state.mode === 'manual'
+      ? (checkNotice ? '手动检查' : '手动更新')
+      : (checkNotice ? '定时检查' : '定时更新');
     const currentEnabled = this.config().autoUpdate?.enabled === true;
-    const action = state.autoDisabled === true
-      ? '自动更新已停止。'
-      : currentEnabled
-        ? '自动更新保持启用，将在后续检查周期继续重试。'
-        : '自动更新原本处于暂停状态，本次失败未改变开关。';
-    const text = [
-      '【QQ Agent 更新部署失败】',
-      `方式：${mode}`,
-      `阶段：${state.phase || 'unknown'}`,
-      ...(state.targetRevision
-        ? [`目标版本：${String(state.targetRevision).slice(0, 12)}`]
-        : []),
-      `结果：${cleanText(state.error || '未知错误', 600)}`,
-      '',
-      action,
-      '处理入口：控制台 → 控制 → 更新部署'
-    ].join('\n');
+    let text;
+    if (checkNotice) {
+      const currentVersion = cleanText(
+        state.currentVersion || state.updateNotice?.localVersion || '未知',
+        64
+      ) || '未知';
+      const targetVersion = cleanText(
+        state.targetVersion || state.updateNotice?.version || '未知',
+        64
+      ) || '未知';
+      const url = cleanText(state.updateNotice?.url || '', 500);
+      text = [
+        '【QQ Agent 发现新版本】',
+        `方式：${mode}`,
+        `当前版本：${currentVersion}`,
+        `最新版本：${targetVersion}`,
+        ...(url ? [`发布地址：${url}`] : []),
+        '自动更新当前为“仅检查”，未执行部署。',
+        '处理入口：控制台 → 控制 → 更新部署'
+      ].join('\n');
+    } else {
+      const action = state.autoDisabled === true
+        ? '自动更新已停止。'
+        : currentEnabled
+          ? '自动更新保持启用，将在后续检查周期继续重试。'
+          : '自动更新原本处于暂停状态，本次失败未改变开关。';
+      text = [
+        '【QQ Agent 更新部署失败】',
+        `方式：${mode}`,
+        `阶段：${state.phase || 'unknown'}`,
+        ...(state.targetRevision
+          ? [`目标版本：${String(state.targetRevision).slice(0, 12)}`]
+          : []),
+        `结果：${cleanText(state.error || '未知错误', 600)}`,
+        '',
+        action,
+        '处理入口：控制台 → 控制 → 更新部署'
+      ].join('\n');
+    }
     try {
       // 发送前先把状态落成"结果未知"：这条链路没有 outbox 那样的 sending 落盘，原来
       // 发送途中崩溃/重启的话 pending 还是 true，重启 resumeNotifications 会把同一条

@@ -33,6 +33,34 @@ test('目标仓库与分支可保存；显式仓库会被保留', () => {
   assert.equal(getConfig().autoUpdate.branch, 'release');
 });
 
+test('checkOnly 默认关闭，发现新版本通知默认开启', () => {
+  const cfg = getConfig();
+  assert.equal(cfg.autoUpdate.checkOnly, false);
+  assert.equal(cfg.autoUpdate.notifyOnUpdate, true);
+});
+
+test('checkOnly 关闭通知时不要求管理员；开启通知仍要求', () => {
+  const cfg = updateConfig({
+    autoUpdate: { enabled: true, checkOnly: true, notifyOnUpdate: false },
+    admin: { ownerUin: '' },
+    allow: { private: [] },
+    allowAllWhenEmpty: false
+  });
+  assert.equal(cfg.autoUpdate.enabled, true);
+  assert.equal(cfg.autoUpdate.checkOnly, true);
+  assert.equal(cfg.autoUpdate.notifyOnUpdate, false);
+
+  assert.throws(
+    () => updateConfig({
+      autoUpdate: { enabled: true, checkOnly: true, notifyOnUpdate: true },
+      admin: { ownerUin: '' },
+      allow: { private: [] },
+      allowAllWhenEmpty: false
+    }),
+    /管理员 QQ/
+  );
+});
+
 test('非法分支被拒绝', () => {
   assert.throws(
     () => updateConfig({ autoUpdate: { branch: '-bad' } }),

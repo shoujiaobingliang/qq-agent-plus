@@ -98,13 +98,25 @@ test('console routes updater administrator aliases into global admin', async (t)
   assert.equal(afterSettings.body.autoUpdate.repository, 'https://github.com/fork-owner/fork.git');
   assert.equal(afterSettings.body.autoUpdate.branch, 'release');
 
+  const checkOnlySettings = await request('/api/auto-update/settings', 'PUT', {
+    checkOnly: true,
+    notifyOnUpdate: false
+  });
+  assert.equal(checkOnlySettings.response.status, 200);
+  assert.equal(checkOnlySettings.body.status.checkOnly, true);
+  assert.equal(checkOnlySettings.body.status.notifyOnUpdate, false);
+
   const resumed = await request('/api/auto-update/resume', 'POST', {
     confirm: true,
-    intervalHours: 12
+    intervalHours: 12,
+    checkOnly: true,
+    notifyOnUpdate: false
   });
   assert.equal(resumed.response.status, 200);
   assert.equal(resumed.body.status.enabled, true);
   assert.equal(resumed.body.status.ownerUin, '900001');
+  assert.equal(resumed.body.status.checkOnly, true);
+  assert.equal(resumed.body.status.notifyOnUpdate, false);
 
   const paused = await request('/api/auto-update/pause', 'POST', { confirm: true });
   assert.equal(paused.response.status, 200);

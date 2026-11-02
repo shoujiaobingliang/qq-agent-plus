@@ -793,6 +793,85 @@ async function run() {
     throw new Error('Deployment metadata does not match this installation');
   }
 
+  // checkOnly：只查 Release 并通知，不触碰 git / npm / 测试 / deploy。
+  // probe 仍走原来的连通性测试，不受 checkOnly 影响。
+  if (settings.checkOnly === true && mode !== 'probe') {
+    const currentRevision = revisionFromFile();
+    const currentVersion = readVersionAt(appDir) || '';
+    phase = 'checking';
+    writeAutoUpdateState(dataDir, {
+      status: 'checking',
+      mode,
+      phase,
+      startedAt: now,
+      progressAt: now,
+      completedAt: 0,
+      ...(mode === 'scheduled' ? { lastCheckAt: now } : {}),
+      currentRevision,
+      currentVersion,
+      targetRevision: '',
+      targetVersion: '',
+      transport: 'api',
+      error: '',
+      autoDisabled: false
+    });
+    const notice = await checkForUpdate(dataDir, cfg, {
+      force: mode === 'manual',
+      localVersion: currentVersion || undefined
+    });
+    const checkTarget = releaseTarget(
+      notice,
+      mode === 'manual' ? '' : previous?.ignoredVersion
+    );
+    if (!checkTarget) {
+      writeAutoUpdateState(dataDir, {
+        status: 'no-update',
+        mode,
+        phase: 'complete',
+        completedAt: Date.now(),
+        currentRevision,
+        currentVersion,
+        targetRevision: '',
+        targetVersion: '',
+        transport: 'api',
+        reason: String(notice?.reason || 'unknown'),
+        error: '',
+        autoDisabled: false
+      });
+      return;
+    }
+    const notify = settings.notifyOnUpdate !== false;
+    writeAutoUpdateState(dataDir, {
+      status: 'update-available',
+      mode,
+      phase: 'complete',
+      completedAt: Date.now(),
+      currentRevision,
+      currentVersion,
+      targetRevision: '',
+      targetVersion: checkTarget,
+      transport: 'api',
+      reason: 'check-only',
+      error: '',
+      autoDisabled: false,
+      ...(notify
+        ? {
+            notification: {
+              pending: true,
+              ownerUin: autoUpdateOwner(cfg),
+              sentAt: 0,
+              error: ''
+            }
+          }
+        : {})
+    });
+    if (notify) {
+      // 复用失败通知同一条链路：写 pending 后 POST 给主进程；主进程不在线时保留 pending。
+      try { await notifyFailure(cfg); } catch { /* keep pending on disk */ }
+    }
+    return;
+  }
+
   phase = 'connectivity';
   const currentRevision = revisionFromFile();
   writeAutoUpdateState(dataDir, {

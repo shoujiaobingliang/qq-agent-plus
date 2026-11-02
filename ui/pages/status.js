@@ -169,11 +169,15 @@ async function pauseAutoUpdate() {
 }
 
 async function runManualUpdate() {
-  if (!await askForConfirmation('立即检查 GitHub 最新代码并尝试部署？服务会在部署阶段短暂重启。')) {
+  const checkOnly = state.autoUpdateCheckOnly === true
+    || state.autoUpdateStatus?.checkOnly === true;
+  if (!await askForConfirmation(checkOnly
+    ? '立即检查 GitHub 是否有新版本？不会自动部署。'
+    : '立即检查 GitHub 最新代码并尝试部署？服务会在部署阶段短暂重启。')) {
     return;
   }
   const result = $('#auto-update-result');
-  if (result) result.textContent = '更新任务已提交…';
+  if (result) result.textContent = checkOnly ? '检查任务已提交…' : '更新任务已提交…';
   try {
     const response = await api('/api/auto-update/run', {
       method: 'POST',
@@ -192,8 +196,10 @@ async function runManualUpdate() {
 async function runUpdateFromNotice() {
   const result = $('#update-notice-result');
   const runBtn = $('#update-notice-run');
+  const checkOnly = state.autoUpdateCheckOnly === true
+    || state.autoUpdateStatus?.checkOnly === true;
   if (runBtn) runBtn.disabled = true;
-  if (result) { result.textContent = '正在提交更新任务…'; result.className = 'control-result muted'; }
+  if (result) { result.textContent = checkOnly ? '正在提交检查任务…' : '正在提交更新任务…'; result.className = 'control-result muted'; }
   try {
     const response = await api('/api/auto-update/run', {
       method: 'POST',

@@ -287,6 +287,52 @@ esac
   assert.equal(state.updateNotice.reason, 'no-release');
 });
 
+test('checkOnly only checks the release and never creates a checkout', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-update-check-only-'));
+  const appDir = path.join(root, 'app');
+  const dataDir = path.join(root, 'data');
+  const revision = 'a'.repeat(40);
+  for (const directory of [appDir, dataDir]) fs.mkdirSync(directory, { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify({
+    autoUpdate: {
+      enabled: true,
+      checkOnly: true,
+      notifyOnUpdate: false,
+      ownerUin: '900001',
+      repository: 'https://github.com/sakurawwwxh/qq-agent-plus.git',
+      branch: 'main',
+      intervalHours: 6
+    },
+    server: { host: '127.0.0.1', port: 3210, token: 'token' }
+  }));
+  fs.writeFileSync(path.join(dataDir, 'deployed-revision'), `${revision}\n`);
+  fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ version: LOCAL_VERSION }));
+  writeDeployment(appDir, dataDir);
+
+  const github = await startFakeGitHub({ tag: 'v9.9.9' });
+  t.after(() => github.close());
+
+  const result = runUpdater({
+    appDir,
+    dataDir,
+    env: { QQ_AGENT_GITHUB_API: github.base },
+    timeout: 10000
+  });
+  assert.equal(result.status, 0, result.stderr);
+
+  const state = readAutoUpdateState(dataDir);
+  assert.equal(state.status, 'update-available');
+  assert.equal(state.targetVersion, 'v9.9.9');
+  assert.equal(state.targetRevision, '', 'checkOnly 不解析/拉取目标提交');
+  assert.equal(state.reason, 'check-only');
+  assert.equal(state.notification.pending, false, 'notifyOnUpdate=false 不排队通知');
+  assert.equal(fs.existsSync(path.join(dataDir, 'update-work')), false,
+    'checkOnly 不创建工作目录，更不会 npm ci/测试/部署');
+  assert.equal(fs.existsSync(autoUpdatePaths(dataDir).lock), false);
+});
+
 test('updater tests a checkout and delegates deployment with the exact revision', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-update-deploy-'));
   const appDir = path.join(root, 'app');

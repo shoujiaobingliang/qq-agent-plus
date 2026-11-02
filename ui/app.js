@@ -298,7 +298,9 @@ function updateProgressStage(update = {}) {
   const version = String(update.targetVersion || '').trim();
   // 连通性测试（probe）只探通道、不部署，文案别说成"正在更新"
   const probe = String(update.mode || '') === 'probe';
-  return probe ? `正在探测更新通道：${label}` : `正在更新${version ? `到 ${version}` : ''}：${label}`;
+  if (probe) return `正在探测更新通道：${label}`;
+  if (update.checkOnly === true) return `正在检查新版本：${label}`;
+  return `正在更新${version ? `到 ${version}` : ''}：${label}`;
 }
 
 function updateProgressElapsed(update = {}) {
@@ -333,6 +335,7 @@ function renderControlHub(data = {}) {
     deploying: '部署中',
     succeeded: '更新成功',
     'no-update': '已是最新',
+    'update-available': '发现新版本',
     failed: '更新失败'
   };
   const updateState = update.status === 'failed'
@@ -387,6 +390,14 @@ function renderControlHub(data = {}) {
           <input type="hidden" id="auto-update-owner" data-global-admin-mirror="true" value="${esc(update.ownerUin || '')}" />
         </label>
         <label><span>检查间隔（小时）</span><input type="number" id="auto-update-interval" min="1" max="168" value="${esc(update.intervalHours || 6)}" /></label>
+        <label style="display:flex;gap:10px;align-items:center">
+          <input class="sw" type="checkbox" id="auto-update-check-only" ${update.checkOnly ? 'checked' : ''} />
+          <span>仅检查新版本，不自动部署</span>
+        </label>
+        <label style="display:flex;gap:10px;align-items:center">
+          <input class="sw" type="checkbox" id="auto-update-notify-update" ${update.notifyOnUpdate !== false ? 'checked' : ''} />
+          <span>发现新版本时通知管理员</span>
+        </label>
         <label><span>目标仓库（fork 可改）</span>
           <input type="text" id="auto-update-repository" value="${esc(update.repository || '')}" placeholder="https://github.com/&lt;owner&gt;/&lt;repo&gt;.git" />
           <span class="hint" style="margin:0">默认跟随当前部署来源（.deployment.json / git origin）；修改后会固定到这个仓库。</span>
@@ -396,9 +407,9 @@ function renderControlHub(data = {}) {
       <div class="control-result error hidden" id="hub-deploy-error" style="margin-top:8px"></div>
       <div class="settings-actions">
         <button type="button" class="btn btn-small" id="auto-update-save" ${update.busy ? 'disabled' : ''}>保存设置</button>
-        <button type="button" class="btn btn-primary btn-small" id="auto-update-run" ${!update.installed || update.busy ? 'disabled' : ''}>↻ 手动更新</button>
-        <button type="button" class="btn btn-small" id="auto-update-pause" ${update.enabled && !update.busy ? '' : 'disabled'}>暂停自动更新</button>
-        <button type="button" class="btn btn-small" id="auto-update-resume" ${!update.enabled && update.installed && !update.busy ? '' : 'disabled'}>恢复自动更新</button>
+        <button type="button" class="btn btn-primary btn-small" id="auto-update-run" ${!update.installed || update.busy ? 'disabled' : ''}>${update.checkOnly ? '↻ 立即检查' : '↻ 手动更新'}</button>
+        <button type="button" class="btn btn-small" id="auto-update-pause" ${update.enabled && !update.busy ? '' : 'disabled'}>${update.checkOnly ? '暂停检查' : '暂停自动更新'}</button>
+        <button type="button" class="btn btn-small" id="auto-update-resume" ${!update.enabled && update.installed && !update.busy ? '' : 'disabled'}>${update.checkOnly ? '恢复检查' : '恢复自动更新'}</button>
         <span id="auto-update-result" class="control-result muted" role="status" aria-live="polite"></span>
       </div>
     </section>
@@ -553,6 +564,13 @@ function updateControlHubFields(box, statuses, update) {
   syncInput('auto-update-interval', update.intervalHours || 6);
   syncInput('auto-update-repository', update.repository || '');
   syncInput('auto-update-branch', update.branch || 'main');
+  const syncChecked = (id, value) => {
+    const el = document.getElementById(id);
+    if (!el || document.activeElement === el) return;
+    el.checked = value === true;
+  };
+  syncChecked('auto-update-check-only', update.checkOnly === true);
+  syncChecked('auto-update-notify-update', update.notifyOnUpdate !== false);
 
   // 错误行
   const errorBox = document.getElementById('hub-deploy-error');
@@ -613,17 +631,24 @@ async function loadControlHub({ force = false } = {}) {
 }
 
 function autoUpdateSettingsBody() {
+  const checkOnly = document.getElementById('auto-update-check-only');
+  const notifyOnUpdate = document.getElementById('auto-update-notify-update');
   return {
     ownerUin: $('#auto-update-owner')?.value?.trim() || '',
     intervalHours: clampInt($('#auto-update-interval')?.value, 1, 168, 6),
     repository: $('#auto-update-repository')?.value?.trim() || '',
-    branch: $('#auto-update-branch')?.value?.trim() || 'main'
+    branch: $('#auto-update-branch')?.value?.trim() || 'main',
+    checkOnly: checkOnly ? checkOnly.checked === true : false,
+    notifyOnUpdate: notifyOnUpdate ? notifyOnUpdate.checked === true : true
   };
 }
 
 async function saveAutoUpdateSettings(resume) {
   const result = $('#auto-update-result');
-  if (resume && !await askForConfirmation('恢复定时拉取 GitHub 并自动部署？部署失败时会自动暂停并通知管理员。')) {
+  const checkOnly = document.getElementById('auto-update-check-only')?.checked === true;
+  if (resume && !await askForConfirmation(checkOnly
+    ? '恢复定时检查 GitHub？只检查并通知，不会自动部署。'
+    : '恢复定时拉取 GitHub 并自动部署？部署失败时会自动暂停并通知管理员。')) {
     return;
   }
   if (result) result.textContent = resume ? '正在恢复…' : '正在保存…';
@@ -658,6 +683,7 @@ async function checkUpdateNotice() {
   }
   const notice = payload?.notice || {};
   if (!notice.available) return;
+  state.autoUpdateCheckOnly = payload?.checkOnly === true;
   const version = String(notice.version || '');
   // 「忽略」只屏蔽这一个版本；出现新的 tag 时照常提示
   if (version && version === String(payload.ignoredVersion || '')) return;
@@ -691,7 +717,12 @@ function openUpdateNoticeDialog(notice) {
   const result = $('#update-notice-result');
   if (result) { result.textContent = ''; result.className = 'control-result muted'; }
   const runBtn = $('#update-notice-run');
-  if (runBtn) runBtn.disabled = false;
+  if (runBtn) {
+    runBtn.textContent = (state.autoUpdateCheckOnly || state.autoUpdateStatus?.checkOnly)
+      ? '立即检查'
+      : '立即更新';
+    runBtn.disabled = false;
+  }
   const ignoreBtn = $('#update-notice-ignore');
   if (ignoreBtn) ignoreBtn.hidden = !notice.version; // 没有 tag 时没法精确忽略
   if (!dialog.open) dialog.showModal();

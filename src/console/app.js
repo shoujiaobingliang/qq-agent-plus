@@ -2211,7 +2211,9 @@ export function createApp({
         ownerUin: body.ownerUin,
         intervalHours: body.intervalHours,
         repository: body.repository,
-        branch: body.branch
+        branch: body.branch,
+        checkOnly: body.checkOnly,
+        notifyOnUpdate: body.notifyOnUpdate
       });
       return json(res, 200, { ok: true, status: autoUpdate.status() });
     } catch (error) {
@@ -2246,7 +2248,9 @@ export function createApp({
         ownerUin: body.ownerUin,
         intervalHours: body.intervalHours,
         repository: body.repository,
-        branch: body.branch
+        branch: body.branch,
+        checkOnly: body.checkOnly,
+        notifyOnUpdate: body.notifyOnUpdate
       });
       auditWrite('auto-update.resume', String(body.ownerUin ?? ''), { req, after: autoUpdate.status() });
       return json(res, 200, { ok: true, status: autoUpdate.status() });
@@ -2279,6 +2283,8 @@ export function createApp({
         ok: true,
         notice,
         ignoredVersion: String(state.ignoredVersion || ''),
+        // checkOnly 时「发现新版本」弹窗的按钮应显示“立即检查”，不能暗示会自动部署
+        checkOnly: getConfig().autoUpdate?.checkOnly === true,
         // 已经提交、还没跑完的更新（见 autoUpdatePending）：前端据此不再重复弹同一个版本
         pending: autoUpdatePending(DATA_DIR)
       });

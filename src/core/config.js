@@ -301,11 +301,19 @@ export function updateConfig(patch) {
   const autoUpdateEnabled = hasOwn(rawPatch?.autoUpdate, 'enabled')
     ? rawPatch.autoUpdate.enabled === true
     : current.autoUpdate?.enabled === true;
+  const autoUpdateCheckOnly = hasOwn(rawPatch?.autoUpdate, 'checkOnly')
+    ? rawPatch.autoUpdate.checkOnly === true
+    : current.autoUpdate?.checkOnly === true;
+  const autoUpdateNotify = hasOwn(rawPatch?.autoUpdate, 'notifyOnUpdate')
+    ? rawPatch.autoUpdate.notifyOnUpdate !== false
+    : current.autoUpdate?.notifyOnUpdate !== false;
+  const autoUpdateNeedsAdmin = autoUpdateEnabled
+    && (autoUpdateCheckOnly !== true || autoUpdateNotify !== false);
 
   // Auto update has a real notification dependency. Promoted Identity/Incident
   // infrastructure does not: it remains active with no administrator and only
   // skips QQ notification/approval edges.
-  if (!requestedAdmin.ownerUin && autoUpdateEnabled) {
+  if (!requestedAdmin.ownerUin && autoUpdateNeedsAdmin) {
     throw new Error('自动更新已启用，不能清空全局管理员 QQ');
   }
 
