@@ -163,6 +163,12 @@ async function pauseAutoUpdate() {
     });
     state.autoUpdateStatus = response.status;
     renderControlHub(state.integrationStatus || {});
+    // 与保存设置同理：命中 DOM 缓存时旧元素不会重建，必须显式收尾。
+    const fresh = $('#auto-update-result');
+    if (fresh) {
+      fresh.textContent = '已暂停';
+      fresh.className = 'control-result muted';
+    }
   } catch (error) {
     if (result) result.textContent = `暂停失败：${error.message}`;
   }

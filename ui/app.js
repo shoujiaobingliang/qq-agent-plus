@@ -508,7 +508,7 @@ function updateControlHubFields(box, statuses, update) {
   const labels = {
     idle: '等待检查', disabled: '已暂停', queued: '等待启动', checking: '检查更新',
     testing: '验证更新', deploying: '部署中', succeeded: '更新成功',
-    'no-update': '已是最新', failed: '更新失败'
+    'no-update': '已是最新', 'update-available': '发现新版本', failed: '更新失败'
   };
   const updateState = update.status === 'failed'
     ? labels.failed
@@ -665,6 +665,13 @@ async function saveAutoUpdateSettings(resume) {
     );
     state.autoUpdateStatus = response.status;
     renderControlHub(state.integrationStatus || {});
+    // renderControlHub 命中缓存时不会重建 DOM，旧元素里会一直留着“正在保存…”；
+    // 成功路径必须显式收尾。
+    const fresh = $('#auto-update-result');
+    if (fresh) {
+      fresh.textContent = resume ? '已恢复' : '已保存';
+      fresh.className = 'control-result muted';
+    }
   } catch (error) {
     if (result) {
       result.textContent = `操作失败：${error.message}`;
