@@ -105,52 +105,88 @@ test('百度千帆：{messages, search_source, resource_type_filter} → referen
   assert.deepEqual((await baiduSearch('q')).results, []);
 });
 
-test('DeepSeek：Search API（POST /v1/tools/search）→ results[]（title/url/summary）', async () => {
-  setWebSearch({ provider: 'deepseek', deepseek: { apiKey: 'dk', count: 8 } });
-  const calls = stub(() => ({
-    ok: true,
-    json: async () => ({ results: [
-      { title: 'T', url: 'https://a.example/', snippet: '短摘要', summary: '长摘要' },
-      { title: '', url: 'https://b.example/', snippet: '只有短摘要' },
-      { title: '没有链接', snippet: '应被过滤' }
-    ] })
-  }));
-  const r = await deepSeekSearch('q');
-  assert.equal(calls[0].url, 'https://api.deepseek.com/v1/tools/search');
+test('DeepSeek：原生 web_search 优先；失败/无文本时兜底结构化 Search 接口', async () => {
+  const { deepSeekStructuredSearchOnly } = await import('../src/llm/web-search.js');
+  // ① 原生成功：只打 /responses，返回模型归纳后的回答，不打结构化接口
+  setWebSearch({ provider: 'deepseek', deepseek: { apiKey: 'dk' } });
+  let calls = stub(() => ({ ok: true, json: async () => ({ output_text: '归纳好的答案' }) }));
+  let r = await deepSeekSearch('q');
+  assert.equal(calls.length, 1, '原生成功就不该再请求结构化接口');
+  assert.equal(calls[0].url, 'https://api.deepseek.com/responses');
   assert.equal(calls[0].headers.authorization, 'Bearer dk');
-  // Search 接口没有 model 参数；need_content 默认 false（summary 已够模型读）
-  assert.deepEqual(calls[0].body, { query: 'q', count: 8, need_content: false });
-  assert.deepEqual(r.results.map((x) => x.url), ['https://a.example/', 'https://b.example/']);
+  assert.deepEqual(calls[0].body.tools, [{ type: 'web_search' }]);
+  assert.equal(calls[0].body.model, 'deepseek-flash');
+  assert.match(calls[0].body.input, /q/);
+  assert.equal(r.via, 'native');
+  assert.equal(r.results.length, 1);
+  assert.equal(r.results[0].snippet, '归纳好的答案');
+
+  // ② 原生失败（如 Key 没开 responses 权限/接口 404）→ 兜底结构化，结果带 URL
+  calls = stub((n) => (n === 1
+    ? { ok: false, status: 404, text: async () => '{"error":{"message":"not found"}}' }
+    : { ok: true, json: async () => ({ results: [{ title: 'T', url: 'https://a.example/', summary: '长摘要' }] }) }));
+  r = await deepSeekSearch('q');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, 'https://api.deepseek.com/v1/tools/search');
+  assert.deepEqual(calls[1].body, { query: 'q', count: 6, need_content: false });
+  assert.equal(r.via, 'api');
+  assert.deepEqual(r.results.map((x) => x.url), ['https://a.example/']);
   assert.equal(r.results[0].snippet, '长摘要', '优先用 summary（给模型读的长摘要）');
-  assert.equal(r.results[1].snippet, '只有短摘要');
-  assert.equal(r.results[1].title, '（无标题）');
 
-  // 搜索正常但没匹配：官方文档明确"返回空数组" = 搜到 0 条，照常返回空结果，
-  // 由工具层告诉模型"没搜到，换个关键词"（不是"搜索失败"）
+  // ③ 原生 200 但没有文本（模型不支持 web_search）→ 同样兜底
+  calls = stub((n) => (n === 1
+    ? { ok: true, json: async () => ({}) }
+    : { ok: true, json: async () => ({ results: [{ title: 'T', url: 'https://b.example/', snippet: '短摘要' }] }) }));
+  r = await deepSeekSearch('q');
+  assert.equal(r.via, 'api');
+  assert.equal(r.results[0].snippet, '短摘要');
+
+  // ④ 两边都失败：错误里要同时带出两条原因，别把"原生也试过"盖掉
+  stub(() => ({ ok: false, status: 500, text: async () => 'boom' }));
+  await assert.rejects(() => deepSeekSearch('q'), /原生搜索失败.*结构化搜索也失败/);
+
+  // ⑤ provider='deepseek-api'：只走结构化接口
+  calls = stub(() => ({ ok: true, json: async () => ({ results: [{ title: 'T', url: 'https://c.example/' }] }) }));
+  r = await deepSeekStructuredSearchOnly('q');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://api.deepseek.com/v1/tools/search');
+
+  // ⑥ 结构化接口搜索正常但没匹配：空数组 = 搜到 0 条，照常返回（不是失败）
   stub(() => ({ ok: true, json: async () => ({ results: [] }) }));
-  const empty = await deepSeekSearch('q');
-  assert.deepEqual(empty.results, []);
+  assert.deepEqual((await deepSeekStructuredSearchOnly('q')).results, []);
 
-  // OpenAI 兼容错误体：把 error.message 提出来（402 余额不足是常见故障）
+  // ⑦ 结构化接口的 OpenAI 兼容错误体：把 error.message 提出来（402 余额不足是常见故障）
   stub(() => ({
     ok: false,
     status: 402,
     text: async () => JSON.stringify({ error: { message: 'Insufficient balance', param: null, code: 'invalid_request_error' } })
   }));
-  await assert.rejects(() => deepSeekSearch('q'), /402.*Insufficient balance/);
+  await assert.rejects(() => deepSeekStructuredSearchOnly('q'), /402.*Insufficient balance/);
 });
 
-test('DeepSeek：旧 Responses API 地址会被迁移到 Search 接口', async () => {
+test('DeepSeek：旧配置两种形态都搬到 nativeBaseUrl/baseUrl 两套字段', async () => {
   const { migrateDeepSeekSearchBaseUrl } = await import('../src/core/config-legacy.js');
-  const migrated = migrateDeepSeekSearchBaseUrl({
+  // 形态 1：最早的 Responses 地址 + model
+  const legacy = migrateDeepSeekSearchBaseUrl({
     deepseek: { apiKey: 'k', baseUrl: 'https://api.deepseek.com/responses', model: 'deepseek-v4-flash' }
   });
-  assert.equal(migrated.deepseek.baseUrl, 'https://api.deepseek.com/v1/tools/search');
-  assert.equal(migrated.deepseek.model, undefined, 'Search 接口没有 model 参数，迁移时去掉');
-  assert.equal(migrated.deepseek.apiKey, 'k', 'Key 原样保留');
-  // 用户自填的代理地址不动
-  const custom = migrateDeepSeekSearchBaseUrl({ deepseek: { baseUrl: 'https://my-proxy.example/deepseek' } });
-  assert.equal(custom.deepseek.baseUrl, 'https://my-proxy.example/deepseek');
+  assert.equal(legacy.deepseek.nativeBaseUrl, 'https://api.deepseek.com/responses');
+  assert.equal(legacy.deepseek.nativeModel, 'deepseek-v4-flash');
+  assert.equal(legacy.deepseek.baseUrl, 'https://api.deepseek.com/v1/tools/search', '结构化兜底地址');
+  assert.equal(legacy.deepseek.model, undefined, 'model 只给原生用，搬进 nativeModel 后删掉旧字段');
+  assert.equal(legacy.deepseek.apiKey, 'k', 'Key 原样保留');
+
+  // 形态 2：已是结构化地址（上一版迁移结果）→ 补上原生默认，不动用户地址
+  const mid = migrateDeepSeekSearchBaseUrl({
+    deepseek: { apiKey: 'k', baseUrl: 'https://my-proxy.example/deepseek/search' }
+  });
+  assert.equal(mid.deepseek.baseUrl, 'https://my-proxy.example/deepseek/search', '用户自填地址不动');
+  assert.equal(mid.deepseek.nativeBaseUrl, 'https://api.deepseek.com/responses');
+  assert.equal(mid.deepseek.nativeModel, 'deepseek-flash');
+
+  // 已经补齐过的不再改动
+  const done = { deepseek: { nativeBaseUrl: 'x', nativeModel: 'm', baseUrl: 'y' } };
+  assert.deepEqual(migrateDeepSeekSearchBaseUrl(done), done);
   assert.deepEqual(migrateDeepSeekSearchBaseUrl(undefined), undefined);
   assert.deepEqual(migrateDeepSeekSearchBaseUrl({}), {});
 });

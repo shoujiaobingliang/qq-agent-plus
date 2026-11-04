@@ -775,6 +775,7 @@ function bindSettingsListsAndGroups(c) {
     const fields = {
       bing: '#bing-search-fields',
       deepseek: '#deepseek-search-fields',
+      'deepseek-api': '#deepseek-search-fields',
       zhipu: '#zhipu-search-fields',
       bocha: '#bocha-search-fields',
       baidu: '#baidu-search-fields',
@@ -783,11 +784,9 @@ function bindSettingsListsAndGroups(c) {
       tavily: '#tavily-search-fields',
       aggregate: '#aggregate-search-fields'
     };
-    for (const [provider, sel] of Object.entries(fields)) {
-      const el = $(sel);
-      // 自定义项形如 'custom:<id>'，统一按 custom 前缀匹配
-      if (el) el.style.display = provider === v ? '' : 'none';
-    }
+    // deepseek / deepseek-api 共用一栏：按"该显示的 selector"统一设置，不能后写的 provider 覆盖前一个
+    const shown = new Set(Object.entries(fields).filter(([p]) => p === v).map(([, s]) => s));
+    for (const sel of new Set(Object.values(fields))) { const el = $(sel); if (el) el.style.display = shown.has(sel) ? '' : 'none'; }
     const manage = $('#custom-provider-manage');
     if (manage) manage.style.display = v.startsWith('custom:') ? '' : 'none';
   });

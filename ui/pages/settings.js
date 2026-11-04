@@ -434,7 +434,8 @@ function renderSearchSection(c) {
     <div class="field"><label>搜索提供方</label>
       <select id="cfg-searchprovider">
         <option value="bing" ${prov === 'bing' ? 'selected' : ''}>Bing 网页解析</option>
-        <option value="deepseek" ${prov === 'deepseek' ? 'selected' : ''}>DeepSeek 原生搜索</option>
+        <option value="deepseek" ${prov === 'deepseek' ? 'selected' : ''}>DeepSeek 原生搜索（失败兜底结构化）</option>
+        <option value="deepseek-api" ${prov === 'deepseek-api' ? 'selected' : ''}>DeepSeek Search API（仅结构化结果）</option>
         <option value="zhipu" ${prov === 'zhipu' ? 'selected' : ''}>智谱 Web Search</option>
         <option value="bocha" ${prov === 'bocha' ? 'selected' : ''}>博查 AI Search</option>
         <option value="baidu" ${prov === 'baidu' ? 'selected' : ''}>百度千帆 AI Search</option>
@@ -452,13 +453,13 @@ function renderSearchSection(c) {
       </div>
     </div>
     <div class="field" id="bing-search-fields" style="${prov === 'bing' ? '' : 'display:none'}"><label>搜索地址（高级：可替换为兼容 Bing 结果格式的引擎）</label><input type="text" id="cfg-searchurl" value="${esc(c.webSearch?.searchUrl || 'https://cn.bing.com/search')}" /></div>
-    <div class="field-row" id="deepseek-search-fields" style="${prov === 'deepseek' ? '' : 'display:none'}">
+    <div class="field-row" id="deepseek-search-fields" style="${prov === 'deepseek' || prov === 'deepseek-api' ? '' : 'display:none'}">
       <div class="field"><label>DeepSeek 搜索 API Key（留空用环境变量 DEEPSEEK_API_KEY）</label>
         <div style="display:flex;gap:8px">
           <input type="password" id="cfg-ds-searchkey" value="${esc(c.webSearch?.deepseek?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-ds-searchkey-toggle" type="button">显示</button>
         </div></div>
-      <div class="field"><label>返回条数</label><input type="number" id="cfg-ds-searchcount" min="1" max="50" value="${esc(String(c.webSearch?.deepseek?.count ?? 6))}" /></div>
+      <div class="field"><label>返回条数${prov === 'deepseek-api' ? '' : '（仅结构化兜底生效）'}</label><input type="number" id="cfg-ds-searchcount" min="1" max="50" value="${esc(String(c.webSearch?.deepseek?.count ?? 6))}" /></div>
     </div>
     <div class="field-row" id="zhipu-search-fields" style="${prov === 'zhipu' ? '' : 'display:none'}">
       <div class="field"><label>智谱 API Key（留空用环境变量 ZHIPU_API_KEY）</label>

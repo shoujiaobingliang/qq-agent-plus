@@ -2718,7 +2718,7 @@ export function buildToolDefs() {
     },
     {
       name: 'web_search',
-      description: '联网搜索（搜索引擎按配置，默认 Bing），返回标题/URL/摘要列表。适用：实时信息、新闻热点、网络用语/梗的含义、看不懂或拿不准的词/说法（新梗、缩写、黑话、谐音、圈内叫法、不认识的专有名词）、自己不确定的事实 —— 先搜含义再回，别靠猜。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
+      description: '联网搜索（搜索引擎按配置，默认 Bing），返回标题/URL/摘要列表。DeepSeek 原生搜索只返回归纳后的回答（single result，无 URL），需要原文链接时换用其他搜索源。适用：实时信息、新闻热点、网络用语/梗的含义、看不懂或拿不准的词/说法（新梗、缩写、黑话、谐音、圈内叫法、不认识的专有名词）、自己不确定的事实 —— 先搜含义再回，别靠猜。可以换关键词连续搜 2~3 次；对最相关的 1~2 个结果用 web_fetch 读正文，不要只看摘要。',
       parameters: {
         type: 'object',
         properties: { query: { type: 'string', description: '搜索词' } },

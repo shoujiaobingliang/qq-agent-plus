@@ -57,7 +57,7 @@ export async function aggregateSearch(query) {
     .map(String).slice(0, 4);
   const perSource = Math.max(2, Math.min(6, Number(cfg.count) || 4));
   const settled = await Promise.allSettled(sources.map(async (name) => {
-    const fn = { doubao: doubaoSearch, bing: bingSearch, baidu: baiduSearch, zhipu: zhipuSearch, bocha: bochaSearch, metaso: metasoSearch, tavily: tavilySearch }[name];
+    const fn = { doubao: doubaoSearch, bing: bingSearch, baidu: baiduSearch, zhipu: zhipuSearch, bocha: bochaSearch, metaso: metasoSearch, tavily: tavilySearch, deepseek: deepSeekSearch }[name];
     if (!fn) throw new Error(`未知搜索源: ${name}`);
     const r = await fn(query);
     return { source: name, results: (r.results || []).slice(0, perSource) };
@@ -126,6 +126,7 @@ export async function webSearch(query) {
   const provider = String(cfg.provider || 'bing').toLowerCase();
   if (provider === 'aggregate') return aggregateSearch(clean);
   if (provider === 'deepseek') return deepSeekSearch(clean);
+  if (provider === 'deepseek-api') return deepSeekStructuredSearchOnly(clean);
   if (provider === 'zhipu') return zhipuSearch(clean);
   if (provider === 'bocha') return bochaSearch(clean);
   if (provider === 'baidu') return baiduSearch(clean);
@@ -142,20 +143,84 @@ export async function webSearch(query) {
 }
 
 /**
- * DeepSeek Search API（自研搜索引擎，结构化网页结果）。
- * 文档：https://api-docs.deepseek.com/zh-cn/guides/search
+ * DeepSeek 搜索：**原生搜索优先，结构化接口兜底**。
  *
- * 2026-11 起改走独立 Search 接口 `POST /v1/tools/search`：旧的 Responses API
- * （`tools: [{type:'web_search'}]`）返回的是模型基于搜索生成的整段回答，URL/标题/摘要
- * 全是黑盒 —— web_search 拿不到来源链接，web_fetch 也就接不上。新接口直接给
- * `{ results: [{ title, url, snippet, summary, content, ... }] }`，与其他 provider 同口径。
- * 支持 site: / -site: / after: / lang: 等搜索语法（梗站回退的 site: 查询也能用）。
+ * 两条路各有取舍，谁也不能完全替代谁：
+ *   - 原生（Responses API + `tools:[{type:'web_search'}]`）走模型自带的联网能力，
+ *     搜索在服务端完成并注入上下文，返回的是**已归纳好的回答**——最贴模型的默认行为，
+ *     但 URL/标题/摘要拿不到，web_fetch 接不上；
+ *   - 结构化（独立 Search 接口 `POST /v1/tools/search`）返回 `{title,url,snippet,summary}`，
+ *     能接 web_fetch、能排序去重，但只是搜索结果列表，没有归纳。
+ * 所以默认先走原生（保留模型默认搜索），原生失败/没返回文本时再兜底结构化；
+ * 想强制只用结构化接口可把 provider 设成 'deepseek-api'。
  */
 export function deepSeekSearch(query) {
-  return withTimeWindow((signal) => deepSeekSearchRequest(query, signal));
+  return withTimeWindow(async (signal) => {
+    let nativeError = null;
+    try {
+      const native = await deepSeekNativeSearch(query, signal);
+      if (native.results.length) return native;
+    } catch (error) {
+      nativeError = error;
+    }
+    try {
+      return await deepSeekStructuredSearch(query, signal);
+    } catch (error) {
+      // 两边都失败时把两条原因都带出来，否则只剩结构化那条，看不出原生也试过
+      if (!nativeError) throw error;
+      throw new Error(`DeepSeek 原生搜索失败（${errorMessage(nativeError)}），结构化搜索也失败（${errorMessage(error)}）`);
+    }
+  });
 }
 
-async function deepSeekSearchRequest(query, signal) {
+/** 只走结构化 Search 接口（provider = 'deepseek-api'）。 */
+export function deepSeekStructuredSearchOnly(query) {
+  return withTimeWindow((signal) => deepSeekStructuredSearch(query, signal));
+}
+
+function errorMessage(error) {
+  return String(error?.message ?? error).slice(0, 200);
+}
+
+async function deepSeekNativeSearch(query, signal) {
+  const cfg = getConfig().webSearch?.deepseek ?? {};
+  const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
+  if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
+  const endpoint = String(cfg.nativeBaseUrl || 'https://api.deepseek.com/responses').replace(/\/+$/, '');
+  const model = String(cfg.nativeModel || 'deepseek-flash');
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model,
+      input: `请联网搜索并回答（用中文，简洁、只给结论和关键信息）：${query}`,
+      tools: [{ type: 'web_search' }],
+      stream: false
+    }),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(10000, Number(cfg.nativeTimeoutMs) || 60000))])
+  });
+  if (!res.ok) {
+    const text = await readTextBounded(res, SEARCH_JSON_MAX_BYTES).catch(() => '');
+    throw new Error(`DeepSeek 原生搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
+  }
+  const data = await readSearchJson(res, 'DeepSeek 原生搜索返回了无法解析的 JSON');
+  const outputText = String(data?.output_text ?? '').trim()
+    // 兼容不同字段位置：output[].content[].text
+    || (data?.output?.find?.((item) => item?.type === 'message' && item?.content?.length)
+      ?.content?.map((c) => c?.text ?? '').join('') ?? '');
+  if (!outputText) throw new Error('DeepSeek 原生搜索没有返回文本（可能模型不支持 web_search 工具）');
+  return {
+    query,
+    via: 'native',
+    results: [{ title: 'DeepSeek 联网搜索', url: '', snippet: outputText }]
+  };
+}
+
+async function deepSeekStructuredSearch(query, signal) {
   const cfg = getConfig().webSearch?.deepseek ?? {};
   const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
@@ -198,7 +263,7 @@ async function deepSeekSearchRequest(query, signal) {
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
   // 200 + 空数组 = 搜到了 0 条（官方文档："搜索正常结束但没有匹配结果时，返回空数组"）。
   // 结构化接口与 Bing 那类 HTML 抓取不同：后者空数组意味着验证页/改版，必须抛错。
-  return { query, results };
+  return { query, via: 'api', results };
 }
 
 /** 抓取网页正文（走 safe-fetch 的 SSRF 全防护）。 */

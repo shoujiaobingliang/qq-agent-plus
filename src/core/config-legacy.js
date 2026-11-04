@@ -117,11 +117,16 @@ export const DEFAULT_CONFIG = {
     enabled: true,
     searchUrl: 'https://cn.bing.com/search',
     maxResults: 6,
-    // 可选：'bing' | 'deepseek' | 'zhipu' | 'bocha' | 'baidu' | 'metaso' | 'doubao' | 'tavily' | 'aggregate'
+    // 可选：'bing' | 'deepseek' | 'deepseek-api' | 'zhipu' | 'bocha' | 'baidu' | 'metaso' | 'doubao' | 'tavily' | 'aggregate'
     provider: 'bing',
     deepseek: {
       apiKey: '',                     // 留空时回退环境变量 DEEPSEEK_API_KEY
-      baseUrl: 'https://api.deepseek.com/v1/tools/search',   // 独立 Search 接口（响应里带 title/url/summary）
+      // provider='deepseek' 时先走原生（Responses API + web_search，模型自带联网搜索），
+      // 失败或没返回文本再兜底结构化接口；provider='deepseek-api' 时只走结构化接口。
+      nativeBaseUrl: 'https://api.deepseek.com/responses',
+      nativeModel: 'deepseek-flash',
+      nativeTimeoutMs: 60000,
+      baseUrl: 'https://api.deepseek.com/v1/tools/search',   // 结构化兜底：返回 title/url/summary
       count: 6,                       // 返回条数 1~50
       needContent: false,             // true 时额外返回网页正文（content），一般用不到
       timeoutMs: 20000
@@ -1222,19 +1227,50 @@ export function migrateMetasoBaseUrl(webSearch) {
 }
 
 /**
- * DeepSeek 搜索地址搬家（2026-11）：旧实现走 Responses API（`/responses` + `tools:[web_search]`），
- * 只拿得到模型生成的整段回答、没有结构化来源；官方上线独立 Search 接口后改走 `/v1/tools/search`。
- * 旧默认值已经写进装过的实例的 config.json，只改出厂默认救不了它们。
- * 只搬"正好等于旧出厂值"的，用户自填的代理/镜像地址不动。
+ * DeepSeek 搜索配置搬家（2026-11）。历史沿革：
+ *   1) 最早 baseUrl=`/responses` + `model`，走模型原生 web_search；
+ *   2) 上一版把 baseUrl 直接改成结构化接口 `/v1/tools/search` 并删掉 model；
+ *   3) 现在又回到"原生优先、结构化兜底"——两个地址各归各的字段：
+ *      nativeBaseUrl（原生）/ baseUrl（结构化兜底）。
+ * 所以两种旧形态都要搬：
+ *   - baseUrl 是旧原生地址 → 搬进 nativeBaseUrl，顺手把 model 带去 nativeModel；
+ *   - baseUrl 是结构化地址 → 留在原地（它就是结构化兜底的地址），补上原生的出厂默认。
+ * 用户自填的代理/镜像地址一律不动。
  */
 const LEGACY_DEEPSEEK_SEARCH_BASE_URL = 'https://api.deepseek.com/responses';
 export function migrateDeepSeekSearchBaseUrl(webSearch) {
   if (!webSearch || typeof webSearch !== 'object') return webSearch;
   const deepseek = webSearch.deepseek;
-  if (!deepseek || typeof deepseek !== 'object' || deepseek.baseUrl !== LEGACY_DEEPSEEK_SEARCH_BASE_URL) return webSearch;
-  const { model, ...rest } = deepseek;
-  // model 只对 Responses API 有意义，Search 接口没有这个参数；留着也无害，但别让设置页以为它还在用
-  return { ...webSearch, deepseek: { ...rest, baseUrl: DEFAULT_CONFIG.webSearch.deepseek.baseUrl } };
+  if (!deepseek || typeof deepseek !== 'object') return webSearch;
+  const fallback = DEFAULT_CONFIG.webSearch.deepseek;
+
+  // 形态 1：还在用旧的 Responses 地址
+  if (deepseek.baseUrl === LEGACY_DEEPSEEK_SEARCH_BASE_URL) {
+    const { model, ...rest } = deepseek;
+    return {
+      ...webSearch,
+      deepseek: {
+        ...rest,
+        nativeBaseUrl: deepseek.nativeBaseUrl || LEGACY_DEEPSEEK_SEARCH_BASE_URL,
+        ...(model ? { nativeModel: deepseek.nativeModel || model } : {}),
+        baseUrl: fallback.baseUrl
+      }
+    };
+  }
+
+  // 形态 2：结构化地址已在用（无论是不是用户自填），但还缺原生搜索字段 → 补齐出厂默认
+  if (!deepseek.nativeBaseUrl) {
+    return {
+      ...webSearch,
+      deepseek: {
+        ...deepseek,
+        nativeBaseUrl: fallback.nativeBaseUrl,
+        nativeModel: deepseek.nativeModel || fallback.nativeModel,
+        nativeTimeoutMs: deepseek.nativeTimeoutMs || fallback.nativeTimeoutMs
+      }
+    };
+  }
+  return webSearch;
 }
 
 const PERSONA_CHAT_KEY_RE = /^(?:group|private):\d+$/;
