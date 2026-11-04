@@ -110,9 +110,9 @@ export async function bingSearch(query) {
     if (urlStr && title) results.push({ title, url: urlStr, snippet });
     if (results.length >= maxResults) break;
   }
-  // 与其他 provider 口径一致：空结果 = 搜索失败而不是"搜到了 0 条"。
   // Bing 是 HTML 抓取，命中验证页/同意页/改版 DOM 时这里会是空数组——
   // 不抛错的话模型只看到一个空列表，容易转而编造内容（Issue #9）。
+  // 结构化 API（智谱/博查/豆包等）相反：200 + 空数组就是"没搜到"，照常返回空结果。
   if (!results.length) throw new Error('Bing 搜索没有返回可解析的结果（可能命中验证页或页面结构变化，可换个搜索提供方）');
   return { query, results };
 }
@@ -142,11 +142,14 @@ export async function webSearch(query) {
 }
 
 /**
- * DeepSeek 服务端原生搜索（Responses API，web_search 工具）。
- * 文档：https://api-docs.deepseek.com/zh-cn/guides/responses_api
- * 说明：搜索在 DeepSeek 服务端完成并注入上下文，客户端能拿到的是模型基于
- * 搜索结果生成的最终回答；URL/标题/摘要为黑盒，拿不到结构化来源。适合
- * “只要能搜到并总结”的场景；需要引用列表时请用 Bing / 其他搜索 API。
+ * DeepSeek Search API（自研搜索引擎，结构化网页结果）。
+ * 文档：https://api-docs.deepseek.com/zh-cn/guides/search
+ *
+ * 2026-11 起改走独立 Search 接口 `POST /v1/tools/search`：旧的 Responses API
+ * （`tools: [{type:'web_search'}]`）返回的是模型基于搜索生成的整段回答，URL/标题/摘要
+ * 全是黑盒 —— web_search 拿不到来源链接，web_fetch 也就接不上。新接口直接给
+ * `{ results: [{ title, url, snippet, summary, content, ... }] }`，与其他 provider 同口径。
+ * 支持 site: / -site: / after: / lang: 等搜索语法（梗站回退的 site: 查询也能用）。
  */
 export function deepSeekSearch(query) {
   return withTimeWindow((signal) => deepSeekSearchRequest(query, signal));
@@ -156,37 +159,46 @@ async function deepSeekSearchRequest(query, signal) {
   const cfg = getConfig().webSearch?.deepseek ?? {};
   const apiKey = String(cfg.apiKey || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!apiKey) throw new Error('DeepSeek 搜索需要 API Key（设置里填，或环境变量 DEEPSEEK_API_KEY）');
-  const baseUrl = String(cfg.baseUrl || 'https://api.deepseek.com/responses').replace(/\/+$/, '');
-  const model = String(cfg.model || 'deepseek-v4-flash');
+  const endpoint = String(cfg.baseUrl || 'https://api.deepseek.com/v1/tools/search').replace(/\/+$/, '');
+  const count = Math.min(50, Math.max(1, Number(cfg.count) || 6));
 
-  const res = await fetch(baseUrl, {
+  const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model,
-      input: `请联网搜索并回答（用中文，简洁、只给结论和关键信息）：${query}`,
-      tools: [{ type: 'web_search' }],
-      stream: false
+      query,
+      count,
+      need_content: cfg.needContent === true
     }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 60000))])
+    signal: AbortSignal.any([signal, AbortSignal.timeout(Math.max(10000, Number(cfg.timeoutMs) || 20000))])
   });
   if (!res.ok) {
     const text = await readTextBounded(res, SEARCH_JSON_MAX_BYTES).catch(() => '');
-    throw new Error(`DeepSeek 搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
+    // 错误体是 OpenAI 兼容格式 { error: { message, code } }；把 message 提出来更好排障
+    let detail = text.slice(0, 300);
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed?.error?.message) detail = String(parsed.error.message).slice(0, 300);
+    } catch { /* 非 JSON 错误体就用原文 */ }
+    throw new Error(`DeepSeek 搜索 HTTP ${res.status}：${detail}`);
   }
   const data = await readSearchJson(res, 'DeepSeek 搜索返回了无法解析的 JSON');
-  const outputText = String(data?.output_text ?? '').trim();
-  if (!outputText) {
-    // 兼容不同字段位置
-    const alt = data?.output?.find?.((item) => item?.type === 'message' && item?.content?.length)
-      ?.content?.map((c) => c?.text ?? '').join('') ?? '';
-    if (!alt) throw new Error('DeepSeek 搜索没有返回文本（可能是模型不支持 web_search 工具）');
-    return { query, results: [{ title: 'DeepSeek 搜索', url: '', snippet: alt }] };
-  }
-  return { query, results: [{ title: 'DeepSeek 搜索', url: '', snippet: outputText }] };
+  const arr = Array.isArray(data?.results) ? data.results : [];
+  const results = arr
+    .filter((r) => r?.url)
+    .map((r) => ({
+      title: String(r.title ?? '').trim() || '（无标题）',
+      url: String(r.url),
+      // summary（600~800 字）是给模型读的，比 snippet（100~200 字、给前端展示）信息量大
+      snippet: String(r.summary ?? r.snippet ?? r.content ?? '').trim()
+    }))
+    .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
+  // 200 + 空数组 = 搜到了 0 条（官方文档："搜索正常结束但没有匹配结果时，返回空数组"）。
+  // 结构化接口与 Bing 那类 HTML 抓取不同：后者空数组意味着验证页/改版，必须抛错。
+  return { query, results };
 }
 
 /** 抓取网页正文（走 safe-fetch 的 SSRF 全防护）。 */
@@ -227,7 +239,6 @@ export async function zhipuSearch(query) {
       snippet: String(r.content ?? r.summary ?? '').trim()
     }))
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
-  if (!results.length) throw new Error('智谱搜索没有返回有效结果（检查 API Key 或搜索引擎编码）');
   return { query, results };
 }
 
@@ -265,7 +276,6 @@ export async function bochaSearch(query) {
       snippet: String(r.snippet ?? r.summary ?? r.content ?? '').trim()
     }))
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
-  if (!results.length) throw new Error('博查搜索没有返回网页结果');
   return { query, results };
 }
 
@@ -312,7 +322,6 @@ export async function baiduSearch(query) {
       snippet: String(r.content ?? r.snippet ?? r.summary ?? '').trim()
     }))
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
-  if (!results.length) throw new Error('百度搜索没有返回有效结果');
   return { query, results };
 }
 
@@ -355,8 +364,8 @@ export async function metasoSearch(query) {
     throw new Error(`秘塔搜索 HTTP ${res.status}：${text.slice(0, 300)}`);
   }
   const data = await readSearchJson(res, '秘塔搜索返回了无法解析的 JSON');
-  // 官方出错时 HTTP 也是 200：body 里带 errCode/errMsg（例如密钥无效是 2005），不认它就会
-  // 被当成"没有返回有效结果"，把真正的原因（Key 错了 / 额度用完）盖掉
+  // 官方出错时 HTTP 也是 200：body 里带 errCode/errMsg（例如密钥无效是 2005）。空结果现在按
+  // "没搜到"正常返回，所以这些错误码是**唯一**能区分"Key 错了/额度用完"的信号，必须认。
   const errCode = Number(data?.errCode);
   if (Number.isFinite(errCode) && errCode !== 0 && errCode !== 200) {
     throw new Error(`秘塔搜索返回错误（${errCode}）：${String(data?.errMsg || data?.message || '未说明原因').slice(0, 200)}`);
@@ -373,7 +382,6 @@ export async function metasoSearch(query) {
       snippet: String(r.snippet ?? r.summary ?? '').trim()
     }))
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
-  if (!results.length) throw new Error('秘塔搜索没有返回有效结果（可能已用完免费额度，或 Key 没有搜索权限）');
   return { query, results };
 }
 
@@ -426,7 +434,6 @@ export async function doubaoSearch(query) {
       snippet: String(r.Summary ?? r.summary ?? r.Content ?? r.content ?? '').trim()
     }))
     .slice(0, Math.max(1, Number(getConfig().webSearch?.maxResults) || 6));
-  if (!results.length) throw new Error('豆包搜索没有返回有效结果（可能搜索额度已用完或 Key 无搜索权限）');
   return { query, results };
 }
 
@@ -585,6 +592,5 @@ export async function tavilySearch(query) {
       url: String(r.url),
       snippet: String(r.content ?? '').trim()
     }));
-  if (!results.length) throw new Error('Tavily 没有返回有效结果');
   return { query, results };
 }

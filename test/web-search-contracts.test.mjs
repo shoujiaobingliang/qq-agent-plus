@@ -51,6 +51,9 @@ test('智谱：{search_engine, search_query, count} → search_result[]（title/
   assert.equal(r.results[0].url, 'https://a.example/');
   assert.equal(r.results[0].snippet, '摘要');
   assert.equal(r.results[1].title, '（无标题）', '空标题要兜底');
+  // 200 + 空数组 = 没搜到，不是失败
+  stub(() => ({ ok: true, json: async () => ({ search_result: [] }) }));
+  assert.deepEqual((await zhipuSearch('q')).results, []);
 });
 
 test('博查：{query, count, freshness, summary} → data.webPages.value[]（name/url/snippet）', async () => {
@@ -72,6 +75,9 @@ test('博查：{query, count, freshness, summary} → data.webPages.value[]（na
   // code≠200 是错误（HTTP 仍是 200）
   stub(() => ({ ok: true, json: async () => ({ code: 403, message: '额度用完' }) }));
   await assert.rejects(() => bochaSearch('q'), /额度用完/);
+  // code=200 + 空网页数组 = 没搜到
+  stub(() => ({ ok: true, json: async () => ({ code: 200, data: { webPages: { value: [] } } }) }));
+  assert.deepEqual((await bochaSearch('q')).results, []);
 });
 
 test('百度千帆：{messages, search_source, resource_type_filter} → references[]；code/error_code 两种错误字段都认', async () => {
@@ -94,23 +100,59 @@ test('百度千帆：{messages, search_source, resource_type_filter} → referen
   await assert.rejects(() => baiduSearch('q'), /216003/);
   stub(() => ({ ok: true, json: async () => ({ error_code: 17, error_msg: '日额度超限' }) }));
   await assert.rejects(() => baiduSearch('q'), /17/);
+  // 空 references = 没搜到
+  stub(() => ({ ok: true, json: async () => ({ references: [] }) }));
+  assert.deepEqual((await baiduSearch('q')).results, []);
 });
 
-test('DeepSeek：Responses API（input + tools:[web_search]）→ output_text；兼容 output[].content[]', async () => {
-  setWebSearch({ provider: 'deepseek', deepseek: { apiKey: 'dk', model: 'deepseek-v4-flash' } });
-  const calls = stub(() => ({ ok: true, json: async () => ({ output_text: '答案' }) }));
+test('DeepSeek：Search API（POST /v1/tools/search）→ results[]（title/url/summary）', async () => {
+  setWebSearch({ provider: 'deepseek', deepseek: { apiKey: 'dk', count: 8 } });
+  const calls = stub(() => ({
+    ok: true,
+    json: async () => ({ results: [
+      { title: 'T', url: 'https://a.example/', snippet: '短摘要', summary: '长摘要' },
+      { title: '', url: 'https://b.example/', snippet: '只有短摘要' },
+      { title: '没有链接', snippet: '应被过滤' }
+    ] })
+  }));
   const r = await deepSeekSearch('q');
-  assert.equal(calls[0].url, 'https://api.deepseek.com/responses');
+  assert.equal(calls[0].url, 'https://api.deepseek.com/v1/tools/search');
   assert.equal(calls[0].headers.authorization, 'Bearer dk');
-  assert.equal(calls[0].body.model, 'deepseek-v4-flash');
-  assert.deepEqual(calls[0].body.tools, [{ type: 'web_search' }]);
-  assert.equal(calls[0].body.stream, false);
-  assert.match(calls[0].body.input, /q/);
-  assert.equal(r.results[0].snippet, '答案');
+  // Search 接口没有 model 参数；need_content 默认 false（summary 已够模型读）
+  assert.deepEqual(calls[0].body, { query: 'q', count: 8, need_content: false });
+  assert.deepEqual(r.results.map((x) => x.url), ['https://a.example/', 'https://b.example/']);
+  assert.equal(r.results[0].snippet, '长摘要', '优先用 summary（给模型读的长摘要）');
+  assert.equal(r.results[1].snippet, '只有短摘要');
+  assert.equal(r.results[1].title, '（无标题）');
 
-  stub(() => ({ ok: true, json: async () => ({ output: [{ type: 'message', content: [{ text: '分块' }, { text: '文本' }] }] }) }));
-  const alt = await deepSeekSearch('q');
-  assert.equal(alt.results[0].snippet, '分块文本', 'output[].content[].text 拼接');
+  // 搜索正常但没匹配：官方文档明确"返回空数组" = 搜到 0 条，照常返回空结果，
+  // 由工具层告诉模型"没搜到，换个关键词"（不是"搜索失败"）
+  stub(() => ({ ok: true, json: async () => ({ results: [] }) }));
+  const empty = await deepSeekSearch('q');
+  assert.deepEqual(empty.results, []);
+
+  // OpenAI 兼容错误体：把 error.message 提出来（402 余额不足是常见故障）
+  stub(() => ({
+    ok: false,
+    status: 402,
+    text: async () => JSON.stringify({ error: { message: 'Insufficient balance', param: null, code: 'invalid_request_error' } })
+  }));
+  await assert.rejects(() => deepSeekSearch('q'), /402.*Insufficient balance/);
+});
+
+test('DeepSeek：旧 Responses API 地址会被迁移到 Search 接口', async () => {
+  const { migrateDeepSeekSearchBaseUrl } = await import('../src/core/config-legacy.js');
+  const migrated = migrateDeepSeekSearchBaseUrl({
+    deepseek: { apiKey: 'k', baseUrl: 'https://api.deepseek.com/responses', model: 'deepseek-v4-flash' }
+  });
+  assert.equal(migrated.deepseek.baseUrl, 'https://api.deepseek.com/v1/tools/search');
+  assert.equal(migrated.deepseek.model, undefined, 'Search 接口没有 model 参数，迁移时去掉');
+  assert.equal(migrated.deepseek.apiKey, 'k', 'Key 原样保留');
+  // 用户自填的代理地址不动
+  const custom = migrateDeepSeekSearchBaseUrl({ deepseek: { baseUrl: 'https://my-proxy.example/deepseek' } });
+  assert.equal(custom.deepseek.baseUrl, 'https://my-proxy.example/deepseek');
+  assert.deepEqual(migrateDeepSeekSearchBaseUrl(undefined), undefined);
+  assert.deepEqual(migrateDeepSeekSearchBaseUrl({}), {});
 });
 
 test('Bing：HTML 解析出 b_algo 块；命中验证页（0 块）要抛错而不是给空列表', async () => {

@@ -4,6 +4,21 @@
 [`docs/CHANGES.md`](docs/CHANGES.md)，发布说明以
 [GitHub Releases](https://github.com/sakurawwwxh/qq-agent-plus/releases) 为准。
 
+## 未发布
+
+**修复**
+
+- **DeepSeek 搜索改用独立 Search 接口**：原来的实现走 Responses API（`/responses` +
+  `tools:[web_search]`），只能拿到模型生成的整段回答，没有 URL/标题/摘要，搜完也没法
+  再用 `web_fetch` 读正文。现改为 `POST https://api.deepseek.com/v1/tools/search`，
+  返回结构化结果（标题/链接/摘要，优先使用给模型阅读的长摘要 `summary`），与其他搜索
+  源同口径；旧配置里的 Responses 地址会在读盘时自动迁移，用户自填的代理地址不动。
+- 设置 → 搜索服务的 DeepSeek 一栏把「模型」换成「返回条数」（1~50）。
+- **空搜索结果不再算失败**：结构化搜索接口（DeepSeek/智谱/博查/百度/秘塔/豆包/Tavily）
+  返回 HTTP 200 + 空结果时，按「没搜到」正常返回，由工具层告诉模型换个关键词；
+  此前统一抛错，模型会收到「搜索失败」并可能反复重试。Bing 等 HTML 抓取类仍抛错
+  （空数组意味着验证页或页面改版，不是没结果）。
+
 ## 0.9.5（2026-11-02）
 
 **新增**

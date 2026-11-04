@@ -60,8 +60,8 @@ test('tavilySearch：count 夹到 ≤10；Key 回退环境变量 TAVILY_API_KEY'
     return { ok: true, json: async () => ({ results: [] }) };
   };
   const { tavilySearch } = await import('../src/llm/web-search.js');
-  // 空结果按"搜索失败"口径抛错（与其他 provider 一致），但请求体已经发出——夹取逻辑照样可验。
-  await assert.rejects(() => tavilySearch('q'), /没有返回有效结果/);
+  // 空结果按"没搜到"正常返回，但请求体已经发出——夹取逻辑照样可验。
+  assert.deepEqual((await tavilySearch('q')).results, []);
   assert.equal(captured.body.max_results, 10);
 
   setWebSearch({ provider: 'tavily', tavily: { apiKey: '' } });

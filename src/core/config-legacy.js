@@ -121,9 +121,10 @@ export const DEFAULT_CONFIG = {
     provider: 'bing',
     deepseek: {
       apiKey: '',                     // 留空时回退环境变量 DEEPSEEK_API_KEY
-      baseUrl: 'https://api.deepseek.com/responses',
-      model: 'deepseek-v4-flash',     // Responses API 模型名：deepseek-v4-flash / deepseek-v4-pro
-      timeoutMs: 60000
+      baseUrl: 'https://api.deepseek.com/v1/tools/search',   // 独立 Search 接口（响应里带 title/url/summary）
+      count: 6,                       // 返回条数 1~50
+      needContent: false,             // true 时额外返回网页正文（content），一般用不到
+      timeoutMs: 20000
     },
     zhipu: {
       apiKey: '',                     // 留空时回退环境变量 ZHIPU_API_KEY
@@ -1220,6 +1221,22 @@ export function migrateMetasoBaseUrl(webSearch) {
   return { ...webSearch, metaso: { ...metaso, baseUrl: DEFAULT_CONFIG.webSearch.metaso.baseUrl } };
 }
 
+/**
+ * DeepSeek 搜索地址搬家（2026-11）：旧实现走 Responses API（`/responses` + `tools:[web_search]`），
+ * 只拿得到模型生成的整段回答、没有结构化来源；官方上线独立 Search 接口后改走 `/v1/tools/search`。
+ * 旧默认值已经写进装过的实例的 config.json，只改出厂默认救不了它们。
+ * 只搬"正好等于旧出厂值"的，用户自填的代理/镜像地址不动。
+ */
+const LEGACY_DEEPSEEK_SEARCH_BASE_URL = 'https://api.deepseek.com/responses';
+export function migrateDeepSeekSearchBaseUrl(webSearch) {
+  if (!webSearch || typeof webSearch !== 'object') return webSearch;
+  const deepseek = webSearch.deepseek;
+  if (!deepseek || typeof deepseek !== 'object' || deepseek.baseUrl !== LEGACY_DEEPSEEK_SEARCH_BASE_URL) return webSearch;
+  const { model, ...rest } = deepseek;
+  // model 只对 Responses API 有意义，Search 接口没有这个参数；留着也无害，但别让设置页以为它还在用
+  return { ...webSearch, deepseek: { ...rest, baseUrl: DEFAULT_CONFIG.webSearch.deepseek.baseUrl } };
+}
+
 const PERSONA_CHAT_KEY_RE = /^(?:group|private):\d+$/;
 const PERSONA_OVERRIDE_TEXT_CAP = 20000;
 const PERSONA_OVERRIDE_RULE_CAP = 4000;
@@ -1459,6 +1476,8 @@ function migrateConfig(parsed) {
   if (out.plugins) out.plugins = migratePluginIndexUrl(out.plugins);
   // 秘塔搜索地址搬家（2026-10-17 issue #38）：旧出厂值是 /api/open/v1/search（404）
   if (out.webSearch) out.webSearch = migrateMetasoBaseUrl(out.webSearch);
+  // DeepSeek 搜索改用独立 Search 接口（2026-11）：旧出厂值是 Responses API 地址
+  if (out.webSearch) out.webSearch = migrateDeepSeekSearchBaseUrl(out.webSearch);
   if (out.server) {
     delete out.server.autoStart;
     delete out.server.closeToTray;

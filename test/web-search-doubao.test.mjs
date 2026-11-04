@@ -92,11 +92,11 @@ test('doubaoSearch：HTTP 200 + ResponseMetadata.Error 时抛出真实错误码�
   await assert.rejects(() => doubaoSearch('x'), /豆包搜索失败（未知错误码）：boom/);
 });
 
-test('doubaoSearch：空结果报额度/权限提示', async () => {
+test('doubaoSearch：空结果正常返回空列表（200 + 空数组 = 没搜到，不是失败）', async () => {
   withKey();
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ Result: { WebResults: [] } }) });
   const { doubaoSearch } = await import('../src/llm/web-search.js');
-  await assert.rejects(() => doubaoSearch('x'), /没有返回有效结果/);
+  assert.deepEqual((await doubaoSearch('x')).results, []);
 });
 
 test('webSearch() 路由：provider=doubao 走豆包', async () => {

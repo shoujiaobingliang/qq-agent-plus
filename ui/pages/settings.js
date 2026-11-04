@@ -458,7 +458,7 @@ function renderSearchSection(c) {
           <input type="password" id="cfg-ds-searchkey" value="${esc(c.webSearch?.deepseek?.hasApiKey ? '******' : '')}" placeholder="输入新 Key 可替换；留空保持不变" autocomplete="new-password" style="flex:1" />
           <button class="btn btn-small" id="cfg-ds-searchkey-toggle" type="button">显示</button>
         </div></div>
-      <div class="field"><label>模型</label><input type="text" id="cfg-ds-searchmodel" value="${esc(c.webSearch?.deepseek?.model || 'deepseek-chat')}" /></div>
+      <div class="field"><label>返回条数</label><input type="number" id="cfg-ds-searchcount" min="1" max="50" value="${esc(String(c.webSearch?.deepseek?.count ?? 6))}" /></div>
     </div>
     <div class="field-row" id="zhipu-search-fields" style="${prov === 'zhipu' ? '' : 'display:none'}">
       <div class="field"><label>智谱 API Key（留空用环境变量 ZHIPU_API_KEY）</label>
