@@ -288,6 +288,36 @@ docker_call() {
   fi
 }
 
+# ffmpeg 是**建议安装、缺失不致命**的依赖（2026-11-06 内存复盘）：
+# 群友发的图会先降采样成 300KB 左右的 JPEG 再交给视觉模型；没有 ffmpeg 就只能把原图
+# base64 直传，一次最多 6 张 × 12MiB ≈ 96MiB 请求体 —— 在 1.6G 内存的实例上会触发
+# 持续读盘（与 10-26 那次 96MB 视频缓冲同型）。所以这里尽力装，装不上只告警。
+# 注意：deploy.sh 那边也会检查一次，但只告警 —— 它要被自动更新以服务账号非交互调用。
+ensure_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1; then
+    printf 'ffmpeg: %s\n' "$(command -v ffmpeg)"
+    return 0
+  fi
+  step 'Installing ffmpeg'
+  local installed=false
+  if command -v apt-get >/dev/null 2>&1; then
+    run_root apt-get install -y ffmpeg && installed=true
+  elif command -v dnf >/dev/null 2>&1; then
+    # RHEL 系的 ffmpeg 常在 rpmfusion/EPEL 里，装不上就退回 ffmpeg-free（Fedora 自带）
+    run_root dnf install -y ffmpeg || run_root dnf install -y ffmpeg-free
+    command -v ffmpeg >/dev/null 2>&1 && installed=true
+  elif command -v pacman >/dev/null 2>&1; then
+    run_root pacman -S --noconfirm ffmpeg && installed=true
+  fi
+  if [[ "$installed" == true ]] && command -v ffmpeg >/dev/null 2>&1; then
+    printf 'ffmpeg installed: %s\n' "$(command -v ffmpeg)"
+    return 0
+  fi
+  printf '%s\n' 'Warning: could not install ffmpeg. Images will be sent unmodified, which can cause' \
+    '         memory spikes on low-RAM hosts. Install it manually later (apt/dnf/pacman install ffmpeg).' >&2
+  return 0
+}
+
 wait_http() {
   local url="$1" attempts="${2:-60}"
   for ((i = 0; i < attempts; i++)); do
@@ -807,6 +837,7 @@ if [[ "$PULLED" != true ]]; then
 fi
 
 step 'Installing QQ Agent'
+ensure_ffmpeg
 export QQ_AGENT_CONSOLE_TOKEN="$AGENT_TOKEN"
 export QQ_AGENT_ONEBOT_TOKEN="$ONEBOT_TOKEN"
 export QQ_AGENT_ONEBOT_HTTP_TOKEN="$ONEBOT_TOKEN"

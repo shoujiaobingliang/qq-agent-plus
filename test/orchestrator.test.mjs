@@ -9,6 +9,7 @@ process.env.QQ_AGENT_DATA_DIR = root;
 const {
   Orchestrator,
   estimateNextPromptTokens,
+  payloadCharsOf,
   followUpPlan,
   proactiveProbability,
   randomWakeDelay,
@@ -103,6 +104,44 @@ describe('Orchestrator', () => {
     assert.ok(result.estimateChars < 2000);
     assert.equal(result.imageCount, 1);
     assert.ok(result.estimatedPromptTokens < 10000);
+  });
+
+  it('audit snapshot shares the non-image parts instead of deep-cloning the payload', () => {
+    // 关键点：结构化克隆会把 12MB base64 整个复制一份（实测瞬时 +142MB）。
+    const image = `data:image/png;base64,${'A'.repeat(1024)}`;
+    const textPart = { type: 'text', text: '看图' };
+    const toolCall = { name: 'x', args: { a: 1 } };
+    const messages = [
+      { role: 'system', content: 'system' },
+      { role: 'tool', tool_call_id: 't', content: [textPart, { type: 'image_url', image_url: { url: image } }], toolCall }
+    ];
+    const audit = estimateNextPromptTokens({ messages, tools: [] }).auditMessages;
+    // 非图片 part 共享引用（浅拷贝），证明没有走 structuredClone
+    assert.equal(audit[1].content[0], textPart, '文本 part 应直接共享引用');
+    assert.equal(audit[1].toolCall, toolCall, '其它字段应直接共享引用');
+    // 图片 part 必须是新的、且不含 base64
+    assert.notEqual(audit[1].content[1], messages[1].content[1]);
+    assert.doesNotMatch(audit[1].content[1].image_url.url, /base64/);
+    // 原消息未被改写
+    assert.equal(messages[1].content[1].image_url.url, image);
+  });
+
+  it('payloadCharsOf matches the real serialized length exactly, without serializing image bytes', () => {
+    const images = ['data:image/png;base64,' + 'A'.repeat(50_000), 'data:image/jpeg;base64,' + 'B'.repeat(120_000)];
+    const messages = [
+      { role: 'system', content: '系统提示' },
+      { role: 'user', content: [
+        { type: 'text', text: '看图' },
+        ...images.map((url) => ({ type: 'image_url', image_url: { url } }))
+      ] },
+      // 带转义字符的正文也要算准
+      { role: 'assistant', content: '含"引号"、换行\n和\\反斜杠' }
+    ];
+    const tools = [{ type: 'function', function: { name: 'finish', parameters: {} } }];
+    assert.equal(payloadCharsOf(messages, tools), JSON.stringify({ messages, tools }).length);
+    // 没有内联图片时与原实现完全一致
+    const plain = [{ role: 'user', content: 'hello' }];
+    assert.equal(payloadCharsOf(plain, tools), JSON.stringify({ messages: plain, tools }).length);
   });
 
   function fixture(t, extra = {}) {

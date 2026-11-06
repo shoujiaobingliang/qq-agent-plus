@@ -219,12 +219,25 @@ function imagePartCount(messages) {
   ), 0);
 }
 
-function modelMessagesForAudit(messages) {
-  return structuredClone(messages || []).map((message) => {
-    if (!Array.isArray(message?.content)) return message;
-    message.content = message.content.map((part) => {
+/**
+ * 把 messages 里的内联图片（base64 data URL）换成占位符。
+ *
+ * **先替换、再克隆**：原来的实现是 structuredClone 整包再逐条替换，克隆期间内存里同时
+ * 存在原始 base64 和它的完整副本 —— 6 张 12MB 图实测瞬时多占 142MB（1.6G 机器上足以
+ * 把 QQ 的 mmap 页踢出去、触发读盘风暴）。这里只做浅拷贝，非图片字段直接共享引用，
+ * 图片 part 换成占位字符串，克隆量从"整包字节数"降到"对象个数"。
+ *
+ * 返回值是**新对象**，调用方改动不会影响入参（与原 structuredClone 语义一致的部分：
+ * 图片 part 是新建的；其余 part/消息是共享的，调用方本来也只读）。
+ */
+function stripInlineImages(messages) {
+  return (messages || []).map((message) => {
+    if (!message || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map((part) => {
       const url = String(part?.image_url?.url || '');
       if (part?.type !== 'image_url' || !url.startsWith('data:')) return part;
+      changed = true;
       const mime = /^data:([^;,]+)/.exec(url)?.[1] || 'application/octet-stream';
       return {
         ...part,
@@ -234,8 +247,52 @@ function modelMessagesForAudit(messages) {
         }
       };
     });
-    return message;
+    return changed ? { ...message, content } : message;
   });
+}
+
+/**
+ * 模型消息的审计快照：内联图片换成占位符（正文不落盘、不进日志）。
+ * 与 structuredClone 的区别见 stripInlineImages 的注释。
+ */
+function modelMessagesForAudit(messages) {
+  return stripInlineImages(messages);
+}
+
+/**
+ * 请求体字符数（只用来给 UI 显示"请求体多大"，以及估算比例）。
+ *
+ * 原实现直接把含 base64 的 messages 整个 JSON.stringify —— 6 张 12MB 图要序列化出
+ * 96MB 字符串，瞬时多占 192MB，而且每轮都要做一次。这里先把内联图片换成占位符再
+ * stringify（瞬时几百字节），再把**图片被占位符替换掉的字符数**补回去，结果与
+ * 真实序列化长度完全一致（实测误差 0，见 test/orchestrator.test.mjs）。
+ */
+export function payloadCharsOf(messages, tools) {
+  let inlineChars = 0;
+  const lean = (messages || []).map((message) => {
+    if (!message || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map((part) => {
+      const url = String(part?.image_url?.url || '');
+      if (part?.type !== 'image_url' || !url.startsWith('data:')) return part;
+      changed = true;
+      inlineChars += escapedLength(url);
+      return { ...part, image_url: { ...part.image_url, url: '' } };
+    });
+    return changed ? { ...message, content } : message;
+  });
+  return JSON.stringify({ messages: lean, tools }).length + inlineChars;
+}
+
+// JSON 转义后需要多占字符的只有这几个（\u0000-\u001f、`"`、`\`）。
+// base64/data URL 一个都不含 —— 所以热路径上直接返回 length，绝不能对整串做
+// JSON.stringify：那会为 16MB 的 base64 再分配一份 16MB 字符串，等于把省下的内存又还回去。
+const NEEDS_ESCAPE = /["\\\u0000-\u001f]/;
+
+/** 字符串在 JSON 里的字符数（不含两侧引号）。 */
+export function escapedLength(value) {
+  const text = String(value);
+  return NEEDS_ESCAPE.test(text) ? JSON.stringify(text).length - 2 : text.length;
 }
 
 export function estimateNextPromptTokens({
@@ -2745,10 +2802,8 @@ export class Orchestrator {
       signal.throwIfAborted();
       if (this.aborted || !canRun(chatKey)) throw new Error('Run cancelled');
       const maxRunTokens = runLimits.maxRunTokens;
-      const requestPayloadChars = JSON.stringify({
-        messages,
-        tools: openAiTools
-      }).length;
+      // 只算长度、不真的序列化含 base64 的请求体（见 payloadCharsOf 注释）
+      const requestPayloadChars = payloadCharsOf(messages, openAiTools);
       const previousCall = session.callUsage?.at(-1);
       const estimate = estimateNextPromptTokens({
         messages,

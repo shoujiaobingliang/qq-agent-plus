@@ -580,6 +580,17 @@ done
 [[ "$HEALTHY" == true ]] || { printf 'Service health check failed\n' >&2; rollback_deployment; exit 1; }
 trap - ERR INT TERM
 clear_deploy_marker
+
+# ── ffmpeg：群友发图时降采样的必需外部命令（2026-11-06 内存复盘）────────────────
+# 缺了它，视觉链路会退回"原图直接 base64"：一次最多 6 张 × 12MiB = 96MiB 请求体，
+# 在 1.6G 内存的机器上足以把 QQ 的 mmap 页踢出、触发持续读盘（10-26 那次的同型事故）。
+# 这里**只检查、不安装**：deploy.sh 会被自动更新以服务账号非交互调用，没有 root，
+# 也绝不能因为一个可选依赖让一次无人值守的部署失败。安装放在 deploy-all.sh（有 root 且交互）。
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  printf 'Warning: ffmpeg not found — large images will be sent unmodified (memory spike risk).\n' >&2
+  printf '         Install it: Debian/Ubuntu "apt install -y ffmpeg" / RHEL "dnf install -y ffmpeg" / Arch "pacman -S ffmpeg"\n' >&2
+fi
+
 # 每份快照是整个安装目录（含 node_modules），而自动更新会无人值守地反复部署：
 # 不清理会把数据盘慢慢填满。保留最近的 3 份。
 if [[ "${QQ_AGENT_SOURCE_REVISION:-}" =~ ^[0-9a-f]{40}$ ]]; then

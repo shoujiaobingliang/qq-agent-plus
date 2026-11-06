@@ -452,3 +452,31 @@ test('deploy.sh 调用 verify-deployment-target.mjs（C7 强校验真实接入�
   assert.match(sh, /verify-deployment-target[.]mjs/, 'deploy.sh 应调用校验脚本');
   assert.match(sh, /DEPLOY_REPOSITORY/, 'deploy.sh 应支持 --repository 透传');
 });
+
+// 2026-11-06 内存复盘：缺 ffmpeg 时视觉链路会把原图直传（一次最多 6×12MiB≈96MiB
+// 请求体），在 1.6G 内存的实例上足以触发持续读盘。两个脚本的职责必须分开：
+//   deploy-all.sh（有 root、交互）→ 尽力安装；
+//   deploy.sh（自动更新以服务账号非交互调用，拿不到 root）→ 只检查 + 告警，绝不失败。
+test('ffmpeg：deploy-all 尽力安装，deploy.sh 只检查不阻断', () => {
+  const all = fs.readFileSync(path.join(repo, 'deploy-all.sh'), 'utf8');
+  const one = fs.readFileSync(path.join(repo, 'deploy.sh'), 'utf8');
+
+  // deploy.sh：只告警，exit 码不受影响
+  assert.match(one, /command -v ffmpeg >\/dev\/null 2>&1/, 'deploy.sh 要探测 ffmpeg');
+  assert.match(one, /Warning: ffmpeg not found/, '缺 ffmpeg 要给出可见警告');
+  assert.doesNotMatch(
+    one,
+    /command -v ffmpeg >\/dev\/null 2>&1\s*\|\|\s*\{[^}]*exit 1/,
+    'deploy.sh 不能因为缺 ffmpeg 退出非 0：自动更新会把它当成部署失败并触发自停'
+  );
+  assert.doesNotMatch(one, /apt-get install[^\n]*ffmpeg/, 'deploy.sh 没有 root，不允许装包');
+
+  // deploy-all.sh：真正尝试安装，三个包管理器都要覆盖
+  assert.match(all, /ensure_ffmpeg\(\)/);
+  assert.match(all, /apt-get install -y ffmpeg/);
+  assert.match(all, /dnf install -y ffmpeg/, 'RHEL 系要覆盖');
+  assert.match(all, /pacman -S --noconfirm ffmpeg/, 'Arch 系要覆盖');
+  assert.match(all, /^\s*ensure_ffmpeg\s*$/m, '安装步骤要真的被调用，不能只有定义');
+  // 装不上不能让整个部署失败
+  assert.match(all, /could not install ffmpeg/);
+});
